@@ -70,6 +70,9 @@ sealed interface OcrOutcome {
     data class Failure(val reason: OcrFailureReason, val detail: String? = null) : OcrOutcome
 }
 
-interface ReceiptOcrEngine : Closeable {
+interface OcrEngine : Closeable {
     suspend fun recognize(documentId: String, pages: List<OcrInputPage>): OcrOutcome
 }
+
+/** Source-compatible legacy name; the engine now serves every OCR workflow. */
+typealias ReceiptOcrEngine = OcrEngine

@@ -13,7 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 
-class MlKitReceiptOcrEngine : ReceiptOcrEngine {
+class MlKitDocumentOcrEngine : OcrEngine {
     private val recognizer = TextRecognition.getClient(
         KoreanTextRecognizerOptions.Builder().build(),
     )
@@ -122,3 +122,6 @@ class MlKitReceiptOcrEngine : ReceiptOcrEngine {
         const val ENGINE_VERSION = "16.0.1"
     }
 }
+
+/** Source-compatible legacy name retained for existing integrations. */
+typealias MlKitReceiptOcrEngine = MlKitDocumentOcrEngine

@@ -6,6 +6,8 @@ import java.util.UUID
 object StableIds {
     fun newDocumentId(): String = "receipt_${UUID.randomUUID()}"
 
+    fun newOcrDocumentId(): String = "ocr_${UUID.randomUUID()}"
+
     fun pageId(documentId: String, pageIndex: Int, sha256: String): String =
         "page_${sha256("$documentId|$pageIndex|$sha256").take(20)}"
 

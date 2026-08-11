@@ -7,6 +7,9 @@ import android.content.IntentSender
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
+import com.pricetrace.receiptocr.fitness.NutritionAuthOutcome
+import com.pricetrace.receiptocr.fitness.NutritionGatewayFailure
+import com.pricetrace.receiptocr.fitness.NutritionPublishOutcome
 import com.pricetrace.receiptocr.gemini.ReceiptCorrectionEvidenceCropper
 import com.pricetrace.receiptscanner.capture.CaptureOutcome
 import com.pricetrace.receiptscanner.capture.ScannerLaunchPreparation
@@ -36,15 +39,23 @@ import com.pricetrace.receiptscanner.domain.withParserVersion
 import com.pricetrace.receiptscanner.export.OcrDebugJson
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.export.ReviewAccuracyReportJson
-import com.pricetrace.receiptscanner.ocr.MlKitReceiptOcrEngine
+import com.pricetrace.receiptscanner.ocr.MlKitDocumentOcrEngine
 import com.pricetrace.receiptscanner.ocr.OcrDocument
 import com.pricetrace.receiptscanner.ocr.OcrInputPage
 import com.pricetrace.receiptscanner.ocr.OcrOutcome
+import com.pricetrace.receiptscanner.nutrition.NutritionDraftStatus
+import com.pricetrace.receiptscanner.nutrition.NutritionField
+import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
+import com.pricetrace.receiptscanner.nutrition.NutritionLabelJson
+import com.pricetrace.receiptscanner.nutrition.NutritionLabelValidator
+import com.pricetrace.receiptscanner.nutrition.NutritionUnit
 import com.pricetrace.receiptscanner.review.ReceiptReviewController
 import com.pricetrace.receiptscanner.review.toFieldCorrection
 import com.pricetrace.receiptscanner.storage.ReceiptSession
+import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -71,16 +82,20 @@ enum class AppScreen {
     AI_CORRECTION,
     RECONCILIATION,
     JSON_PREVIEW,
+    NUTRITION_REVIEW,
     EVALUATION,
 }
 
 data class ReceiptAppUiState(
     val screen: AppScreen = AppScreen.SESSION_LIST,
+    val selectedWorkflow: OcrWorkflowType = OcrWorkflowType.PRICE_TRACE_RECEIPT,
     val isPreparingScanner: Boolean = false,
     val isImportingPages: Boolean = false,
     val isProcessingOcr: Boolean = false,
     val isRequestingAiCorrections: Boolean = false,
     val isExporting: Boolean = false,
+    val isNutritionSigningIn: Boolean = false,
+    val isNutritionPublishing: Boolean = false,
     val message: String? = null,
     val possibleDuplicatePageIds: List<String> = emptyList(),
     val currentDocumentId: String? = null,
@@ -106,6 +121,11 @@ data class ReceiptAppUiState(
     val reviewedAt: String? = null,
     val accuracySummary: ReviewAccuracySummary? = null,
     val isBuildingAccuracyReport: Boolean = false,
+    val nutritionDraft: NutritionLabelDraft? = null,
+    val nutritionValidationErrors: List<String> = emptyList(),
+    val nutritionSupabaseUrl: String = "",
+    val isNutritionPublishableKeyConfigured: Boolean = false,
+    val nutritionSignedInEmail: String? = null,
 )
 
 sealed interface ReceiptUiEvent {
@@ -124,10 +144,13 @@ class ReceiptAppViewModel(
     private val fileStore = container.fileStore
     private val ocrEngine = container.createOcrEngine()
     private val parser = container.parser
+    private val nutritionParser = container.nutritionParser
     private val exportService = container.exportService
     private val publisher = container.publisher
     private val geminiApiKeyStore = container.geminiApiKeyStore
     private val correctionSuggester = container.correctionSuggester
+    private val nutritionSupabaseStore = container.nutritionSupabaseStore
+    private val nutritionGateway = container.nutritionGateway
 
     private val mutableUiState = MutableStateFlow(ReceiptAppUiState())
     val uiState: StateFlow<ReceiptAppUiState> = mutableUiState.asStateFlow()
@@ -150,12 +173,17 @@ class ReceiptAppViewModel(
     private val persistenceMutex = Mutex()
     private val persistedEditIds = mutableSetOf<String>()
     private var reviewController: ReceiptReviewController? = null
+    private var nutritionPersistenceJob: Job? = null
     private var pendingDocumentId: String?
         get() = savedStateHandle[PENDING_DOCUMENT_ID]
         set(value) { savedStateHandle[PENDING_DOCUMENT_ID] = value }
     private var pendingSessionWasNew: Boolean
         get() = savedStateHandle[PENDING_SESSION_WAS_NEW] ?: false
         set(value) { savedStateHandle[PENDING_SESSION_WAS_NEW] = value }
+
+    init {
+        refreshNutritionConnectionState()
+    }
 
     fun prepareScanner(
         activity: Activity,
@@ -167,8 +195,8 @@ class ReceiptAppViewModel(
         viewModelScope.launch {
             mutableUiState.value = state.copy(isPreparingScanner = true, message = null)
             val existingDocumentId = state.currentDocumentId.takeIf { appendToCurrent }
-            val documentId = existingDocumentId ?: StableIds.newDocumentId().also {
-                repository.createSession(it)
+            val documentId = existingDocumentId ?: StableIds.newOcrDocumentId().also {
+                repository.createSession(it, state.selectedWorkflow)
             }
             pendingDocumentId = documentId
             pendingSessionWasNew = existingDocumentId == null
@@ -191,7 +219,10 @@ class ReceiptAppViewModel(
                             message = captureFailureMessage(preparation.reason.wireValue),
                         )
                     } else {
-                        ReceiptAppUiState(message = captureFailureMessage(preparation.reason.wireValue))
+                        homeState(
+                            workflow = state.selectedWorkflow,
+                            message = captureFailureMessage(preparation.reason.wireValue),
+                        )
                     }
                     clearPendingCapture()
                 }
@@ -208,8 +239,11 @@ class ReceiptAppViewModel(
             )
             when (val outcome = captureProvider.handleActivityResult(documentId, resultCode, data)) {
                 is CaptureOutcome.Success -> {
+                    val workflow = repository.getSession(documentId)?.workflowType
+                        ?: mutableUiState.value.selectedWorkflow
                     selectedDocumentId.value = documentId
-                    mutableUiState.value = ReceiptAppUiState(
+                    mutableUiState.value = homeState(
+                        workflow = workflow,
                         screen = AppScreen.IMAGE_CONFIRM,
                         currentDocumentId = documentId,
                         message = "${outcome.pages.size}개 페이지를 앱 전용 저장소에 보존했습니다.",
@@ -219,7 +253,10 @@ class ReceiptAppViewModel(
                 is CaptureOutcome.Failure -> {
                     cleanEmptyPendingSessionIfNeeded()
                     mutableUiState.value = if (pendingSessionWasNew) {
-                        ReceiptAppUiState(message = captureFailureMessage(outcome.reason.wireValue))
+                        homeState(
+                            workflow = mutableUiState.value.selectedWorkflow,
+                            message = captureFailureMessage(outcome.reason.wireValue),
+                        )
                     } else {
                         mutableUiState.value.copy(
                             screen = AppScreen.IMAGE_CONFIRM,
@@ -234,20 +271,50 @@ class ReceiptAppViewModel(
     }
 
     fun selectSession(documentId: String) {
+        nutritionPersistenceJob?.cancel()
         viewModelScope.launch {
-            mutableUiState.value = ReceiptAppUiState(
-                screen = AppScreen.IMAGE_CONFIRM,
-                currentDocumentId = documentId,
-                message = "저장된 검수 세션을 불러오는 중입니다.",
-            )
             selectedDocumentId.value = documentId
             val session = repository.getSession(documentId)
             val pages = repository.getPages(documentId)
             if (session == null || pages.isEmpty()) {
-                mutableUiState.value = mutableUiState.value.copy(
-                    screen = AppScreen.SESSION_LIST,
+                mutableUiState.value = homeState(
+                    workflow = session?.workflowType ?: mutableUiState.value.selectedWorkflow,
                     message = "세션 메타데이터 또는 원본 페이지가 없어 복원할 수 없습니다.",
                 )
+                return@launch
+            }
+            mutableUiState.value = homeState(
+                workflow = session.workflowType,
+                screen = AppScreen.IMAGE_CONFIRM,
+                currentDocumentId = documentId,
+                message = "저장된 검수 세션을 불러오는 중입니다.",
+            )
+
+            val restoredOcr = restoreOcrDocument(documentId)
+            if (session.workflowType == OcrWorkflowType.FITNESS_NUTRITION) {
+                reviewController = null
+                persistedEditIds.clear()
+                val draft = session.workflowDraftStorageKey?.let { storageKey ->
+                    try {
+                        NutritionLabelJson.decode(fileStore.readBytes(storageKey).toString(Charsets.UTF_8))
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                mutableUiState.value = if (draft == null) {
+                    mutableUiState.value.copy(
+                        screen = AppScreen.IMAGE_CONFIRM,
+                        message = "저장된 상품 이미지를 복원했습니다. OCR을 시작할 수 있습니다.",
+                    )
+                } else {
+                    nutritionState(
+                        draft = draft,
+                        ocrDocument = restoredOcr,
+                        message = "Fitness 영양성분 검수 초안을 복원했습니다.",
+                    )
+                }
                 return@launch
             }
 
@@ -263,9 +330,7 @@ class ReceiptAppViewModel(
             if (receipt == null) {
                 reviewController = null
                 persistedEditIds.clear()
-                mutableUiState.value = ReceiptAppUiState(
-                    screen = AppScreen.IMAGE_CONFIRM,
-                    currentDocumentId = documentId,
+                mutableUiState.value = mutableUiState.value.copy(
                     message = "저장된 원본 이미지를 복원했습니다. OCR을 시작할 수 있습니다.",
                 )
                 return@launch
@@ -275,14 +340,6 @@ class ReceiptAppViewModel(
             persistedEditIds.clear()
             persistedEditIds += edits.map { it.id }
             reviewController = ReceiptReviewController(receipt, edits)
-            val restoredOcr = try {
-                val key = "$documentId/ocr/ocr-debug.json"
-                OcrDebugJson.decode(fileStore.readBytes(key).toString(Charsets.UTF_8))
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                null
-            }
             val storedParserVersion = receipt.document.source.parserVersion()
             val restoreMessage = if (storedParserVersion == parser.version) {
                 "검수 세션과 수정 이력을 복원했습니다."
@@ -302,10 +359,14 @@ class ReceiptAppViewModel(
     }
 
     fun deleteSession(documentId: String) {
+        nutritionPersistenceJob?.cancel()
         viewModelScope.launch {
+            val workflow = repository.getSession(documentId)?.workflowType
+                ?: mutableUiState.value.selectedWorkflow
             val result = repository.deleteSession(documentId)
             if (selectedDocumentId.value == documentId) selectedDocumentId.value = null
-            mutableUiState.value = ReceiptAppUiState(
+            mutableUiState.value = homeState(
+                workflow = workflow,
                 message = if (result.isComplete) {
                     "세션 metadata와 앱 전용 파일을 삭제했습니다."
                 } else {
@@ -344,46 +405,12 @@ class ReceiptAppViewModel(
             when (outcome) {
                 is OcrOutcome.Success -> {
                     try {
-                        val parsedReceipt = parser.parse(outcome.document)
-                        val parsedDraft = parsedReceipt.toReceiptV2(includePrivateRawText = true)
-                        val receipt = parsedDraft.copy(
-                            document = parsedDraft.document.copy(
-                                source = parsedDraft.document.source.withParserVersion(parser.version),
-                            ),
-                        )
-                        fileStore.writeText(
-                            "$documentId/ocr/ocr-debug.json",
-                            OcrDebugJson.encode(outcome.document, parsedReceipt),
-                        )
-                        val draftKey = "$documentId/draft/receipt.json"
-                        fileStore.writeText(draftKey, ReceiptV2Json.encodeCanonical(receipt))
                         val session = requireNotNull(repository.getSession(documentId))
-                        val draftReadyAt = OffsetDateTime.now().toString()
-                        repository.updateSession(
-                            session.copy(
-                                updatedAt = draftReadyAt,
-                                ocrStatus = "parsed",
-                                reviewStatus = "draft",
-                                lastError = null,
-                                merchantName = receipt.merchant.name,
-                                issuedOn = receipt.document.issuedOn,
-                                grandTotalAmountMinor = receipt.totals.grandTotalAmountMinor,
-                                receiptStorageKey = draftKey,
-                                reviewedAt = null,
-                                ocrCompletedAt = draftReadyAt,
-                            ),
-                        )
-                        reviewController = ReceiptReviewController(receipt)
-                        persistedEditIds.clear()
-                        mutableUiState.value = mutableUiState.value.copy(
-                            aiCorrectionCandidates = emptyList(),
-                            rejectedAiCorrectionCount = 0,
-                        )
-                        mutableUiState.value = stateFromReview(
-                            screen = AppScreen.FIELD_REVIEW,
-                            ocrDocument = outcome.document,
-                            message = "OCR 초안을 만들었습니다. 원본 이미지와 대조해 직접 검수하세요.",
-                        )
+                        if (session.workflowType == OcrWorkflowType.FITNESS_NUTRITION) {
+                            processNutritionOcrSuccess(session, outcome.document)
+                        } else {
+                            processReceiptOcrSuccess(session, outcome.document)
+                        }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (_: Exception) {
@@ -391,6 +418,163 @@ class ReceiptAppViewModel(
                     }
                 }
                 is OcrOutcome.Failure -> recordOcrFailure(documentId, outcome.reason.wireValue)
+            }
+        }
+    }
+
+    fun selectWorkflow(workflow: OcrWorkflowType) {
+        val state = mutableUiState.value
+        if (state.isPreparingScanner || state.isImportingPages || state.isProcessingOcr) return
+        selectedDocumentId.value = null
+        nutritionPersistenceJob?.cancel()
+        reviewController = null
+        persistedEditIds.clear()
+        mutableUiState.value = homeState(workflow = workflow)
+    }
+
+    fun updateNutritionProductName(value: String) = updateNutritionDraft {
+        copy(productName = value, status = NutritionDraftStatus.PARSED, confirmedAt = null)
+    }
+
+    fun updateNutritionBrand(value: String) = updateNutritionDraft {
+        copy(brand = value.trim().takeIf(String::isNotEmpty), status = NutritionDraftStatus.PARSED, confirmedAt = null)
+    }
+
+    fun updateNutritionCategory(value: String) = updateNutritionDraft {
+        copy(category = value.trim().lowercase(), status = NutritionDraftStatus.PARSED, confirmedAt = null)
+    }
+
+    fun updateNutritionBasisAmount(value: String) {
+        val amount = value.trim().replace(',', '.').takeIf(String::isNotEmpty)?.toDoubleOrNull()
+        if (value.isNotBlank() && (amount == null || !amount.isFinite())) {
+            updateNutritionDraft {
+                copy(basisAmount = null, status = NutritionDraftStatus.PARSED, confirmedAt = null)
+            }
+            mutableUiState.value = mutableUiState.value.copy(message = "기준량은 0 이상의 숫자로 입력하세요.")
+            return
+        }
+        updateNutritionDraft {
+            copy(basisAmount = amount, status = NutritionDraftStatus.PARSED, confirmedAt = null)
+        }
+    }
+
+    fun updateNutritionBasisUnit(value: String) = updateNutritionDraft {
+        copy(
+            basisUnit = NutritionUnit.normalize(value),
+            status = NutritionDraftStatus.PARSED,
+            confirmedAt = null,
+        )
+    }
+
+    fun updateNutritionValue(field: NutritionField, value: String) {
+        val amount = value.trim().replace(',', '.').takeIf(String::isNotEmpty)?.toDoubleOrNull()
+        if (value.isNotBlank() && (amount == null || !amount.isFinite())) {
+            updateNutritionDraft { withNutrient(field, null) }
+            mutableUiState.value = mutableUiState.value.copy(
+                message = "${field.koreanLabel}은 0 이상의 숫자로 입력하거나 비워 두세요.",
+            )
+            return
+        }
+        updateNutritionDraft { withNutrient(field, amount) }
+    }
+
+    fun saveNutritionConnection(url: String, publishableKey: String) {
+        val existing = nutritionSupabaseStore.read()
+        val effectiveKey = publishableKey.trim().ifEmpty { existing.publishableKey }
+        nutritionSupabaseStore.saveConnection(url, effectiveKey)
+            .onSuccess {
+                refreshNutritionConnectionState(
+                    message = "Nutrition Supabase 연결 정보를 저장했습니다. 로그인 후에만 private 식품을 전송합니다.",
+                )
+            }
+            .onFailure { error ->
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = error.message ?: "Nutrition Supabase 연결 정보를 저장하지 못했습니다.",
+                )
+            }
+    }
+
+    fun signInNutrition(email: String, password: String) {
+        val state = mutableUiState.value
+        if (state.isNutritionSigningIn || state.isNutritionPublishing) return
+        viewModelScope.launch {
+            mutableUiState.value = mutableUiState.value.copy(isNutritionSigningIn = true, message = null)
+            when (val outcome = nutritionGateway.signIn(email, password)) {
+                is NutritionAuthOutcome.Success -> refreshNutritionConnectionState(
+                    message = "${outcome.email} 계정으로 Nutrition DB에 로그인했습니다.",
+                )
+                is NutritionAuthOutcome.Failure -> mutableUiState.value = mutableUiState.value.copy(
+                    isNutritionSigningIn = false,
+                    message = nutritionFailureMessage(outcome.reason),
+                )
+            }
+        }
+    }
+
+    fun confirmAndPublishNutrition() {
+        val state = mutableUiState.value
+        val currentDraft = state.nutritionDraft ?: return
+        if (state.isNutritionPublishing || state.isNutritionSigningIn) return
+        val validation = NutritionLabelValidator.validate(currentDraft)
+        if (!validation.isReadyForUpload) {
+            mutableUiState.value = state.copy(
+                nutritionValidationErrors = validation.errors,
+                message = "필수 상품·영양성분 값을 원본과 대조해 먼저 확정하세요.",
+            )
+            return
+        }
+        nutritionPersistenceJob?.cancel()
+        viewModelScope.launch {
+            val verifiedAt = currentDraft.confirmedAt ?: OffsetDateTime.now().toString()
+            val verified = currentDraft.asUserVerified(verifiedAt)
+            mutableUiState.value = nutritionState(
+                draft = verified,
+                ocrDocument = state.ocrDocument,
+                message = null,
+            ).copy(isNutritionPublishing = true)
+            try {
+                persistNutritionDraftNow(verified, uploadStatus = "pending")
+                when (val outcome = nutritionGateway.publish(verified)) {
+                    is NutritionPublishOutcome.Success -> {
+                        updateNutritionSessionPublication(
+                            verified,
+                            uploadStatus = "uploaded",
+                            lastError = null,
+                        )
+                        mutableUiState.value = nutritionState(
+                            draft = verified,
+                            ocrDocument = state.ocrDocument,
+                            message = "Fitness Nutrition DB에 private 식품으로 저장했습니다. " +
+                                "상품 연결·공개는 Fitness App의 별도 승인 흐름에서 처리합니다.",
+                        )
+                    }
+                    is NutritionPublishOutcome.Failure -> {
+                        updateNutritionSessionPublication(
+                            verified,
+                            uploadStatus = "failed",
+                            lastError = "nutrition_${outcome.reason.name.lowercase()}",
+                        )
+                        val failureMessage = nutritionFailureMessage(outcome.reason) +
+                            " 확정 초안은 로컬에 보존했으므로 다시 전송할 수 있습니다."
+                        mutableUiState.value = nutritionState(
+                            draft = verified,
+                            ocrDocument = state.ocrDocument,
+                            message = failureMessage,
+                        )
+                        if (outcome.reason == NutritionGatewayFailure.AUTHENTICATION) {
+                            nutritionSupabaseStore.clearSession()
+                            refreshNutritionConnectionState(failureMessage)
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                mutableUiState.value = nutritionState(
+                    draft = verified,
+                    ocrDocument = state.ocrDocument,
+                    message = "확정 초안을 저장하거나 전송하지 못했습니다. 현재 화면의 값은 유지됩니다.",
+                )
             }
         }
     }
@@ -717,8 +901,8 @@ class ReceiptAppViewModel(
                     ReviewAccuracyReportJson.encode(
                         summary = summary,
                         generatedAt = OffsetDateTime.now().toString(),
-                        engineName = MlKitReceiptOcrEngine.ENGINE_NAME,
-                        engineVersion = MlKitReceiptOcrEngine.ENGINE_VERSION,
+                        engineName = MlKitDocumentOcrEngine.ENGINE_NAME,
+                        engineVersion = MlKitDocumentOcrEngine.ENGINE_VERSION,
                     ),
                 )
                 mutableEvents.emit(ReceiptUiEvent.ShareAccuracyReport(key))
@@ -803,11 +987,12 @@ class ReceiptAppViewModel(
             AppScreen.AI_CORRECTION -> AppScreen.ITEM_REVIEW
             AppScreen.RECONCILIATION -> AppScreen.ITEM_REVIEW
             AppScreen.JSON_PREVIEW -> AppScreen.RECONCILIATION
+            AppScreen.NUTRITION_REVIEW -> AppScreen.IMAGE_CONFIRM
             AppScreen.EVALUATION -> AppScreen.SESSION_LIST
         }
         if (destination == AppScreen.SESSION_LIST) {
             selectedDocumentId.value = null
-            mutableUiState.value = ReceiptAppUiState(message = state.message)
+            mutableUiState.value = homeState(workflow = state.selectedWorkflow, message = state.message)
         } else {
             mutableUiState.value = state.copy(screen = destination, message = null)
         }
@@ -821,7 +1006,218 @@ class ReceiptAppViewModel(
     }
 
     override fun onCleared() {
+        nutritionPersistenceJob?.cancel()
         ocrEngine.close()
+    }
+
+    private suspend fun processReceiptOcrSuccess(session: ReceiptSession, document: OcrDocument) {
+        val parsedReceipt = parser.parse(document)
+        val parsedDraft = parsedReceipt.toReceiptV2(includePrivateRawText = true)
+        val receipt = parsedDraft.copy(
+            document = parsedDraft.document.copy(
+                source = parsedDraft.document.source.withParserVersion(parser.version),
+            ),
+        )
+        fileStore.writeText(
+            "${session.documentId}/ocr/ocr-debug.json",
+            OcrDebugJson.encode(document, parsedReceipt),
+        )
+        val draftKey = "${session.documentId}/draft/receipt.json"
+        fileStore.writeText(draftKey, ReceiptV2Json.encodeCanonical(receipt))
+        val draftReadyAt = OffsetDateTime.now().toString()
+        repository.updateSession(
+            session.copy(
+                updatedAt = draftReadyAt,
+                ocrStatus = "parsed",
+                reviewStatus = "draft",
+                uploadStatus = "local_only",
+                lastError = null,
+                merchantName = receipt.merchant.name,
+                displayTitle = receipt.merchant.name,
+                issuedOn = receipt.document.issuedOn,
+                grandTotalAmountMinor = receipt.totals.grandTotalAmountMinor,
+                receiptStorageKey = draftKey,
+                workflowDraftStorageKey = draftKey,
+                reviewedAt = null,
+                ocrCompletedAt = draftReadyAt,
+            ),
+        )
+        reviewController = ReceiptReviewController(receipt)
+        persistedEditIds.clear()
+        mutableUiState.value = mutableUiState.value.copy(
+            aiCorrectionCandidates = emptyList(),
+            rejectedAiCorrectionCount = 0,
+        )
+        mutableUiState.value = stateFromReview(
+            screen = AppScreen.FIELD_REVIEW,
+            ocrDocument = document,
+            message = "OCR 초안을 만들었습니다. 원본 이미지와 대조해 직접 검수하세요.",
+        )
+    }
+
+    private suspend fun processNutritionOcrSuccess(session: ReceiptSession, document: OcrDocument) {
+        val draft = nutritionParser.parse(document)
+        val debugKey = "${session.documentId}/ocr/ocr-debug.json"
+        val draftKey = "${session.documentId}/draft/fitness-nutrition.json"
+        fileStore.writeText(debugKey, OcrDebugJson.encode(document))
+        val encoded = NutritionLabelJson.encode(draft)
+        fileStore.writeText(draftKey, encoded)
+        val draftReadyAt = OffsetDateTime.now().toString()
+        repository.updateSession(
+            session.copy(
+                updatedAt = draftReadyAt,
+                ocrStatus = "parsed",
+                reviewStatus = draft.status.wireValue,
+                jsonRevision = StableIds.sha256(encoded),
+                uploadStatus = "local_only",
+                lastError = null,
+                displayTitle = draft.productName.takeIf(String::isNotBlank),
+                workflowDraftStorageKey = draftKey,
+                reviewedAt = null,
+                ocrCompletedAt = draftReadyAt,
+            ),
+        )
+        reviewController = null
+        persistedEditIds.clear()
+        mutableUiState.value = nutritionState(
+            draft = draft,
+            ocrDocument = document,
+            message = "영양성분 OCR 초안을 만들었습니다. 모르는 값은 0으로 채우지 말고 원본과 대조하세요.",
+        )
+    }
+
+    private suspend fun restoreOcrDocument(documentId: String): OcrDocument? = try {
+        val key = "$documentId/ocr/ocr-debug.json"
+        OcrDebugJson.decode(fileStore.readBytes(key).toString(Charsets.UTF_8))
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun updateNutritionDraft(operation: NutritionLabelDraft.() -> NutritionLabelDraft) {
+        val current = mutableUiState.value
+        val draft = current.nutritionDraft ?: return
+        val updated = draft.operation()
+        mutableUiState.value = nutritionState(
+            draft = updated,
+            ocrDocument = current.ocrDocument,
+            message = null,
+        )
+        persistNutritionDraft(updated)
+    }
+
+    private fun persistNutritionDraft(draft: NutritionLabelDraft) {
+        nutritionPersistenceJob?.cancel()
+        nutritionPersistenceJob = viewModelScope.launch {
+            try {
+                persistNutritionDraftNow(draft, uploadStatus = "local_only")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = "영양성분 변경 내용을 저장하지 못했습니다. 현재 화면 값은 유지됩니다.",
+                )
+            }
+        }
+    }
+
+    private suspend fun persistNutritionDraftNow(draft: NutritionLabelDraft, uploadStatus: String) {
+        persistenceMutex.withLock {
+            val key = "${draft.documentId}/draft/fitness-nutrition.json"
+            val encoded = NutritionLabelJson.encode(draft)
+            fileStore.writeText(key, encoded)
+            val session = requireNotNull(repository.getSession(draft.documentId))
+            repository.updateSession(
+                session.copy(
+                    updatedAt = OffsetDateTime.now().toString(),
+                    reviewStatus = draft.status.wireValue,
+                    jsonRevision = StableIds.sha256(encoded),
+                    uploadStatus = uploadStatus,
+                    lastError = null,
+                    displayTitle = draft.productName.takeIf(String::isNotBlank),
+                    workflowDraftStorageKey = key,
+                    reviewedAt = draft.confirmedAt.takeIf {
+                        draft.status == NutritionDraftStatus.USER_VERIFIED
+                    },
+                ),
+            )
+        }
+    }
+
+    private suspend fun updateNutritionSessionPublication(
+        draft: NutritionLabelDraft,
+        uploadStatus: String,
+        lastError: String?,
+    ) {
+        val session = repository.getSession(draft.documentId) ?: return
+        repository.updateSession(
+            session.copy(
+                updatedAt = OffsetDateTime.now().toString(),
+                reviewStatus = draft.status.wireValue,
+                uploadStatus = uploadStatus,
+                lastError = lastError,
+                retryCount = if (lastError == null) session.retryCount else session.retryCount + 1,
+                reviewedAt = draft.confirmedAt,
+            ),
+        )
+    }
+
+    private fun nutritionState(
+        draft: NutritionLabelDraft,
+        ocrDocument: OcrDocument?,
+        message: String?,
+    ): ReceiptAppUiState {
+        val current = mutableUiState.value
+        return current.copy(
+            screen = AppScreen.NUTRITION_REVIEW,
+            selectedWorkflow = OcrWorkflowType.FITNESS_NUTRITION,
+            isPreparingScanner = false,
+            isImportingPages = false,
+            isProcessingOcr = false,
+            isNutritionSigningIn = false,
+            isNutritionPublishing = false,
+            currentDocumentId = draft.documentId,
+            receipt = null,
+            validation = null,
+            progress = null,
+            diagnosis = null,
+            nutritionDraft = draft,
+            nutritionValidationErrors = NutritionLabelValidator.validate(draft).errors,
+            ocrDocument = ocrDocument,
+            message = message,
+        )
+    }
+
+    private fun homeState(
+        workflow: OcrWorkflowType,
+        screen: AppScreen = AppScreen.SESSION_LIST,
+        currentDocumentId: String? = null,
+        message: String? = null,
+        possibleDuplicatePageIds: List<String> = emptyList(),
+    ): ReceiptAppUiState {
+        val config = nutritionSupabaseStore.read()
+        return ReceiptAppUiState(
+            screen = screen,
+            selectedWorkflow = workflow,
+            currentDocumentId = currentDocumentId,
+            message = message,
+            possibleDuplicatePageIds = possibleDuplicatePageIds,
+            nutritionSupabaseUrl = config.url,
+            isNutritionPublishableKeyConfigured = config.publishableKey.isNotBlank(),
+            nutritionSignedInEmail = config.email.takeIf { config.isSignedIn },
+        )
+    }
+
+    private fun refreshNutritionConnectionState(message: String? = mutableUiState.value.message) {
+        val config = nutritionSupabaseStore.read()
+        mutableUiState.value = mutableUiState.value.copy(
+            isNutritionSigningIn = false,
+            nutritionSupabaseUrl = config.url,
+            isNutritionPublishableKeyConfigured = config.publishableKey.isNotBlank(),
+            nutritionSignedInEmail = config.email.takeIf { config.isSignedIn },
+            message = message,
+        )
     }
 
     private fun navigate(screen: AppScreen) {
@@ -870,12 +1266,15 @@ class ReceiptAppViewModel(
         )
         return current.copy(
             screen = screen,
+            selectedWorkflow = OcrWorkflowType.PRICE_TRACE_RECEIPT,
             isPreparingScanner = false,
             isImportingPages = false,
             isProcessingOcr = false,
             isExporting = false,
             currentDocumentId = review.receipt.document.id,
             receipt = review.receipt,
+            nutritionDraft = null,
+            nutritionValidationErrors = emptyList(),
             ocrDocument = ocrDocument,
             validation = validation,
             progress = ReceiptReviewProgress.of(review.receipt, validation),
@@ -908,9 +1307,11 @@ class ReceiptAppViewModel(
                             reviewStatus = receipt.document.source.transcriptionStatus.wireValue,
                             jsonRevision = ReceiptV2Json.revisionHash(receipt),
                             merchantName = receipt.merchant.name,
+                            displayTitle = receipt.merchant.name,
                             issuedOn = receipt.document.issuedOn,
                             grandTotalAmountMinor = receipt.totals.grandTotalAmountMinor,
                             receiptStorageKey = key,
+                            workflowDraftStorageKey = key,
                             reviewedAt = mutableUiState.value.reviewedAt.takeIf {
                                 receipt.document.source.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
                             },
@@ -947,8 +1348,8 @@ class ReceiptAppViewModel(
                         receipt = exportedReceipt,
                         pages = pages,
                         ocrEngine = state.ocrDocument?.engine ?: com.pricetrace.receiptscanner.ocr.OcrEngineInfo(
-                            MlKitReceiptOcrEngine.ENGINE_NAME,
-                            MlKitReceiptOcrEngine.ENGINE_VERSION,
+                            MlKitDocumentOcrEngine.ENGINE_NAME,
+                            MlKitDocumentOcrEngine.ENGINE_VERSION,
                         ),
                         parserVersion = receipt.document.source.parserVersion() ?: "unknown",
                         reviewedAt = state.reviewedAt,
@@ -1091,6 +1492,23 @@ class ReceiptAppViewModel(
         "image_decode_failed", "image_read_failed" -> "보존된 이미지를 읽지 못했습니다. 원본 페이지를 확인하세요."
         "parse_or_persist_failed" -> "OCR 결과를 초안으로 저장하지 못했습니다. 세션을 보존했으므로 다시 시도하세요."
         else -> "OCR 처리에 실패했습니다. 세션을 보존했으므로 다시 시도할 수 있습니다."
+    }
+
+    private fun nutritionFailureMessage(reason: NutritionGatewayFailure): String = when (reason) {
+        NutritionGatewayFailure.NOT_CONFIGURED ->
+            "Nutrition Supabase 연결 정보를 저장하고 Fitness 계정으로 로그인하세요."
+        NutritionGatewayFailure.AUTHENTICATION ->
+            "Nutrition DB 인증이 만료되었거나 로그인 정보가 올바르지 않습니다. 다시 로그인하세요."
+        NutritionGatewayFailure.RATE_LIMITED ->
+            "Nutrition DB 요청 한도에 도달했습니다. 잠시 후 다시 시도하세요."
+        NutritionGatewayFailure.NETWORK ->
+            "네트워크 문제로 Nutrition DB에 연결하지 못했습니다."
+        NutritionGatewayFailure.CONTRACT ->
+            "Nutrition DB 계약 또는 마이그레이션 상태가 앱이 기대하는 최신 형식과 다릅니다."
+        NutritionGatewayFailure.CONFLICT ->
+            "Fitness App에서 같은 식품이 먼저 수정되어 덮어쓰지 않았습니다. 최신 값을 확인한 뒤 다시 시도하세요."
+        NutritionGatewayFailure.SERVER ->
+            "Nutrition DB 서버가 요청을 처리하지 못했습니다. 잠시 후 다시 시도하세요."
     }
 
     private fun aiCorrectionFailureMessage(reason: ReceiptCorrectionFailureReason): String = when (reason) {

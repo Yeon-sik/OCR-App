@@ -44,6 +44,12 @@ internal data class ScanSessionEntity(
     /** When the OCR draft became available, so review effort can be measured against it. */
     @ColumnInfo(name = "ocr_completed_at")
     val ocrCompletedAt: String?,
+    @ColumnInfo(name = "workflow_type", defaultValue = "'pricetrace_receipt'")
+    val workflowType: String,
+    @ColumnInfo(name = "display_title")
+    val displayTitle: String?,
+    @ColumnInfo(name = "workflow_draft_storage_key")
+    val workflowDraftStorageKey: String?,
 )
 
 @Entity(

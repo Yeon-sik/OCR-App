@@ -124,15 +124,17 @@ class ReceiptDatabaseMigrationTest {
 
         val migrated = migrationHelper.runMigrationsAndValidate(
             TEST_DB,
-            3,
+            4,
             true,
             ReceiptDatabase.MIGRATION_1_2,
             ReceiptDatabase.MIGRATION_2_3,
+            ReceiptDatabase.MIGRATION_3_4,
         )
 
         migrated.query(
             SimpleSQLiteQuery(
-                "SELECT document_id, merchant_name, review_status, reviewed_at, ocr_completed_at " +
+                "SELECT document_id, merchant_name, review_status, reviewed_at, ocr_completed_at, " +
+                    "workflow_type, display_title, workflow_draft_storage_key " +
                     "FROM scan_sessions WHERE document_id = ?",
                 arrayOf("doc-migrate"),
             ),
@@ -144,6 +146,9 @@ class ReceiptDatabaseMigrationTest {
             assertNull(cursor.getString(3))
             // Sessions reviewed before timing existed stay null and are excluded from duration stats.
             assertNull(cursor.getString(4))
+            assertEquals("pricetrace_receipt", cursor.getString(5))
+            assertNull(cursor.getString(6))
+            assertNull(cursor.getString(7))
         }
     }
 

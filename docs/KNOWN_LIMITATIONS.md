@@ -1,6 +1,6 @@
 # 알려진 제한사항
 
-- 현재 소스 버전은 `0.1.16`이며 Gemini 교정 계약·정책·UI, 직접 Interactions API adapter와 키 저장 흐름을 로컬 테스트/컴파일했습니다. 이 APK를 기기에 설치하거나 실제 Gemini 키·네트워크로 검증하지 않았습니다.
+- 현재 소스 버전은 `0.2.0`이며 공통 OCR 세션, PriceTrace/Fitness 홈 탭, 영양 라벨 파서, Fitness 직접 DB adapter와 기존 Gemini 흐름을 로컬 테스트/컴파일했습니다. 이 APK를 기기에 설치하거나 실제 Gemini/Nutrition 네트워크로 검증하지 않았습니다.
 - `0.1.14` debug APK는 `SM-A256N`에 업데이트 설치되어 패키지 버전과 `MainActivity` 실행 상태를 확인했습니다. 안내·결제 문장의 상품 오인식을 차단하고, 주소를 첫 지역 토큰부터 잘라내며, 상품명 셀의 후행 숫자를 숫자 열로 분리합니다. OCR metadata 순서가 뒤섞인 헤더에서 판매처 후보를 복구하고 브랜드 옆 연도 슬로건을 제외합니다. 합성 회귀 테스트를 통과했지만 이 버전의 실제 영수증 재검증은 남아 있습니다.
 - Gemini 교정은 선택 기능입니다. 앱 화면에서 유효한 API 키를 저장하기 전에도 기존 로컬 OCR은 동작하지만 AI 요청은 비활성화됩니다.
 - API 키는 Android Keystore로 암호화해 기기에 저장하지만 직접 API를 호출하는 모바일 앱에서는 추출 불가능한 production secret으로 간주할 수 없습니다. 현재 구현은 개인 사용 경계이며 공개 배포 전에 backend proxy로 교체해야 합니다.
@@ -31,5 +31,8 @@
 - 검수 소요 시간은 OCR 초안 생성부터 확정까지의 경과 시간이며, 앱을 닫아두거나 중간에 다른 일을 한 시간이 포함됩니다. 순수 작업 시간이 아닙니다.
 - `ocr_completed_at` 컬럼은 v2→v3 migration으로 추가되었습니다. 그 이전에 확정한 세션은 값이 없어 소요 시간 통계에서 제외됩니다.
 - 정확도 보고서는 건수·비율만 담지만, 표본 수가 매우 적으면 비율 자체가 특정 영수증을 암시할 수 있습니다.
-- PriceTrace/Supabase 업로드, 로그인, RLS, 원격 retry queue 실행은 구현하지 않았습니다.
+- PriceTrace 영수증 업로드는 구현하지 않았습니다. Fitness Nutrition 로그인·private insert/update adapter는 구현했지만 실제 URL·계정·RLS·migration으로 실행하지 않았습니다.
+- Fitness 영양 라벨 파서는 명시적인 영양소명 뒤의 `kcal`, `g`, `mg` 값과 명시적 `1회 제공량`/`100g당`/`100ml당` 기준만 보수적으로 읽습니다. 여러 값이 경쟁하면 자동 선택하지 않으며 상품명·분류·기준량·필수 7종은 사용자가 확인해야 합니다.
+- Fitness 원격 실패의 로컬 초안은 보존하지만 WorkManager 기반 자동 retry queue는 없습니다. 같은 세션을 열어 사용자가 다시 저장해야 합니다.
+- Fitness 전송은 `ocr-nutrition:<document-id>` 단위로 멱등 재시도하고 revision 충돌을 차단합니다. 같은 실물 상품을 다른 세션에서 다시 촬영한 결과를 자동 병합하지 않습니다.
 - release 배포, 서명, Play Console 정책 검증을 수행하지 않았습니다.

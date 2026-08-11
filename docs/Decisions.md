@@ -1,12 +1,12 @@
-# PriceTrace Receipt OCR 결정 로그
+# PriceTrace · Fitness 공통 OCR 결정 로그
 
 이 문서는 PriceTrace 영수증 스캔·OCR 검수 앱에서 장기간 유지할 기능·구조 결정을 기록한다.
 단순 구현 내역은 코드와 테스트에 남기고, 사용자가 선택한 방향과 그 선택을 되돌릴 조건을 이 문서에 남긴다.
 
 ## 문서 경계
 
-- **기준 작업 트리**: `feat/android-receipt-ocr-prototype`의 2026-08-11 커밋 전 working tree
-- **현재 구현**: `generic-parser.v15` / `0.1.16` (실기기 설치 근거는 `0.1.14`; DEC012의 `0.1.12` 기록은 이전 런타임 증거로 보존)
+- **기준 작업 트리**: `feat/multi-workflow-ocr`의 2026-08-11 working tree
+- **현재 구현**: `generic-parser.v15` + `nutrition-label-parser.v1` / `0.2.0` (실기기 설치 근거는 `0.1.14`; 이후 버전은 로컬 검증)
 - **주요 근거**: 사용자 피드백, `receipt-scanner` 소스·회귀 테스트, 로컬 Gradle 검증
 - **실기기 근거**: Samsung SM-A256N에 `0.1.14` debug APK 업데이트 설치, 패키지 버전 및 resumed `MainActivity` 확인. 설치·실행은 확인했지만 실제 영수증 OCR 정확도는 별도 검증하지 않았다.
 - **표현 규칙**: `사용자 확인`, `저장소 검증`, `강한 추론`, `계획`을 구분한다. 로컬 빌드 성공을 실제 영수증 정확도나 배포 완료로 확대하지 않는다.
@@ -15,12 +15,12 @@
 
 | 검사 | 명령/절차 | 환경·경계 | 결과 |
 | --- | --- | --- | --- |
-| 전체 unit test | `app` + `receipt-scanner` XML 집계 | Windows, 로컬 합성 입력과 가짜 Gemini HTTP 응답 | 통과: 18 suites, 133 tests, failures/errors/skipped 0 |
+| 전체 unit test | `app` + `receipt-scanner` XML 집계 | Windows, 로컬 합성 입력과 가짜 Gemini·Nutrition HTTP 응답 | 통과: 21 suites, 145 tests, failures/errors/skipped 0 |
 | 전체 Gradle 확인 | `.\gradlew.bat test lint assembleDebug assembleDebugAndroidTest :app:compileReleaseKotlin --no-daemon` | API 키 없는 로컬 JDK/Android SDK | 통과: unit test·lint·debug APK·instrumentation APK·debug/release Kotlin compile |
-| lint | `app:lintDebug` 보고서 | 로컬 정적 분석 | 0 errors, Gradle 9.7.0 가용성 알림 1 warning |
+| lint | `app` + `receipt-scanner` debug XML 보고서 | 로컬 정적 분석 | 0 issues |
 | Gemini key 정적 검사 | API key·header assignment 패턴 `rg` | source/docs, build 제외 | embedded Gemini key 패턴 없음 |
 
-`0.1.16` debug APK는 58,867,206 bytes이고 SHA-256은 `62D010711386AF9F34F698D2C70EBA1C313C1FCE3E6489F839F9E755CC15DA0D`이다. `connectedDebugAndroidTest`, 기기 설치, Android Keystore 계측 테스트 실행, 실제 Gemini 네트워크 요청과 영수증 정확도 비교는 실행하지 않았다.
+`0.2.0` debug APK는 58,704,077 bytes이고 SHA-256은 `6C0C83CE4363839045141A568C14D4EB0C637655BB26F70A54FDFF38AC0801D1`이다. `connectedDebugAndroidTest`, 기기 설치, Android Keystore 계측 테스트 실행, 실제 Gemini·Nutrition 네트워크 요청과 영수증/라벨 정확도 비교는 실행하지 않았다.
 
 ## 2026-08-08 검증 기록
 
@@ -578,3 +578,45 @@
 - **저장소 검증**: 요청 body의 `store=false`, structured schema, 이미지 inline 형식과 키 비포함, 완료 응답 mapping, 401/429 분류를 가짜 HTTP 단위 테스트로 확인했다. 기존 correction 정책과 사용자 개별 승인 테스트도 유지했다.
 - **보안 경계**: APK·소스에 API 키를 넣지 않았고 저장 키 삭제 경로를 제공한다. Android Keystore 사용만으로 rooted/debuggable 기기에서의 추출 불가능성을 주장하지 않는다.
 - **미검증**: 실제 사용자 키 저장·복원, Gemini 네트워크 응답, quota, 기기 crop, 무료 tier 조건과 정확도 개선은 아직 실환경에서 확인하지 않았다.
+
+---
+
+## DEC016: 촬영·OCR은 공통 세션으로 통일하고 후속 계약만 워크플로별로 분기함
+
+### (버전 이름 혹은 브랜치 이름)
+
+`multi-workflow-ocr.v1` / `0.2.0`
+
+#### 배경 / 제약
+
+- PriceTrace 영수증과 Fitness 상품 라벨은 촬영, ML Kit 보정, 페이지 저장, 한국어 OCR, 원본 복원까지 같은 기능을 사용한다.
+- 반면 출력 계약과 검수 조건은 다르다. PriceTrace는 `receipt.v2`, Fitness는 Nutrition DB `nutrition_foods`와 필수 7종 계약을 소유한다.
+- Fitness와 PriceTrace는 별도 DB/인증 경계를 유지하며, 상품명 유사도는 정확한 product-nutrition link를 대신할 수 없다.
+- 실제 Nutrition DB migration/RLS 적용 상태와 사용자 자격증명은 저장소에 없으므로 로컬 구현 완료와 실연결 완료를 구분해야 한다.
+
+#### 선택지
+
+1. Fitness용 별도 스캐너 앱과 OCR 저장소를 복제한다.
+2. receipt 모델에 영양성분 필드를 섞어 하나의 거대 JSON으로 만든다.
+3. 공통 session/page/OCR을 유지하고 `workflow_type` 뒤의 parser, review, publisher만 분리한다.
+
+#### 결정과 근거
+
+- **결정**: 선택지 3. Room schema v4에 `workflow_type`, `display_title`, `workflow_draft_storage_key`를 추가한다. v1~v3 기존 행은 `pricetrace_receipt`로 migration한다.
+- **결정**: ML Kit engine의 공식 이름은 `OcrEngine`/`MlKitDocumentOcrEngine`으로 일반화하고 기존 receipt 이름은 source-compatible alias로 보존한다.
+- **결정**: `fitness_nutrition`은 `nutrition-label-parser.v1`과 `fitness-nutrition-draft.v1`을 사용한다. 모르는 영양소는 0이 아니라 null이며 필수 7종이 없으면 전송을 차단한다.
+- **결정**: 사용자 확정 후 별도 Nutrition Supabase URL·publishable/anon key와 Fitness 사용자 Bearer token으로 본인 소유 `private` 식품만 저장한다. 비밀번호는 저장하지 않고 access/refresh token만 Android Keystore로 암호화한다.
+- **결정**: stable document food ID, source reference와 revision 조건을 사용한다. 다른 source 또는 원격 선행 수정은 무조건 덮어쓰지 않는다.
+- **결정**: OCR evidence와 원본 이미지는 서버 payload에서 제외한다. `catalog_product_id`, `standard_product_id`, `product_nutrition_links`, 공개 전환은 이 앱이 만들지 않는다.
+
+#### 재검토 조건
+
+- 세 번째 워크플로가 추가되면서 ViewModel 분기가 계속 커지면 workflow coordinator와 화면 모듈을 별도 feature module로 분리한다.
+- 실제 라벨에서 단일 규칙 파서가 표의 여러 기준 열을 안정적으로 구분하지 못하면 AI 자동 확정이 아니라 근거가 표시되는 후보 제안 계약을 별도로 설계한다.
+- 공개 배포, 다중 사용자 전환 또는 장기 오프라인 요구가 생기면 backend mediation, account binding, WorkManager retry queue를 검토한다.
+
+#### 결과 회고
+
+- **저장소 검증**: 합성 라벨 파싱, null 보존, 필수 계약, local JSON, 가짜 로그인/refresh, private insert, revision PATCH, 충돌 차단 테스트를 추가했다.
+- **계약 근거**: PriceTrace `origin/main` `34c06d0`, FitnessApp `origin/main` `25081ed`의 코드·migration을 대조했다. PriceTrace의 새 커밋은 문서만 변경했고, FitnessApp의 새 개발 탭·검증 단일식품 seed는 기존 Nutrition Supabase 저장 계약을 변경하지 않았다.
+- **미검증**: `0.2.0` 실기기 UI, 실제 라벨 정확도, 실제 Nutrition 계정 로그인, 원격 migration/RLS와 Fitness App pull 종단간 흐름은 아직 실행하지 않았다.

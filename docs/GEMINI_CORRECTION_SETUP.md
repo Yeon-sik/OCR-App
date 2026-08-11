@@ -2,7 +2,7 @@
 
 ## 현재 경계
 
-`0.1.16`은 Firebase를 사용하지 않고 Gemini Developer API의 Interactions API를 직접 호출합니다. API 키는 앱의 교정 화면에서 사용자가 입력하며, 소스·Gradle·APK에 빌드 시점 비밀로 넣지 않습니다. 저장소 테스트와 APK 컴파일은 실제 키, 네트워크, 할당량 또는 OCR 정확도 향상을 증명하지 않습니다.
+`0.1.16`부터 Firebase를 사용하지 않고 Gemini Developer API의 Interactions API를 직접 호출합니다. API 키는 앱의 PriceTrace 교정 화면에서 사용자가 입력하며, 소스·Gradle·APK에 빌드 시점 비밀로 넣지 않습니다. 저장소 테스트와 APK 컴파일은 실제 키, 네트워크, 할당량 또는 OCR 정확도 향상을 증명하지 않습니다.
 
 Gemini는 OCR 엔진의 대체물이 아닙니다.
 
