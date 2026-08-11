@@ -1,0 +1,92 @@
+{
+  "schema_version": "receipt.v2",
+  "document": {
+    "id": "receipt_synthetic_example_001",
+    "type": "receipt",
+    "status": "final",
+    "issued_on": "2026-08-03",
+    "issued_at": null,
+    "currency": "KRW",
+    "source": {
+      "capture_method": "ocr",
+      "original_document_id": "SYNTHETIC-TX-001",
+      "source_images": [
+        "page_synthetic_001"
+      ],
+      "transcription_status": "user_verified",
+      "notes": [],
+      "raw_text": null
+    }
+  },
+  "merchant": {
+    "name": "가상마트",
+    "branch_name": "테스트점",
+    "business_kind": "retail",
+    "retail_channel": "regular",
+    "catalog_namespace": null,
+    "merchant_id": null,
+    "business_registration_number": null,
+    "address": null,
+    "phone": null
+  },
+  "line_items": [
+    {
+      "id": "line_synthetic_product_001",
+      "type": "product",
+      "description": "합성 상품",
+      "source_line_references": [
+        "ocr_line_synthetic_001"
+      ],
+      "identifiers": [
+        {
+          "scheme": "merchant_sku",
+          "value": "SYN-1001"
+        }
+      ],
+      "quantity": {
+        "value": 1,
+        "unit": "each"
+      },
+      "unit_price_amount_minor": 1500,
+      "gross_amount_minor": 1500,
+      "discount_amount_minor": null,
+      "tax_amount_minor": null,
+      "net_amount_minor": 1500,
+      "confidence": "user_verified",
+      "tax_rate_percent": null
+    },
+    {
+      "id": "line_synthetic_discount_001",
+      "type": "discount",
+      "description": "합성 할인",
+      "source_line_references": [
+        "ocr_line_synthetic_002"
+      ],
+      "identifiers": [],
+      "quantity": null,
+      "unit_price_amount_minor": null,
+      "gross_amount_minor": null,
+      "discount_amount_minor": -200,
+      "tax_amount_minor": null,
+      "net_amount_minor": -200,
+      "confidence": "user_verified",
+      "tax_rate_percent": null
+    }
+  ],
+  "totals": {
+    "subtotal_amount_minor": 1500,
+    "discount_amount_minor": -200,
+    "tax_amount_minor": null,
+    "fee_amount_minor": null,
+    "grand_total_amount_minor": 1300
+  },
+  "payments": [
+    {
+      "method": "card",
+      "amount_minor": 1300,
+      "source_line_references": [
+        "ocr_line_synthetic_payment_001"
+      ]
+    }
+  ]
+}
