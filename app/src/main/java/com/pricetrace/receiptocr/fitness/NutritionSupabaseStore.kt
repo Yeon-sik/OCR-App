@@ -2,6 +2,7 @@ package com.pricetrace.receiptocr.fitness
 
 import android.annotation.SuppressLint
 import android.content.Context
+import com.pricetrace.receiptocr.BuildConfig
 import com.pricetrace.receiptocr.security.EncryptedStringStore
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -65,14 +66,17 @@ internal class AndroidNutritionSupabaseStore(
     preferencesName: String = CONNECTION_PREFERENCES,
     keyAlias: String = SESSION_KEY_ALIAS,
     sessionPreferencesName: String = SESSION_PREFERENCES,
+    private val defaultUrl: String = BuildConfig.DEFAULT_NUTRITION_SUPABASE_URL,
+    private val defaultPublishableKey: String = BuildConfig.DEFAULT_NUTRITION_SUPABASE_PUBLISHABLE_KEY,
 ) : NutritionSupabaseStore {
     private val preferences = context.applicationContext.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
     private val encryptedSession = EncryptedStringStore(context, keyAlias, sessionPreferencesName)
 
     override fun read(): NutritionSupabaseConfig {
         val connection = NutritionSupabaseConfig(
-            url = preferences.getString(KEY_URL, "").orEmpty(),
-            publishableKey = preferences.getString(KEY_PUBLISHABLE, "").orEmpty(),
+            url = preferences.getString(KEY_URL, null).orEmpty().ifBlank { defaultUrl },
+            publishableKey = preferences.getString(KEY_PUBLISHABLE, null).orEmpty()
+                .ifBlank { defaultPublishableKey },
         )
         val session = encryptedSession.read(KEY_SESSION)?.let(::decodeSession)
         return if (session == null) connection else connection.copy(

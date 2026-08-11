@@ -8,40 +8,39 @@ class NutritionLabelParser {
     val version: String = FITNESS_NUTRITION_PARSER_VERSION
 
     fun parse(document: OcrDocument): NutritionLabelDraft {
-        val lines = document.lines.sortedWith(compareBy(OcrLine::pageIndex, OcrLine::recognitionOrder))
         val warnings = mutableListOf<String>()
+        val allLines = document.lines.sortedWith(compareBy(OcrLine::pageIndex, OcrLine::recognitionOrder))
+        val lines = locateNutritionRegion(allLines, warnings)
         val evidence = linkedMapOf<String, MutableList<NutritionFieldEvidence>>()
         val nutrients = linkedMapOf<NutritionField, Double>()
 
         fieldPatterns.forEach { definition ->
-            val matches = lines.mapNotNull { line -> definition.extract(line)?.let { value -> line to value } }
-            val distinctValues = matches.map { it.second }.distinctBy { normalizedNumber(it) }
+            val matches = fieldMatches(lines, definition)
+            val distinctValues = matches.map { it.value }.distinctBy { normalizedNumber(it) }
             when {
                 distinctValues.isEmpty() -> Unit
                 distinctValues.size == 1 -> {
                     nutrients[definition.field] = distinctValues.single()
                     evidence.getOrPut(definition.field.wireKey, ::mutableListOf)
-                        .addAll(matches.map { it.first.toNutritionEvidence() }.distinctBy { it.ocrLineId })
+                        .addAll(matches.flatMap { it.lines }.map { it.toNutritionEvidence() }.distinctBy { it.ocrLineId })
                 }
                 else -> warnings += "${definition.field.koreanLabel} 값이 여러 개 감지되어 자동 확정하지 않았습니다."
             }
         }
 
-        val basisMatches = lines.mapNotNull { line -> extractBasis(line)?.let { value -> line to value } }
+        val basisMatches = basisMatches(lines)
         val distinctBases = basisMatches.map { it.second }.distinct()
         val basis = distinctBases.singleOrNull()
         if (distinctBases.size > 1) warnings += "영양성분 기준량이 여러 개 감지되어 자동 확정하지 않았습니다."
         if (basis != null) {
             evidence.getOrPut("basis", ::mutableListOf)
-                .addAll(basisMatches.map { it.first.toNutritionEvidence() }.distinctBy { it.ocrLineId })
+                .addAll(basisMatches.flatMap { it.first }.map { it.toNutritionEvidence() }.distinctBy { it.ocrLineId })
         }
-
-        val nameLine = inferProductNameLine(lines)
-        if (nameLine != null) evidence.getOrPut("name", ::mutableListOf).add(nameLine.toNutritionEvidence())
 
         return NutritionLabelDraft(
             documentId = document.documentId,
-            productName = nameLine?.text?.trim().orEmpty(),
+            productName = "",
+            brand = null,
             basisAmount = basis?.amount,
             basisUnit = basis?.unit ?: NutritionUnit.SERVING,
             nutrients = nutrients,
@@ -50,25 +49,81 @@ class NutritionLabelParser {
         )
     }
 
-    private fun inferProductNameLine(lines: List<OcrLine>): OcrLine? = lines
-        .take(NAME_SCAN_LIMIT)
-        .firstOrNull { line ->
-            val text = line.text.trim()
-            text.length in MIN_NAME_LENGTH..MAX_NAME_LENGTH &&
-                text.any(Char::isLetter) &&
-                !looksLikeLabelMetadata(text) &&
-                fieldPatterns.none { it.aliasOnly.containsMatchIn(text) }
+    private fun locateNutritionRegion(lines: List<OcrLine>, warnings: MutableList<String>): List<OcrLine> {
+        val regions = lines
+            .groupBy(OcrLine::pageIndex)
+            .toSortedMap()
+            .values
+            .mapNotNull { pageLines ->
+                val headerIndex = pageLines.indexOfFirst { isNutritionHeader(it.text) }
+                if (headerIndex < 0) return@mapNotNull null
+                val endOffset = pageLines
+                    .drop(headerIndex + 1)
+                    .indexOfFirst { isNutritionRegionEnd(it.text) }
+                val endIndex = if (endOffset < 0) pageLines.size else headerIndex + 1 + endOffset
+                pageLines.subList(headerIndex, endIndex)
+            }
+        val selected = regions.maxByOrNull { region ->
+            region.sumOf { line -> fieldPatterns.count { it.aliasOnly.containsMatchIn(line.text) } }
         }
+        if (selected != null && selected.any(::looksLikeNutritionLine)) return selected
 
-    private fun looksLikeLabelMetadata(text: String): Boolean {
-        val normalized = text.lowercase(Locale.ROOT)
-        return metadataTerms.any(normalized::contains) ||
-            percentPattern.containsMatchIn(normalized) ||
-            explicitBasisPatterns.any { it.containsMatchIn(normalized) }
+        warnings += "영양정보 박스를 식별하지 못해 영양성분 라인을 보수적으로 찾았습니다."
+        return lines.filterIndexed { index, line ->
+            looksLikeNutritionLine(line) ||
+                lines.getOrNull(index - 1)?.let(::looksLikeNutritionLine) == true ||
+                lines.getOrNull(index + 1)?.let(::looksLikeNutritionLine) == true
+        }
     }
 
-    private fun extractBasis(line: OcrLine): Basis? {
-        val text = line.text.lowercase(Locale.ROOT).replace(',', '.')
+    private fun looksLikeNutritionLine(line: OcrLine): Boolean =
+        fieldPatterns.any { it.aliasOnly.containsMatchIn(line.text) } ||
+            explicitBasisPatterns.any { it.containsMatchIn(line.text.lowercase(Locale.ROOT)) }
+
+    private fun isNutritionHeader(text: String): Boolean {
+        val normalized = text.lowercase(Locale.ROOT).replace(Regex("\\s+"), "")
+        return nutritionHeaderMarkers.any(normalized::contains)
+    }
+
+    private fun isNutritionRegionEnd(text: String): Boolean {
+        val normalized = text.lowercase(Locale.ROOT).replace(Regex("\\s+"), "")
+        return nutritionRegionEndMarkers.any(normalized::contains)
+    }
+
+    private fun fieldMatches(lines: List<OcrLine>, definition: FieldPattern): List<FieldMatch> = buildList {
+        lines.forEachIndexed { index, line ->
+            val singleValue = definition.extract(line.text)
+            if (singleValue != null) {
+                add(FieldMatch(listOf(line), singleValue))
+            } else {
+                val next = lines.getOrNull(index + 1)
+                if (next != null && next.pageIndex == line.pageIndex) {
+                    definition.extract("${line.text} ${next.text}")?.let { value ->
+                        add(FieldMatch(listOf(line, next), value))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun basisMatches(lines: List<OcrLine>): List<Pair<List<OcrLine>, Basis>> = buildList {
+        lines.forEachIndexed { index, line ->
+            val singleBasis = extractBasis(line.text)
+            if (singleBasis != null) {
+                add(listOf(line) to singleBasis)
+            } else {
+                val next = lines.getOrNull(index + 1)
+                if (next != null && next.pageIndex == line.pageIndex) {
+                    extractBasis("${line.text} ${next.text}")?.let { basis ->
+                        add(listOf(line, next) to basis)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun extractBasis(rawText: String): Basis? {
+        val text = rawText.lowercase(Locale.ROOT).replace(',', '.')
         explicitBasisPatterns.forEach { pattern ->
             val match = pattern.find(text) ?: return@forEach
             val amount = match.groups[1]?.value?.toDoubleOrNull() ?: return@forEach
@@ -79,6 +134,7 @@ class NutritionLabelParser {
     }
 
     private data class Basis(val amount: Double, val unit: String)
+    private data class FieldMatch(val lines: List<OcrLine>, val value: Double)
 
     private data class FieldPattern(
         val field: NutritionField,
@@ -86,8 +142,8 @@ class NutritionLabelParser {
         val amountPattern: Regex,
         val blockedPrefixes: List<String> = emptyList(),
     ) {
-        fun extract(line: OcrLine): Double? {
-            val normalized = line.text.lowercase(Locale.ROOT).replace(',', '.')
+        fun extract(rawText: String): Double? {
+            val normalized = rawText.lowercase(Locale.ROOT).replace(',', '.')
             amountPattern.findAll(normalized).forEach { match ->
                 val prefix = normalized.substring(0, match.range.first).trimEnd()
                 if (blockedPrefixes.any(prefix::endsWith)) return@forEach
@@ -114,21 +170,25 @@ class NutritionLabelParser {
     }
 
     companion object {
-        private const val NAME_SCAN_LIMIT = 6
-        private const val MIN_NAME_LENGTH = 2
-        private const val MAX_NAME_LENGTH = 80
-        private val percentPattern = Regex("\\d+(?:[.]\\d+)?\\s*%")
-        private val metadataTerms = listOf(
+        private val nutritionHeaderMarkers = listOf(
             "영양정보",
             "영양성분",
-            "nutrition facts",
-            "nutrition information",
-            "1일 영양성분",
-            "총 내용량",
-            "총내용량",
+            "nutritionfacts",
+            "nutritioninformation",
+            "nutrition",
+        )
+        private val nutritionRegionEndMarkers = listOf(
+            "원재료",
+            "알레르기",
+            "보관",
+            "주의",
             "제조원",
             "유통기한",
-            "원재료",
+            "ingredients",
+            "allergen",
+            "storage",
+            "manufacturer",
+            "importer",
         )
         private val explicitBasisPatterns = listOf(
             Regex("(?:1\\s*회\\s*(?:제공량|분량)|1\\s*회분|per\\s*serving)\\s*[:：]?\\s*(\\d+(?:[.]\\d+)?)\\s*(g|mg|kg|ml|l|개|pack|portion|serving|회분?)", RegexOption.IGNORE_CASE),

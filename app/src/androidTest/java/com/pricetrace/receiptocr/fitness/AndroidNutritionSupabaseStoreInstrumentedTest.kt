@@ -13,6 +13,32 @@ import java.util.UUID
 @RunWith(AndroidJUnit4::class)
 class AndroidNutritionSupabaseStoreInstrumentedTest {
     @Test
+    fun buildDefaultsAreVisibleBeforeTheUserSavesAConnection() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val suffix = UUID.randomUUID().toString()
+        val connectionPreferences = "nutrition_connection_defaults_test_$suffix"
+        val sessionPreferences = "nutrition_session_defaults_test_$suffix"
+        val store = AndroidNutritionSupabaseStore(
+            context = context,
+            preferencesName = connectionPreferences,
+            keyAlias = "nutrition_session_defaults_key_test_$suffix",
+            sessionPreferencesName = sessionPreferences,
+            defaultUrl = "https://nutrition.example.com",
+            defaultPublishableKey = "publishable-key-with-safe-length",
+        )
+        try {
+            val restored = store.read()
+            assertEquals("https://nutrition.example.com", restored.url)
+            assertEquals("publishable-key-with-safe-length", restored.publishableKey)
+            assertTrue(restored.isConnectionConfigured)
+        } finally {
+            store.clearSession()
+            context.deleteSharedPreferences(connectionPreferences)
+            context.deleteSharedPreferences(sessionPreferences)
+        }
+    }
+
+    @Test
     fun sessionTokensRoundTripEncryptedAndPasswordIsNeverAcceptedByTheStore() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val suffix = UUID.randomUUID().toString()

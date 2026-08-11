@@ -14,7 +14,7 @@
 - Coroutines 1.11.0과 Kotlin Serialization 1.11.0은 비동기 처리와 JSON 계약에 사용합니다. [Coroutines](https://github.com/Kotlin/kotlinx.coroutines), [Serialization](https://github.com/Kotlin/kotlinx.serialization/releases)
 - Gemini는 유지 중단된 예전 Android Gemini SDK나 Firebase SDK를 추가하지 않고 플랫폼 `HttpURLConnection`으로 Interactions API를 직접 호출합니다. vendor-neutral 계약·정책은 `receipt-scanner/correction`, HTTP·이미지 crop·키 저장은 `app`에 둡니다. [Gemini libraries](https://ai.google.dev/gemini-api/docs/libraries), [Interactions API](https://ai.google.dev/gemini-api/docs/interactions-overview)
 - 구조화 출력은 Interactions 요청의 `response_format`에 JSON Schema를 지정합니다. 스키마 통과 자체를 신뢰하지 않고 앱 정책으로 다시 검증합니다. [Gemini structured output](https://ai.google.dev/gemini-api/docs/structured-output)
-- 기본 모델은 `gemini-3.5-flash-lite`입니다. 모델 가용성·무료 할당량·요금·데이터 사용 조건은 변경될 수 있으므로 실사용 전에 공식 문서를 다시 확인합니다. [Gemini model](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite), [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)
+- 기본 모델은 `.env`의 `GEMINI_MODEL`이며 값이 없거나 형식이 잘못되면 `gemini-3.5-flash-lite`를 사용합니다. 모델 가용성·무료 할당량·요금·데이터 사용 조건은 변경될 수 있으므로 실사용 전에 공식 문서를 다시 확인합니다. [Gemini model](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite), [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)
 
 ## 유지보수 경계
 

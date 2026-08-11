@@ -9,6 +9,9 @@
 build/
 **/build/
 local.properties
+.env
+.env.*
+!.env.example
 **/google-services.json
 **/key.properties
 **/keystore.properties

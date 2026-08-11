@@ -74,6 +74,7 @@ fun ReceiptOcrApp(
         },
         onSelectSession = viewModel::selectSession,
         onDeleteSession = viewModel::deleteSession,
+        onShowApiSettings = viewModel::showApiSettings,
         onStartOcr = viewModel::startOcr,
         onNutritionProductNameChanged = viewModel::updateNutritionProductName,
         onNutritionBrandChanged = viewModel::updateNutritionBrand,

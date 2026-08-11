@@ -75,6 +75,7 @@ import java.time.OffsetDateTime
 
 enum class AppScreen {
     SESSION_LIST,
+    API_SETTINGS,
     IMAGE_CONFIRM,
     OCR_PROGRESS,
     FIELD_REVIEW,
@@ -980,6 +981,7 @@ class ReceiptAppViewModel(
         val state = mutableUiState.value
         val destination = when (state.screen) {
             AppScreen.SESSION_LIST -> return false
+            AppScreen.API_SETTINGS -> AppScreen.SESSION_LIST
             AppScreen.IMAGE_CONFIRM -> AppScreen.SESSION_LIST
             AppScreen.OCR_PROGRESS -> return true
             AppScreen.FIELD_REVIEW -> AppScreen.IMAGE_CONFIRM
@@ -1003,6 +1005,17 @@ class ReceiptAppViewModel(
 
     fun clearMessage() {
         mutableUiState.value = mutableUiState.value.copy(message = null)
+    }
+
+    fun showApiSettings() {
+        val state = mutableUiState.value
+        if (state.isPreparingScanner || state.isImportingPages || state.isProcessingOcr) return
+        refreshNutritionConnectionState(message = null)
+        mutableUiState.value = mutableUiState.value.copy(
+            screen = AppScreen.API_SETTINGS,
+            correctionProvider = correctionSuggester.provider,
+            message = null,
+        )
     }
 
     override fun onCleared() {
@@ -1200,6 +1213,7 @@ class ReceiptAppViewModel(
         return ReceiptAppUiState(
             screen = screen,
             selectedWorkflow = workflow,
+            correctionProvider = correctionSuggester.provider,
             currentDocumentId = currentDocumentId,
             message = message,
             possibleDuplicatePageIds = possibleDuplicatePageIds,
@@ -1213,6 +1227,7 @@ class ReceiptAppViewModel(
         val config = nutritionSupabaseStore.read()
         mutableUiState.value = mutableUiState.value.copy(
             isNutritionSigningIn = false,
+            correctionProvider = correctionSuggester.provider,
             nutritionSupabaseUrl = config.url,
             isNutritionPublishableKeyConfigured = config.publishableKey.isNotBlank(),
             nutritionSignedInEmail = config.email.takeIf { config.isSignedIn },

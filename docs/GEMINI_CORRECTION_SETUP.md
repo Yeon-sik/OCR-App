@@ -28,6 +28,26 @@ Gemini는 OCR 엔진의 대체물이 아닙니다.
 
 이 저장은 평문 파일보다 안전하지만 공개 배포용 비밀 보호를 보장하지 않습니다. 직접 API를 호출하는 모바일 앱의 키는 루팅·디버깅·런타임 계측 환경에서 추출될 수 있습니다. 현재 방식은 소유자가 직접 쓰는 개인 앱 경계입니다. 다른 사용자에게 배포하려면 키를 앱에서 제거하고 인증·사용자별 제한·비용 한도가 있는 백엔드 프록시로 이동해야 합니다. Google도 client-side production 배포에서 키 노출을 금지하고 서버 측 호출을 권장합니다.
 
+## 로컬 `.env`와 빌드 연결
+
+루트 `.env`를 두면 Gradle이 빌드 시 다음 비밀이 아닌 기본값을 읽습니다.
+
+```text
+NUTRITION_SUPABASE_URL=https://...
+NUTRITION_SUPABASE_ANON_KEY=eyJ...
+GEMINI_MODEL=gemini-...
+```
+
+Fitness 화면은 저장된 연결이 없을 때 이 URL과 publishable/anon key를 사용합니다. Supabase `service_role`/`sb_secret_` 키, query가 붙은 URL, HTTPS가 아닌 URL은 빌드를 중단합니다.
+
+`.env`의 `GEMINI_API_KEY`, `EMAIL`, `PASSWORD`는 의도적으로 무시합니다. 이를 `BuildConfig`나 APK에 넣으면 누구나 앱에서 추출할 수 있으므로, Gemini 키는 위의 Keystore 저장 절차로 입력하고 Fitness 계정은 API 설정 화면에서 로그인합니다. `.env`와 `.env.*`는 Git에 커밋되지 않습니다.
+
+```powershell
+.\gradlew.bat assembleDebug --no-daemon
+```
+
+빌드 로그에는 키와 비밀번호 값이 출력되지 않습니다.
+
 ## 호출 계약
 
 - endpoint: `POST https://generativelanguage.googleapis.com/v1beta/interactions`

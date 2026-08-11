@@ -114,6 +114,7 @@ fun ReceiptOcrContent(
     onAppendScan: () -> Unit = {},
     onSelectSession: (String) -> Unit = {},
     onDeleteSession: (String) -> Unit = {},
+    onShowApiSettings: () -> Unit = {},
     onStartOcr: () -> Unit = {},
     onNutritionProductNameChanged: (String) -> Unit = {},
     onNutritionBrandChanged: (String) -> Unit = {},
@@ -188,7 +189,20 @@ fun ReceiptOcrContent(
                     onWorkflowSelected = onWorkflowSelected,
                     onSelectSession = onSelectSession,
                     onDeleteSession = onDeleteSession,
+                    onShowApiSettings = onShowApiSettings,
                     onShowEvaluation = onShowEvaluation,
+                )
+                AppScreen.API_SETTINGS -> ApiSettingsScreen(
+                    provider = uiState.correctionProvider,
+                    supabaseUrl = uiState.nutritionSupabaseUrl,
+                    isPublishableKeyConfigured = uiState.isNutritionPublishableKeyConfigured,
+                    signedInEmail = uiState.nutritionSignedInEmail,
+                    isSigningIn = uiState.isNutritionSigningIn,
+                    onBack = onBack,
+                    onSaveGeminiApiKey = onSaveGeminiApiKey,
+                    onClearGeminiApiKey = onClearGeminiApiKey,
+                    onSaveNutritionConnection = onSaveNutritionConnection,
+                    onSignInNutrition = onSignInNutrition,
                 )
                 AppScreen.IMAGE_CONFIRM -> ImageConfirmationScreen(
                     workflow = uiState.selectedWorkflow,
@@ -366,6 +380,7 @@ private fun SessionListScreen(
     onWorkflowSelected: (OcrWorkflowType) -> Unit,
     onSelectSession: (String) -> Unit,
     onDeleteSession: (String) -> Unit,
+    onShowApiSettings: () -> Unit,
     onShowEvaluation: () -> Unit,
 ) {
     val visibleSessions = sessions.filter { it.workflowType == selectedWorkflow }
@@ -413,6 +428,14 @@ private fun SessionListScreen(
                 Text(if (isFitness) "상품 영양성분 촬영·선택" else "영수증 촬영·선택")
             }
         }
+        item {
+            OutlinedButton(
+                onClick = onShowApiSettings,
+                modifier = Modifier.fillMaxWidth().testTag("api_settings_button"),
+            ) {
+                Text("API 설정")
+            }
+        }
         if (!isFitness) {
             item {
                 OutlinedButton(
@@ -438,6 +461,202 @@ private fun SessionListScreen(
                     onClick = { onSelectSession(session.documentId) },
                     onDelete = { onDeleteSession(session.documentId) },
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ApiSettingsScreen(
+    provider: ReceiptCorrectionProvider?,
+    supabaseUrl: String,
+    isPublishableKeyConfigured: Boolean,
+    signedInEmail: String?,
+    isSigningIn: Boolean,
+    onBack: () -> Unit,
+    onSaveGeminiApiKey: (String) -> Unit,
+    onClearGeminiApiKey: () -> Unit,
+    onSaveNutritionConnection: (String, String) -> Unit,
+    onSignInNutrition: (String, String) -> Unit,
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().testTag("api_settings"),
+        contentPadding = PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item {
+            ScreenHeader(
+                "API 설정",
+                "Gemini 교정과 Fitness Nutrition 저장 연결을 관리합니다.",
+                onBack,
+            )
+        }
+        item {
+            GeminiApiSettingsCard(
+                provider = provider,
+                isBusy = isSigningIn,
+                onSaveApiKey = onSaveGeminiApiKey,
+                onClearApiKey = onClearGeminiApiKey,
+            )
+        }
+        item {
+            NutritionConnectionCard(
+                supabaseUrl = supabaseUrl,
+                isPublishableKeyConfigured = isPublishableKeyConfigured,
+                signedInEmail = signedInEmail,
+                isSigningIn = isSigningIn,
+                isPublishing = false,
+                onSaveConnection = onSaveNutritionConnection,
+                onSignIn = onSignInNutrition,
+            )
+        }
+        item {
+            Text(
+                "API 키는 화면에 다시 표시하지 않으며, Supabase는 publishable/anon key와 로그인한 사용자 토큰으로만 호출합니다.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+@Composable
+private fun GeminiApiSettingsCard(
+    provider: ReceiptCorrectionProvider?,
+    isBusy: Boolean,
+    onSaveApiKey: (String) -> Unit,
+    onClearApiKey: () -> Unit,
+) {
+    var apiKeyInput by remember { mutableStateOf("") }
+    Card {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Gemini API 키", fontWeight = FontWeight.SemiBold)
+            Text(
+                if (provider?.isAvailable == true) {
+                    "키가 이 기기에 저장되어 있습니다. 현재 키 값은 다시 표시하지 않습니다."
+                } else {
+                    "Google AI Studio에서 발급한 API 키를 입력하세요."
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
+            OutlinedTextField(
+                value = apiKeyInput,
+                onValueChange = { value ->
+                    if (value.length <= 512 && value.none { it == '\n' || it == '\r' }) {
+                        apiKeyInput = value
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().testTag("gemini_api_key_input"),
+                label = { Text("새 API 키") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                enabled = !isBusy,
+            )
+            Button(
+                onClick = {
+                    onSaveApiKey(apiKeyInput)
+                    apiKeyInput = ""
+                },
+                enabled = apiKeyInput.isNotBlank() && !isBusy,
+                modifier = Modifier.fillMaxWidth().testTag("save_gemini_api_key_button"),
+            ) {
+                Text(if (provider?.isAvailable == true) "API 키 교체 저장" else "API 키 저장")
+            }
+            if (provider?.isAvailable == true) {
+                OutlinedButton(
+                    onClick = onClearApiKey,
+                    enabled = !isBusy,
+                    modifier = Modifier.fillMaxWidth().testTag("clear_gemini_api_key_button"),
+                ) {
+                    Text("저장된 키 삭제")
+                }
+            }
+            Text(
+                "키는 Android Keystore로 암호화해 저장하지만, 직접 API를 호출하는 모바일 앱은 공개 배포용 비밀 저장소가 아닙니다. 개인 사용 범위로 운영하세요.",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+@Composable
+private fun NutritionConnectionCard(
+    supabaseUrl: String,
+    isPublishableKeyConfigured: Boolean,
+    signedInEmail: String?,
+    isSigningIn: Boolean,
+    isPublishing: Boolean,
+    onSaveConnection: (String, String) -> Unit,
+    onSignIn: (String, String) -> Unit,
+) {
+    var connectionUrl by remember(supabaseUrl) { mutableStateOf(supabaseUrl) }
+    var publishableKey by remember { mutableStateOf("") }
+    var email by remember(signedInEmail) { mutableStateOf(signedInEmail.orEmpty()) }
+    var password by remember { mutableStateOf("") }
+    val isBusy = isSigningIn || isPublishing
+
+    Card {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Fitness Nutrition DB 연결", fontWeight = FontWeight.SemiBold)
+            Text(
+                "서비스 역할 키는 사용하지 않습니다. publishable/anon key와 로그인한 사용자 토큰으로 본인 소유 private 식품만 저장합니다.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = connectionUrl,
+                onValueChange = { connectionUrl = it },
+                label = { Text("Nutrition Supabase URL") },
+                placeholder = { Text("https://<project>.supabase.co") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("nutrition_supabase_url"),
+            )
+            OutlinedTextField(
+                value = publishableKey,
+                onValueChange = { publishableKey = it },
+                label = { Text("publishable/anon key") },
+                placeholder = {
+                    Text(if (isPublishableKeyConfigured) "저장됨 — 변경할 때만 입력" else "런타임에 입력")
+                },
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("nutrition_publishable_key"),
+            )
+            OutlinedButton(
+                onClick = { onSaveConnection(connectionUrl, publishableKey) },
+                enabled = connectionUrl.isNotBlank() &&
+                    (publishableKey.isNotBlank() || isPublishableKeyConfigured) &&
+                    !isBusy,
+                modifier = Modifier.fillMaxWidth().testTag("save_nutrition_connection"),
+            ) { Text("연결 정보 저장") }
+            if (signedInEmail == null) {
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    label = { Text("Fitness 계정 이메일") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    modifier = Modifier.fillMaxWidth().testTag("nutrition_email"),
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("비밀번호 (저장하지 않음)") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("nutrition_password"),
+                )
+                Button(
+                    onClick = { onSignIn(email, password) },
+                    enabled = isPublishableKeyConfigured && email.isNotBlank() && password.isNotBlank() && !isBusy,
+                    modifier = Modifier.fillMaxWidth().testTag("nutrition_sign_in"),
+                ) {
+                    if (isSigningIn) BusyIndicator()
+                    Text("Fitness 계정 로그인")
+                }
+            } else {
+                Text("로그인: $signedInEmail", fontWeight = FontWeight.SemiBold)
             }
         }
     }
@@ -588,10 +807,6 @@ private fun NutritionReviewScreen(
             mutableStateOf(formatNutritionNumber(draft.value(field)))
         }
     }
-    var connectionUrl by remember(supabaseUrl) { mutableStateOf(supabaseUrl) }
-    var publishableKey by remember { mutableStateOf("") }
-    var email by remember(signedInEmail) { mutableStateOf(signedInEmail.orEmpty()) }
-    var password by remember { mutableStateOf("") }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("nutrition_review"),
@@ -619,6 +834,12 @@ private fun NutritionReviewScreen(
             }
         }
         item { SectionTitle("상품 정보") }
+        item {
+            Text(
+                "상품명과 브랜드는 OCR로 자동 입력하지 않습니다. 원본 라벨을 보고 직접 입력한 뒤 확정하세요.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         item {
             OutlinedTextField(
                 value = draft.productName,
@@ -701,72 +922,16 @@ private fun NutritionReviewScreen(
                 }
             }
         }
-        item { SectionTitle("Fitness Nutrition DB 연결") }
         item {
-            Card {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        "서비스 역할 키는 사용하지 않습니다. publishable/anon key와 로그인한 사용자 토큰으로 " +
-                            "본인 소유 private 식품만 저장합니다.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    OutlinedTextField(
-                        value = connectionUrl,
-                        onValueChange = { connectionUrl = it },
-                        label = { Text("Nutrition Supabase URL") },
-                        placeholder = { Text("https://<project>.supabase.co") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth().testTag("nutrition_supabase_url"),
-                    )
-                    OutlinedTextField(
-                        value = publishableKey,
-                        onValueChange = { publishableKey = it },
-                        label = { Text("publishable/anon key") },
-                        placeholder = {
-                            Text(if (isPublishableKeyConfigured) "저장됨 — 변경할 때만 입력" else "런타임에 입력")
-                        },
-                        visualTransformation = PasswordVisualTransformation(),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth().testTag("nutrition_publishable_key"),
-                    )
-                    OutlinedButton(
-                        onClick = { onSaveConnection(connectionUrl, publishableKey) },
-                        enabled = connectionUrl.isNotBlank() &&
-                            (publishableKey.isNotBlank() || isPublishableKeyConfigured) &&
-                            !isSigningIn && !isPublishing,
-                        modifier = Modifier.fillMaxWidth().testTag("save_nutrition_connection"),
-                    ) { Text("연결 정보 저장") }
-                    if (signedInEmail == null) {
-                        OutlinedTextField(
-                            value = email,
-                            onValueChange = { email = it },
-                            label = { Text("Fitness 계정 이메일") },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                            modifier = Modifier.fillMaxWidth().testTag("nutrition_email"),
-                        )
-                        OutlinedTextField(
-                            value = password,
-                            onValueChange = { password = it },
-                            label = { Text("비밀번호 (저장하지 않음)") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth().testTag("nutrition_password"),
-                        )
-                        Button(
-                            onClick = { onSignIn(email, password) },
-                            enabled = isPublishableKeyConfigured && email.isNotBlank() && password.isNotBlank() &&
-                                !isSigningIn && !isPublishing,
-                            modifier = Modifier.fillMaxWidth().testTag("nutrition_sign_in"),
-                        ) {
-                            if (isSigningIn) BusyIndicator()
-                            Text("Fitness 계정 로그인")
-                        }
-                    } else {
-                        Text("로그인: $signedInEmail", fontWeight = FontWeight.SemiBold)
-                    }
-                }
-            }
+            NutritionConnectionCard(
+                supabaseUrl = supabaseUrl,
+                isPublishableKeyConfigured = isPublishableKeyConfigured,
+                signedInEmail = signedInEmail,
+                isSigningIn = isSigningIn,
+                isPublishing = isPublishing,
+                onSaveConnection = onSaveConnection,
+                onSignIn = onSignIn,
+            )
         }
         item {
             Button(
@@ -1126,7 +1291,6 @@ private fun AiCorrectionScreen(
     onApply: (String) -> Unit,
     onDismiss: (String) -> Unit,
 ) {
-    var apiKeyInput by remember { mutableStateOf("") }
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("ai_correction_review"),
         contentPadding = PaddingValues(20.dp),
@@ -1134,58 +1298,12 @@ private fun AiCorrectionScreen(
     ) {
         item { ScreenHeader("Gemini 교정 제안", "AI는 초안을 직접 확정하지 않습니다.", onBack) }
         item {
-            Card {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Gemini API 키", fontWeight = FontWeight.SemiBold)
-                    Text(
-                        if (provider?.isAvailable == true) {
-                            "키가 이 기기에 저장되어 있습니다. 현재 키 값은 다시 표시하지 않습니다."
-                        } else {
-                            "Google AI Studio에서 발급한 API 키를 입력하세요."
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    OutlinedTextField(
-                        value = apiKeyInput,
-                        onValueChange = { value ->
-                            if (value.length <= 512 && value.none { it == '\n' || it == '\r' }) {
-                                apiKeyInput = value
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth().testTag("gemini_api_key_input"),
-                        label = { Text("새 API 키") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        enabled = !isLoading,
-                    )
-                    Button(
-                        onClick = {
-                            onSaveApiKey(apiKeyInput)
-                            apiKeyInput = ""
-                        },
-                        enabled = apiKeyInput.isNotBlank() && !isLoading,
-                        modifier = Modifier.fillMaxWidth().testTag("save_gemini_api_key_button"),
-                    ) {
-                        Text(if (provider?.isAvailable == true) "API 키 교체 저장" else "API 키 저장")
-                    }
-                    if (provider?.isAvailable == true) {
-                        OutlinedButton(
-                            onClick = onClearApiKey,
-                            enabled = !isLoading,
-                            modifier = Modifier.fillMaxWidth().testTag("clear_gemini_api_key_button"),
-                        ) {
-                            Text("저장된 키 삭제")
-                        }
-                    }
-                    Text(
-                        "키는 Android Keystore로 암호화해 저장하지만, 직접 API를 호출하는 모바일 앱은 " +
-                            "공개 배포용 비밀 저장소가 아닙니다. 이 방식은 개인 사용 범위입니다.",
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
+            GeminiApiSettingsCard(
+                provider = provider,
+                isBusy = isLoading,
+                onSaveApiKey = onSaveApiKey,
+                onClearApiKey = onClearApiKey,
+            )
         }
         item {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
