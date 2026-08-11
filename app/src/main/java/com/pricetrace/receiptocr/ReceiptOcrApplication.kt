@@ -35,7 +35,10 @@ class AppContainer(application: Application) {
     val publisher = LocalOnlyReceiptPublisher()
     val geminiApiKeyStore: GeminiApiKeyStore = EncryptedGeminiApiKeyStore(application)
     val correctionSuggester: ReceiptCorrectionSuggester =
-        DirectGeminiReceiptCorrectionSuggester(geminiApiKeyStore::read)
+        DirectGeminiReceiptCorrectionSuggester(
+            apiKeyProvider = geminiApiKeyStore::read,
+            modelName = BuildConfig.DEFAULT_GEMINI_MODEL,
+        )
     internal val nutritionSupabaseStore = AndroidNutritionSupabaseStore(application)
     internal val nutritionGateway = NutritionSupabaseGateway(nutritionSupabaseStore)
 }

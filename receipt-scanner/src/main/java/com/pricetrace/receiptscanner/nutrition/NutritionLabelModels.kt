@@ -3,7 +3,7 @@ package com.pricetrace.receiptscanner.nutrition
 import com.pricetrace.receiptscanner.ocr.OcrLine
 
 const val FITNESS_NUTRITION_DRAFT_SCHEMA = "fitness-nutrition-draft.v1"
-const val FITNESS_NUTRITION_PARSER_VERSION = "nutrition-label-parser.v1"
+const val FITNESS_NUTRITION_PARSER_VERSION = "nutrition-label-parser.v2"
 const val FITNESS_NUTRITION_DATA_VERSION = 2
 
 enum class NutritionDraftStatus(val wireValue: String) {

@@ -5,22 +5,35 @@
 
 ## 문서 경계
 
-- **기준 작업 트리**: `feat/multi-workflow-ocr`의 2026-08-11 working tree
-- **현재 구현**: `generic-parser.v15` + `nutrition-label-parser.v1` / `0.2.0` (실기기 설치 근거는 `0.1.14`; 이후 버전은 로컬 검증)
+- **기준 작업 트리**: `feat/home-api-settings-nutrition-box`의 2026-08-12 working tree
+- **현재 구현**: `generic-parser.v15` + `nutrition-label-parser.v2` / `0.2.0` (새 APK는 SM-A256N 계측 테스트에서 사용; 실제 OCR 정확도는 미검증)
 - **주요 근거**: 사용자 피드백, `receipt-scanner` 소스·회귀 테스트, 로컬 Gradle 검증
-- **실기기 근거**: Samsung SM-A256N에 `0.1.14` debug APK 업데이트 설치, 패키지 버전 및 resumed `MainActivity` 확인. 설치·실행은 확인했지만 실제 영수증 OCR 정확도는 별도 검증하지 않았다.
+- **실기기 근거**: Samsung SM-A256N에서 새 debug APK의 홈 API 설정 계측 테스트를 통과했다. 실제 영수증·영양 라벨 OCR 정확도는 별도 검증하지 않았다.
 - **표현 규칙**: `사용자 확인`, `저장소 검증`, `강한 추론`, `계획`을 구분한다. 로컬 빌드 성공을 실제 영수증 정확도나 배포 완료로 확대하지 않는다.
+
+## 2026-08-12 검증 기록
+
+| 검사 | 명령/절차 | 환경·경계 | 결과 |
+| --- | --- | --- | --- |
+| 전체 unit test | `.\gradlew.bat test --rerun-tasks` | Windows, 로컬 합성 입력과 가짜 Gemini·Nutrition HTTP 응답 | 통과: 21 suites, 147 tests, failures/errors/skipped 0 |
+| 전체 Gradle 확인 | `.\gradlew.bat test lint assembleDebug assembleDebugAndroidTest :app:compileReleaseKotlin --no-daemon` | 루트 `.env`의 안전한 Nutrition/Gemini model 기본값, 비밀값은 BuildConfig에 미포함 | 통과: unit test·lint·debug APK·instrumentation APK·debug/release Kotlin compile |
+| 새 홈 API 설정 계측 | `.\gradlew.bat :app:connectedDebugAndroidTest '-Pandroid.testInstrumentationRunnerArguments.class=com.pricetrace.receiptocr.ReceiptUiInstrumentedTest#homeOpensApiSettingsForGeminiAndFitnessConnections' --rerun-tasks` | Samsung SM-A256N, Android 16 | 통과: 홈에서 API 설정을 열고 Gemini/Supabase 설정 필드가 표시됨 |
+| `.env` 기본값 계측 | `AndroidNutritionSupabaseStoreInstrumentedTest` | Samsung SM-A256N, 명시적 기본 URL/key와 새 APK | 통과: 저장 전 기본 연결값 노출·HTTPS/publishable 검증 경로 확인 |
+| debug APK | `app/build/outputs/apk/debug/app-debug.apk` | 루트 `.env`로 생성한 최신 산출물 | 59,059,792 bytes, SHA-256 `3BD2A2C34937CF767FA67763BF621FE8E543F7DE2CD2F44A875849336170FF9D` |
+| 전체 connected 계측 | `.\gradlew.bat connectedDebugAndroidTest --rerun-tasks` | Samsung SM-A256N | 전체 성공 아님: 현재 기기에서 Compose/UI 테스트 3건과 Room migration schema asset 누락 1건 실패. 새 API 설정 단독 테스트는 별도 통과 |
+
+새 APK를 사용한 실제 상품 라벨 OCR 정확도, 실제 Gemini 호출, 실제 Nutrition Supabase 로그인/저장과 원격 migration/RLS는 여전히 검증하지 않았다.
 
 ## 2026-08-11 검증 기록
 
 | 검사 | 명령/절차 | 환경·경계 | 결과 |
 | --- | --- | --- | --- |
-| 전체 unit test | `app` + `receipt-scanner` XML 집계 | Windows, 로컬 합성 입력과 가짜 Gemini·Nutrition HTTP 응답 | 통과: 21 suites, 145 tests, failures/errors/skipped 0 |
+| 전체 unit test | `app` + `receipt-scanner` XML 집계 | Windows, 로컬 합성 입력과 가짜 Gemini·Nutrition HTTP 응답 | 통과: 21 suites, 145 tests, failures/errors/skipped 0 (이전 기준) |
 | 전체 Gradle 확인 | `.\gradlew.bat test lint assembleDebug assembleDebugAndroidTest :app:compileReleaseKotlin --no-daemon` | API 키 없는 로컬 JDK/Android SDK | 통과: unit test·lint·debug APK·instrumentation APK·debug/release Kotlin compile |
 | lint | `app` + `receipt-scanner` debug XML 보고서 | 로컬 정적 분석 | 0 issues |
 | Gemini key 정적 검사 | API key·header assignment 패턴 `rg` | source/docs, build 제외 | embedded Gemini key 패턴 없음 |
 
-`0.2.0` debug APK는 58,704,077 bytes이고 SHA-256은 `46013818A8D45DCADDAB651B3DCC4E63EF1EDCFF77F1AB723FD3328C8C36CB43`이다. `connectedDebugAndroidTest`, 기기 설치, Android Keystore 계측 테스트 실행, 실제 Gemini·Nutrition 네트워크 요청과 영수증/라벨 정확도 비교는 실행하지 않았다.
+이전 `0.2.0` debug APK는 58,704,077 bytes이고 SHA-256은 `46013818A8D45DCADDAB651B3DCC4E63EF1EDCFF77F1AB723FD3328C8C36CB43`이다. 새 검증 기록은 위 2026-08-12 섹션을 기준으로 한다.
 
 ## 2026-08-08 검증 기록
 
@@ -604,7 +617,9 @@
 
 - **결정**: 선택지 3. Room schema v4에 `workflow_type`, `display_title`, `workflow_draft_storage_key`를 추가한다. v1~v3 기존 행은 `pricetrace_receipt`로 migration한다.
 - **결정**: ML Kit engine의 공식 이름은 `OcrEngine`/`MlKitDocumentOcrEngine`으로 일반화하고 기존 receipt 이름은 source-compatible alias로 보존한다.
-- **결정**: `fitness_nutrition`은 `nutrition-label-parser.v1`과 `fitness-nutrition-draft.v1`을 사용한다. 모르는 영양소는 0이 아니라 null이며 필수 7종이 없으면 전송을 차단한다.
+- **결정**: `fitness_nutrition`은 `nutrition-label-parser.v2`와 `fitness-nutrition-draft.v1`을 사용한다. 영양정보 헤더부터 원재료·알레르기 영역 전까지만 성분을 자동 포착하고, 상품명·브랜드는 자동 추정하지 않아 사용자가 직접 입력한다. 모르는 영양소는 0이 아니라 null이며 필수 7종이 없으면 전송을 차단한다.
+- **결정**: Gemini API 키와 Fitness Nutrition Supabase 연결은 홈의 단일 `API 설정` 화면에서 관리하고, 교정·영양 검수 화면은 같은 설정 카드와 저장 콜백을 재사용한다. Supabase 클라이언트 키는 publishable/anon 범위로 제한하고 사용자 인증 토큰 없이 private 행을 전송하지 않는다.
+- **결정**: 루트 `.env`는 빌드 시 Nutrition HTTPS URL·publishable/anon key와 Gemini 모델명만 안전한 기본값으로 주입한다. `GEMINI_API_KEY`, 이메일·비밀번호는 APK/`BuildConfig`에 넣지 않고 기존 Keystore·로그인 입력 흐름을 유지한다. URL이 HTTPS가 아니거나 service-role/secret key이면 빌드를 중단한다.
 - **결정**: 사용자 확정 후 별도 Nutrition Supabase URL·publishable/anon key와 Fitness 사용자 Bearer token으로 본인 소유 `private` 식품만 저장한다. 비밀번호는 저장하지 않고 access/refresh token만 Android Keystore로 암호화한다.
 - **결정**: stable document food ID, source reference와 revision 조건을 사용한다. 다른 source 또는 원격 선행 수정은 무조건 덮어쓰지 않는다.
 - **결정**: OCR evidence와 원본 이미지는 서버 payload에서 제외한다. `catalog_product_id`, `standard_product_id`, `product_nutrition_links`, 공개 전환은 이 앱이 만들지 않는다.

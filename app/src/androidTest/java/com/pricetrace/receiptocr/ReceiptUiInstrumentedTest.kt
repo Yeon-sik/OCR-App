@@ -94,6 +94,29 @@ class ReceiptUiInstrumentedTest {
     }
 
     @Test
+    fun homeOpensApiSettingsForGeminiAndFitnessConnections() {
+        var opened = false
+        var state by mutableStateOf(ReceiptAppUiState())
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onShowApiSettings = {
+                        opened = true
+                        state = state.copy(screen = AppScreen.API_SETTINGS)
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("api_settings_button").performClick()
+        composeRule.onNodeWithTag("api_settings").assertIsDisplayed()
+        composeRule.onNodeWithTag("gemini_api_key_input").assertIsDisplayed()
+        composeRule.onNodeWithTag("nutrition_supabase_url").assertIsDisplayed()
+        composeRule.runOnIdle { assertTrue(opened) }
+    }
+
+    @Test
     fun verifiedNutritionReviewRequiresExplicitPublishAction() {
         var productName: String? = null
         var published = 0

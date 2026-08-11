@@ -29,10 +29,13 @@ class NutritionLabelParserTest {
                 "포화 지방 3 g 20%",
                 "첨가 당류 2 g",
                 "단백질 15 g 27%",
+                "원재료명: 대두, 우유",
+                "단백질 999 g",
             ),
         )
 
-        assertEquals("튼튼 프로틴바", draft.productName)
+        assertEquals("", draft.productName)
+        assertNull(draft.brand)
         assertEquals(45.0, draft.basisAmount)
         assertEquals("g", draft.basisUnit)
         assertEquals(210.0, draft.value(NutritionField.CALORIES_KCAL))
@@ -43,7 +46,76 @@ class NutritionLabelParserTest {
         assertEquals(9.0, draft.value(NutritionField.FAT_GRAMS))
         assertNull(draft.value(NutritionField.FIBER_GRAMS))
         assertNull(draft.value(NutritionField.CHOLESTEROL_MG))
-        assertTrue(NutritionLabelValidator.validate(draft).isReadyForUpload)
+        assertEquals(15.0, draft.value(NutritionField.PROTEIN_GRAMS))
+        assertTrue(NutritionLabelValidator.validate(draft).errors.any { it.contains("상품명") })
+        assertTrue(NutritionLabelValidator.validate(draft.copy(productName = "튼튼 프로틴바")).isReadyForUpload)
+    }
+
+    @Test
+    fun capturesEveryAvailableNutrientInsideTheNutritionBox() {
+        val draft = parser.parse(
+            document(
+                "제품 브랜드명",
+                "영양정보",
+                "총 내용량 100 g",
+                "열량 210 kcal",
+                "나트륨 150 mg",
+                "탄수화물 23 g",
+                "당류 8 g",
+                "지방 9 g",
+                "포화지방 3 g",
+                "트랜스지방 0 g",
+                "콜레스테롤 5 mg",
+                "식이섬유 4 g",
+                "첨가당 2 g",
+                "단백질 15 g",
+                "알레르기 정보: 우유",
+                "단백질 999 g",
+            ),
+        )
+
+        assertEquals(150.0, draft.value(NutritionField.SODIUM_MG))
+        assertEquals(23.0, draft.value(NutritionField.CARBS_GRAMS))
+        assertEquals(8.0, draft.value(NutritionField.SUGARS_GRAMS))
+        assertEquals(9.0, draft.value(NutritionField.FAT_GRAMS))
+        assertEquals(3.0, draft.value(NutritionField.SATURATED_FAT_GRAMS))
+        assertEquals(0.0, draft.value(NutritionField.TRANS_FAT_GRAMS))
+        assertEquals(5.0, draft.value(NutritionField.CHOLESTEROL_MG))
+        assertEquals(4.0, draft.value(NutritionField.FIBER_GRAMS))
+        assertEquals(2.0, draft.value(NutritionField.ADDED_SUGARS_GRAMS))
+        assertEquals(15.0, draft.value(NutritionField.PROTEIN_GRAMS))
+        assertTrue(draft.evidence.values.flatten().none { it.rawText.contains("999") })
+        assertEquals("", draft.productName)
+    }
+
+    @Test
+    fun combinesAdjacentLabelAndValueLinesInsideTheNutritionBox() {
+        val draft = parser.parse(
+            document(
+                "영양정보",
+                "총 내용량 100 g",
+                "나트륨",
+                "150 mg",
+                "단백질",
+                "15 g",
+                "탄수화물",
+                "23 g",
+                "당류",
+                "8 g",
+                "지방",
+                "9 g",
+                "포화지방",
+                "3 g",
+                "원재료명: 대두",
+            ),
+        )
+
+        assertEquals(150.0, draft.value(NutritionField.SODIUM_MG))
+        assertEquals(15.0, draft.value(NutritionField.PROTEIN_GRAMS))
+        assertEquals(23.0, draft.value(NutritionField.CARBS_GRAMS))
+        assertEquals(8.0, draft.value(NutritionField.SUGARS_GRAMS))
+        assertEquals(9.0, draft.value(NutritionField.FAT_GRAMS))
+        assertEquals(3.0, draft.value(NutritionField.SATURATED_FAT_GRAMS))
     }
 
     @Test
