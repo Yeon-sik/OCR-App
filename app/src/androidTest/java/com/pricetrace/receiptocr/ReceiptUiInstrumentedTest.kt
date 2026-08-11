@@ -39,8 +39,11 @@ import com.pricetrace.receiptscanner.domain.ReconciliationSuggestion
 import com.pricetrace.receiptscanner.domain.RetailChannel
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
+import com.pricetrace.receiptscanner.nutrition.NutritionField
+import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.storage.ReceiptFileStore
 import com.pricetrace.receiptscanner.storage.RoomReceiptSessionRepository
+import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -66,6 +69,77 @@ class ReceiptUiInstrumentedTest {
             state = ReceiptAppUiState(message = "스캔 결과를 가져오지 못했습니다. 다시 시도하세요.")
         }
         composeRule.onNodeWithText("스캔 결과를 가져오지 못했습니다. 다시 시도하세요.").assertIsDisplayed()
+    }
+
+    @Test
+    fun homeWorkflowTabsSeparatePriceTraceAndFitnessSessions() {
+        var selected: OcrWorkflowType? = null
+        var state by mutableStateOf(ReceiptAppUiState())
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onWorkflowSelected = {
+                        selected = it
+                        state = state.copy(selectedWorkflow = it)
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("workflow_pricetrace").assertIsDisplayed()
+        composeRule.onNodeWithTag("workflow_fitness").performClick()
+        composeRule.onNodeWithText("상품 영양성분 촬영·선택").assertIsDisplayed()
+        composeRule.runOnIdle { assertEquals(OcrWorkflowType.FITNESS_NUTRITION, selected) }
+    }
+
+    @Test
+    fun verifiedNutritionReviewRequiresExplicitPublishAction() {
+        var productName: String? = null
+        var published = 0
+        val draft = NutritionLabelDraft(
+            documentId = "ocr-ui-nutrition",
+            productName = "검증 상품",
+            basisAmount = 100.0,
+            basisUnit = "g",
+            nutrients = mapOf(
+                NutritionField.CALORIES_KCAL to 100.0,
+                NutritionField.PROTEIN_GRAMS to 10.0,
+                NutritionField.CARBS_GRAMS to 15.0,
+                NutritionField.FAT_GRAMS to 2.0,
+                NutritionField.SODIUM_MG to 90.0,
+                NutritionField.SATURATED_FAT_GRAMS to 1.0,
+                NutritionField.SUGARS_GRAMS to 5.0,
+            ),
+        )
+        val state = ReceiptAppUiState(
+            screen = AppScreen.NUTRITION_REVIEW,
+            selectedWorkflow = OcrWorkflowType.FITNESS_NUTRITION,
+            nutritionDraft = draft,
+            nutritionValidationErrors = emptyList(),
+            nutritionSupabaseUrl = "https://nutrition.example.com",
+            isNutritionPublishableKeyConfigured = true,
+            nutritionSignedInEmail = "fit@example.com",
+        )
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onNutritionProductNameChanged = { productName = it },
+                    onConfirmAndPublishNutrition = { published += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("nutrition_product_name").performTextReplacement("수정 상품")
+        composeRule.onNodeWithTag("nutrition_review")
+            .performScrollToNode(hasTestTag("confirm_publish_nutrition"))
+        composeRule.runOnIdle {
+            assertEquals("수정 상품", productName)
+            assertEquals(0, published)
+        }
+        composeRule.onNodeWithTag("confirm_publish_nutrition").assertIsEnabled().performClick()
+        composeRule.runOnIdle { assertEquals(1, published) }
     }
 
     @Test
@@ -289,7 +363,11 @@ class ReceiptUiInstrumentedTest {
         assertEquals(pageId, secondRepository.getPages(documentId).single().id)
         assertEquals(candidate, ReceiptV2Json.decode(fileStore.readBytes(requireNotNull(restored.receiptStorageKey)).toString(Charsets.UTF_8)))
         val duplicateDocumentId = "instrumented-${UUID.randomUUID()}"
-        secondRepository.createSession(duplicateDocumentId)
+        secondRepository.createSession(duplicateDocumentId, OcrWorkflowType.FITNESS_NUTRITION)
+        assertEquals(
+            OcrWorkflowType.FITNESS_NUTRITION,
+            requireNotNull(secondRepository.getSession(duplicateDocumentId)).workflowType,
+        )
         val duplicateCandidates = secondRepository.addPages(
             duplicateDocumentId,
             listOf(

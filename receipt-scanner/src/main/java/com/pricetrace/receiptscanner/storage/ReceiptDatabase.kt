@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [ScanSessionEntity::class, ReceiptPageEntity::class, ReviewEditEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 internal abstract class ReceiptDatabase : RoomDatabase() {
@@ -32,12 +32,24 @@ internal abstract class ReceiptDatabase : RoomDatabase() {
             }
         }
 
+        /** Existing receipt sessions remain PriceTrace sessions; new workflows get their own draft key. */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE scan_sessions ADD COLUMN workflow_type TEXT NOT NULL " +
+                        "DEFAULT 'pricetrace_receipt'",
+                )
+                db.execSQL("ALTER TABLE scan_sessions ADD COLUMN display_title TEXT")
+                db.execSQL("ALTER TABLE scan_sessions ADD COLUMN workflow_draft_storage_key TEXT")
+            }
+        }
+
         fun getInstance(context: Context): ReceiptDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 ReceiptDatabase::class.java,
                 "receipt-scanner.db",
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { database -> instance = database }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { database -> instance = database }
         }
     }
 }

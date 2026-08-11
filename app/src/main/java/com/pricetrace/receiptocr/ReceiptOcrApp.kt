@@ -68,12 +68,22 @@ fun ReceiptOcrApp(
         onScan = {
             activity?.let { viewModel.prepareScanner(it, onLaunchScanner) }
         },
+        onWorkflowSelected = viewModel::selectWorkflow,
         onAppendScan = {
             activity?.let { viewModel.prepareScanner(it, onLaunchScanner, appendToCurrent = true) }
         },
         onSelectSession = viewModel::selectSession,
         onDeleteSession = viewModel::deleteSession,
         onStartOcr = viewModel::startOcr,
+        onNutritionProductNameChanged = viewModel::updateNutritionProductName,
+        onNutritionBrandChanged = viewModel::updateNutritionBrand,
+        onNutritionCategoryChanged = viewModel::updateNutritionCategory,
+        onNutritionBasisAmountChanged = viewModel::updateNutritionBasisAmount,
+        onNutritionBasisUnitChanged = viewModel::updateNutritionBasisUnit,
+        onNutritionValueChanged = viewModel::updateNutritionValue,
+        onSaveNutritionConnection = viewModel::saveNutritionConnection,
+        onSignInNutrition = viewModel::signInNutrition,
+        onConfirmAndPublishNutrition = viewModel::confirmAndPublishNutrition,
         onMerchantNameChanged = viewModel::updateMerchantName,
         onBranchNameChanged = viewModel::updateBranchName,
         onBusinessRegistrationNumberChanged = viewModel::updateBusinessRegistrationNumber,

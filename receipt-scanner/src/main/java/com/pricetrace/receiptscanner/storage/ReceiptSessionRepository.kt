@@ -2,6 +2,7 @@ package com.pricetrace.receiptscanner.storage
 
 import android.content.Context
 import com.pricetrace.receiptscanner.domain.ReceiptPage
+import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.time.OffsetDateTime
@@ -24,6 +25,9 @@ data class ReceiptSession(
     val manifestStorageKey: String?,
     val reviewedAt: String?,
     val ocrCompletedAt: String? = null,
+    val workflowType: OcrWorkflowType = OcrWorkflowType.PRICE_TRACE_RECEIPT,
+    val displayTitle: String? = null,
+    val workflowDraftStorageKey: String? = null,
 )
 
 data class ReviewEdit(
@@ -52,7 +56,11 @@ interface ReceiptSessionRepository {
     suspend fun getSession(documentId: String): ReceiptSession?
     suspend fun getPages(documentId: String): List<ReceiptPage>
     suspend fun getEdits(documentId: String): List<ReviewEdit>
-    suspend fun createSession(documentId: String, createdAt: String = OffsetDateTime.now().toString())
+    suspend fun createSession(
+        documentId: String,
+        workflowType: OcrWorkflowType = OcrWorkflowType.PRICE_TRACE_RECEIPT,
+        createdAt: String = OffsetDateTime.now().toString(),
+    )
     suspend fun addPages(documentId: String, pages: List<ReceiptPage>): List<String>
     suspend fun updateSession(session: ReceiptSession)
     suspend fun appendEdit(edit: ReviewEdit)
@@ -90,7 +98,11 @@ class RoomReceiptSessionRepository internal constructor(
     override suspend fun getEdits(documentId: String): List<ReviewEdit> =
         dao.getEdits(documentId).map(ReviewEditEntity::toDomain)
 
-    override suspend fun createSession(documentId: String, createdAt: String) {
+    override suspend fun createSession(
+        documentId: String,
+        workflowType: OcrWorkflowType,
+        createdAt: String,
+    ) {
         dao.upsertSession(
             ScanSessionEntity(
                 documentId = documentId,
@@ -110,6 +122,9 @@ class RoomReceiptSessionRepository internal constructor(
                 manifestStorageKey = null,
                 reviewedAt = null,
                 ocrCompletedAt = null,
+                workflowType = workflowType.wireValue,
+                displayTitle = null,
+                workflowDraftStorageKey = null,
             ),
         )
     }
@@ -204,6 +219,9 @@ private fun ScanSessionEntity.toDomain() = ReceiptSession(
     manifestStorageKey = manifestStorageKey,
     reviewedAt = reviewedAt,
     ocrCompletedAt = ocrCompletedAt,
+    workflowType = OcrWorkflowType.fromWireValue(workflowType),
+    displayTitle = displayTitle,
+    workflowDraftStorageKey = workflowDraftStorageKey,
 )
 
 private fun ReceiptSession.toEntity() = ScanSessionEntity(
@@ -224,6 +242,9 @@ private fun ReceiptSession.toEntity() = ScanSessionEntity(
     manifestStorageKey = manifestStorageKey,
     reviewedAt = reviewedAt,
     ocrCompletedAt = ocrCompletedAt,
+    workflowType = workflowType.wireValue,
+    displayTitle = displayTitle,
+    workflowDraftStorageKey = workflowDraftStorageKey,
 )
 
 private fun ReceiptPage.toEntity() = ReceiptPageEntity(

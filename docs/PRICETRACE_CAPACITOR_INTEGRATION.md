@@ -16,7 +16,7 @@
 ## 교체 가능한 계약
 
 - `DocumentCaptureProvider`: byte page import의 순수 결과와 안정적 실패 상태
-- `ReceiptOcrEngine`: 순수 `OcrDocument` 반환
+- `OcrEngine`: 모든 워크플로에서 순수 `OcrDocument` 반환 (`ReceiptOcrEngine`은 호환 alias)
 - `ReceiptParser`: `ParserProfile` 교체 가능
 - `ReceiptSessionRepository`: 세션/페이지/검수 이력 보존
 - `ReceiptPublisher`: 서버 연결의 유일한 추상 경계

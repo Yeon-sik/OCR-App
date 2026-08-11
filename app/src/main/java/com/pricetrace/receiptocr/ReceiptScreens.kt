@@ -40,8 +40,10 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -88,7 +90,12 @@ import com.pricetrace.receiptscanner.domain.ValidationSeverity
 import com.pricetrace.receiptscanner.domain.isUserEntered
 import com.pricetrace.receiptscanner.domain.purchaseLocalTime
 import com.pricetrace.receiptscanner.ocr.OcrDocument
+import com.pricetrace.receiptscanner.nutrition.NutritionContract
+import com.pricetrace.receiptscanner.nutrition.NutritionField
+import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
+import com.pricetrace.receiptscanner.nutrition.NutritionUnit
 import com.pricetrace.receiptscanner.storage.ReceiptSession
+import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -103,10 +110,20 @@ fun ReceiptOcrContent(
     pages: List<ReceiptPage> = emptyList(),
     resolvePageFile: (String) -> File = ::File,
     onScan: () -> Unit = {},
+    onWorkflowSelected: (OcrWorkflowType) -> Unit = {},
     onAppendScan: () -> Unit = {},
     onSelectSession: (String) -> Unit = {},
     onDeleteSession: (String) -> Unit = {},
     onStartOcr: () -> Unit = {},
+    onNutritionProductNameChanged: (String) -> Unit = {},
+    onNutritionBrandChanged: (String) -> Unit = {},
+    onNutritionCategoryChanged: (String) -> Unit = {},
+    onNutritionBasisAmountChanged: (String) -> Unit = {},
+    onNutritionBasisUnitChanged: (String) -> Unit = {},
+    onNutritionValueChanged: (NutritionField, String) -> Unit = { _, _ -> },
+    onSaveNutritionConnection: (String, String) -> Unit = { _, _ -> },
+    onSignInNutrition: (String, String) -> Unit = { _, _ -> },
+    onConfirmAndPublishNutrition: () -> Unit = {},
     onMerchantNameChanged: (String) -> Unit = {},
     onBranchNameChanged: (String) -> Unit = {},
     onBusinessRegistrationNumberChanged: (String) -> Unit = {},
@@ -165,13 +182,16 @@ fun ReceiptOcrContent(
             when (uiState.screen) {
                 AppScreen.SESSION_LIST -> SessionListScreen(
                     sessions = sessions,
+                    selectedWorkflow = uiState.selectedWorkflow,
                     isBusy = uiState.isPreparingScanner || uiState.isImportingPages,
                     onScan = onScan,
+                    onWorkflowSelected = onWorkflowSelected,
                     onSelectSession = onSelectSession,
                     onDeleteSession = onDeleteSession,
                     onShowEvaluation = onShowEvaluation,
                 )
                 AppScreen.IMAGE_CONFIRM -> ImageConfirmationScreen(
+                    workflow = uiState.selectedWorkflow,
                     pages = pages,
                     duplicateCount = uiState.possibleDuplicatePageIds.size,
                     isBusy = uiState.isPreparingScanner || uiState.isImportingPages,
@@ -285,6 +305,29 @@ fun ReceiptOcrContent(
                     onSave = onSave,
                     onShare = onShare,
                 )
+                AppScreen.NUTRITION_REVIEW -> uiState.nutritionDraft?.let { draft ->
+                    NutritionReviewScreen(
+                        draft = draft,
+                        validationErrors = uiState.nutritionValidationErrors,
+                        pages = pages,
+                        resolvePageFile = resolvePageFile,
+                        supabaseUrl = uiState.nutritionSupabaseUrl,
+                        isPublishableKeyConfigured = uiState.isNutritionPublishableKeyConfigured,
+                        signedInEmail = uiState.nutritionSignedInEmail,
+                        isSigningIn = uiState.isNutritionSigningIn,
+                        isPublishing = uiState.isNutritionPublishing,
+                        onBack = onBack,
+                        onProductNameChanged = onNutritionProductNameChanged,
+                        onBrandChanged = onNutritionBrandChanged,
+                        onCategoryChanged = onNutritionCategoryChanged,
+                        onBasisAmountChanged = onNutritionBasisAmountChanged,
+                        onBasisUnitChanged = onNutritionBasisUnitChanged,
+                        onValueChanged = onNutritionValueChanged,
+                        onSaveConnection = onSaveNutritionConnection,
+                        onSignIn = onSignInNutrition,
+                        onConfirmAndPublish = onConfirmAndPublishNutrition,
+                    )
+                }
                 AppScreen.EVALUATION -> EvaluationScreen(
                     accuracySummary = uiState.accuracySummary,
                     isBuildingAccuracyReport = uiState.isBuildingAccuracyReport,
@@ -317,24 +360,48 @@ private fun MessageCard(message: String, onDismiss: () -> Unit) {
 @Composable
 private fun SessionListScreen(
     sessions: List<ReceiptSession>,
+    selectedWorkflow: OcrWorkflowType,
     isBusy: Boolean,
     onScan: () -> Unit,
+    onWorkflowSelected: (OcrWorkflowType) -> Unit,
     onSelectSession: (String) -> Unit,
     onDeleteSession: (String) -> Unit,
     onShowEvaluation: () -> Unit,
 ) {
+    val visibleSessions = sessions.filter { it.workflowType == selectedWorkflow }
+    val isFitness = selectedWorkflow == OcrWorkflowType.FITNESS_NUTRITION
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("session_list"),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item {
-            Text("영수증 스캔·검수", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text("공통 OCR 작업실", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
             Text(
-                "OCR은 초안입니다. 원본과 대조해 확인한 값만 user_verified로 내보냅니다.",
+                if (isFitness) {
+                    "상품 라벨을 촬영해 영양성분을 검수하고 Fitness Nutrition DB에 private 식품으로 저장합니다."
+                } else {
+                    "영수증을 촬영해 PriceTrace receipt.v2 초안을 검수하고 JSON으로 확정합니다."
+                },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        item {
+            PrimaryTabRow(selectedTabIndex = if (isFitness) 1 else 0) {
+                Tab(
+                    selected = !isFitness,
+                    onClick = { onWorkflowSelected(OcrWorkflowType.PRICE_TRACE_RECEIPT) },
+                    text = { Text("PriceTrace") },
+                    modifier = Modifier.testTag("workflow_pricetrace"),
+                )
+                Tab(
+                    selected = isFitness,
+                    onClick = { onWorkflowSelected(OcrWorkflowType.FITNESS_NUTRITION) },
+                    text = { Text("Fitness App") },
+                    modifier = Modifier.testTag("workflow_fitness"),
+                )
+            }
         }
         item {
             Button(
@@ -343,19 +410,29 @@ private fun SessionListScreen(
                 modifier = Modifier.fillMaxWidth().testTag("scan_button"),
             ) {
                 if (isBusy) BusyIndicator()
-                Text("촬영 또는 갤러리에서 선택")
+                Text(if (isFitness) "상품 영양성분 촬영·선택" else "영수증 촬영·선택")
             }
         }
-        item {
-            OutlinedButton(onClick = onShowEvaluation, modifier = Modifier.fillMaxWidth().testTag("evaluation_button")) {
-                Text("실제 기기 정확도 평가")
+        if (!isFitness) {
+            item {
+                OutlinedButton(
+                    onClick = onShowEvaluation,
+                    modifier = Modifier.fillMaxWidth().testTag("evaluation_button"),
+                ) {
+                    Text("실제 기기 정확도 평가")
+                }
             }
         }
-        item { SectionTitle("저장된 검수 세션") }
-        if (sessions.isEmpty()) {
-            item { Text("아직 저장된 영수증이 없습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        item { SectionTitle(if (isFitness) "저장된 Fitness 세션" else "저장된 PriceTrace 세션") }
+        if (visibleSessions.isEmpty()) {
+            item {
+                Text(
+                    if (isFitness) "아직 저장된 영양성분 세션이 없습니다." else "아직 저장된 영수증이 없습니다.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         } else {
-            items(sessions, key = { it.documentId }) { session ->
+            items(visibleSessions, key = { it.documentId }) { session ->
                 SessionCard(
                     session = session,
                     onClick = { onSelectSession(session.documentId) },
@@ -375,13 +452,24 @@ private fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: 
         shape = RoundedCornerShape(14.dp),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(session.merchantName ?: "미확인 판매처", fontWeight = FontWeight.SemiBold)
+            Text(
+                session.displayTitle ?: session.merchantName ?: if (
+                    session.workflowType == OcrWorkflowType.FITNESS_NUTRITION
+                ) "미확인 상품" else "미확인 판매처",
+                fontWeight = FontWeight.SemiBold,
+            )
             Text(
                 session.documentId.takeLast(20),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Text("OCR ${session.ocrStatus} · 검수 ${session.reviewStatus} · 내보내기 ${session.exportStatus}")
+            Text(
+                if (session.workflowType == OcrWorkflowType.FITNESS_NUTRITION) {
+                    "OCR ${session.ocrStatus} · 검수 ${session.reviewStatus} · DB ${session.uploadStatus}"
+                } else {
+                    "OCR ${session.ocrStatus} · 검수 ${session.reviewStatus} · 내보내기 ${session.exportStatus}"
+                },
+            )
             session.lastError?.let { Text("최근 오류: $it", color = MaterialTheme.colorScheme.error) }
             TextButton(
                 onClick = { showDeleteConfirmation = true },
@@ -412,6 +500,7 @@ private fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: 
 
 @Composable
 private fun ImageConfirmationScreen(
+    workflow: OcrWorkflowType,
     pages: List<ReceiptPage>,
     duplicateCount: Int,
     isBusy: Boolean,
@@ -425,7 +514,13 @@ private fun ImageConfirmationScreen(
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        item { ScreenHeader("이미지 확인", "페이지 순서와 가독성을 확인하세요.", onBack) }
+        item {
+            ScreenHeader(
+                if (workflow == OcrWorkflowType.FITNESS_NUTRITION) "상품 라벨 확인" else "영수증 이미지 확인",
+                "페이지 순서와 가독성을 확인하세요.",
+                onBack,
+            )
+        }
         if (duplicateCount > 0) {
             item {
                 Text(
@@ -449,10 +544,282 @@ private fun ImageConfirmationScreen(
                     onClick = onStartOcr,
                     enabled = pages.isNotEmpty() && !isBusy,
                     modifier = Modifier.weight(1f).testTag("start_ocr_button"),
-                ) { Text("OCR 시작") }
+                ) {
+                    Text(
+                        if (workflow == OcrWorkflowType.FITNESS_NUTRITION) {
+                            "영양성분 OCR 시작"
+                        } else {
+                            "영수증 OCR 시작"
+                        },
+                    )
+                }
             }
         }
     }
+}
+
+@Composable
+private fun NutritionReviewScreen(
+    draft: NutritionLabelDraft,
+    validationErrors: List<String>,
+    pages: List<ReceiptPage>,
+    resolvePageFile: (String) -> File,
+    supabaseUrl: String,
+    isPublishableKeyConfigured: Boolean,
+    signedInEmail: String?,
+    isSigningIn: Boolean,
+    isPublishing: Boolean,
+    onBack: () -> Unit,
+    onProductNameChanged: (String) -> Unit,
+    onBrandChanged: (String) -> Unit,
+    onCategoryChanged: (String) -> Unit,
+    onBasisAmountChanged: (String) -> Unit,
+    onBasisUnitChanged: (String) -> Unit,
+    onValueChanged: (NutritionField, String) -> Unit,
+    onSaveConnection: (String, String) -> Unit,
+    onSignIn: (String, String) -> Unit,
+    onConfirmAndPublish: () -> Unit,
+) {
+    var basisAmount by remember(draft.documentId) {
+        mutableStateOf(formatNutritionNumber(draft.basisAmount))
+    }
+    val nutrientValues = remember(draft.documentId) {
+        NutritionField.entries.associateWith { field ->
+            mutableStateOf(formatNutritionNumber(draft.value(field)))
+        }
+    }
+    var connectionUrl by remember(supabaseUrl) { mutableStateOf(supabaseUrl) }
+    var publishableKey by remember { mutableStateOf("") }
+    var email by remember(signedInEmail) { mutableStateOf(signedInEmail.orEmpty()) }
+    var password by remember { mutableStateOf("") }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().testTag("nutrition_review"),
+        contentPadding = PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            ScreenHeader(
+                "Fitness 영양성분 검수",
+                "OCR은 초안입니다. 라벨에 없는 값은 0이 아니라 모름으로 비워 두세요.",
+                onBack,
+            )
+        }
+        pages.firstOrNull()?.let { page ->
+            item { EvidenceImage(page, resolvePageFile(page.storageKey), emptyList(), zoomEnabled = true) }
+        }
+        if (draft.parseWarnings.isNotEmpty()) {
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("자동 확정하지 않은 항목", fontWeight = FontWeight.SemiBold)
+                        draft.parseWarnings.forEach { Text("• $it") }
+                    }
+                }
+            }
+        }
+        item { SectionTitle("상품 정보") }
+        item {
+            OutlinedTextField(
+                value = draft.productName,
+                onValueChange = onProductNameChanged,
+                label = { Text("상품명 *") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("nutrition_product_name"),
+            )
+        }
+        item {
+            OutlinedTextField(
+                value = draft.brand.orEmpty(),
+                onValueChange = onBrandChanged,
+                label = { Text("브랜드 (선택)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("nutrition_brand"),
+            )
+        }
+        item {
+            NutritionOptionSelector(
+                label = "상품 분류 *",
+                selected = draft.category,
+                options = NutritionContract.categories.toList().sorted(),
+                testTag = "nutrition_category",
+                onSelected = onCategoryChanged,
+            )
+        }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = basisAmount,
+                    onValueChange = {
+                        basisAmount = it
+                        onBasisAmountChanged(it)
+                    },
+                    label = { Text("기준량 *") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.weight(1f).testTag("nutrition_basis_amount"),
+                )
+                Box(Modifier.weight(1f)) {
+                    NutritionOptionSelector(
+                        label = "기준 단위 *",
+                        selected = draft.basisUnit,
+                        options = NutritionUnit.supported.toList(),
+                        testTag = "nutrition_basis_unit",
+                        onSelected = onBasisUnitChanged,
+                    )
+                }
+            }
+        }
+        item { SectionTitle("필수 7종 영양성분") }
+        items(NutritionField.entries, key = { it.wireKey }) { field ->
+            val localValue = nutrientValues.getValue(field)
+            OutlinedTextField(
+                value = localValue.value,
+                onValueChange = { value ->
+                    localValue.value = value
+                    onValueChanged(field, value)
+                },
+                label = {
+                    Text("${field.koreanLabel}${if (field.required) " *" else " (선택)"}")
+                },
+                suffix = { Text(field.canonicalUnit) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                supportingText = if (field.required) null else {
+                    { Text("라벨에 없으면 비워 두어 모름(null)으로 보존") }
+                },
+                modifier = Modifier.fillMaxWidth().testTag("nutrition_${field.wireKey}"),
+            )
+        }
+        if (validationErrors.isNotEmpty()) {
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("전송 전 확인 필요", fontWeight = FontWeight.SemiBold)
+                        validationErrors.forEach { Text("• $it") }
+                    }
+                }
+            }
+        }
+        item { SectionTitle("Fitness Nutrition DB 연결") }
+        item {
+            Card {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "서비스 역할 키는 사용하지 않습니다. publishable/anon key와 로그인한 사용자 토큰으로 " +
+                            "본인 소유 private 식품만 저장합니다.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = connectionUrl,
+                        onValueChange = { connectionUrl = it },
+                        label = { Text("Nutrition Supabase URL") },
+                        placeholder = { Text("https://<project>.supabase.co") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("nutrition_supabase_url"),
+                    )
+                    OutlinedTextField(
+                        value = publishableKey,
+                        onValueChange = { publishableKey = it },
+                        label = { Text("publishable/anon key") },
+                        placeholder = {
+                            Text(if (isPublishableKeyConfigured) "저장됨 — 변경할 때만 입력" else "런타임에 입력")
+                        },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("nutrition_publishable_key"),
+                    )
+                    OutlinedButton(
+                        onClick = { onSaveConnection(connectionUrl, publishableKey) },
+                        enabled = connectionUrl.isNotBlank() &&
+                            (publishableKey.isNotBlank() || isPublishableKeyConfigured) &&
+                            !isSigningIn && !isPublishing,
+                        modifier = Modifier.fillMaxWidth().testTag("save_nutrition_connection"),
+                    ) { Text("연결 정보 저장") }
+                    if (signedInEmail == null) {
+                        OutlinedTextField(
+                            value = email,
+                            onValueChange = { email = it },
+                            label = { Text("Fitness 계정 이메일") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                            modifier = Modifier.fillMaxWidth().testTag("nutrition_email"),
+                        )
+                        OutlinedTextField(
+                            value = password,
+                            onValueChange = { password = it },
+                            label = { Text("비밀번호 (저장하지 않음)") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("nutrition_password"),
+                        )
+                        Button(
+                            onClick = { onSignIn(email, password) },
+                            enabled = isPublishableKeyConfigured && email.isNotBlank() && password.isNotBlank() &&
+                                !isSigningIn && !isPublishing,
+                            modifier = Modifier.fillMaxWidth().testTag("nutrition_sign_in"),
+                        ) {
+                            if (isSigningIn) BusyIndicator()
+                            Text("Fitness 계정 로그인")
+                        }
+                    } else {
+                        Text("로그인: $signedInEmail", fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+        item {
+            Button(
+                onClick = onConfirmAndPublish,
+                enabled = validationErrors.isEmpty() && signedInEmail != null && !isSigningIn && !isPublishing,
+                modifier = Modifier.fillMaxWidth().testTag("confirm_publish_nutrition"),
+            ) {
+                if (isPublishing) BusyIndicator()
+                Text(if (draft.status.wireValue == "user_verified") "확정본 다시 저장" else "원본 대조 확정 후 DB 저장")
+            }
+        }
+        item {
+            Text(
+                "이 단계에서는 PriceTrace 상품 ID를 만들거나 이름으로 연결하지 않습니다. 상품 연결·공개는 " +
+                    "Fitness App의 정확 식별자 승인 절차가 소유합니다.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun NutritionOptionSelector(
+    label: String,
+    selected: String,
+    options: List<String>,
+    testTag: String,
+    onSelected: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth().testTag(testTag),
+        ) { Text("$label: $selected") }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option) },
+                    onClick = {
+                        expanded = false
+                        onSelected(option)
+                    },
+                )
+            }
+        }
+    }
+}
+
+private fun formatNutritionNumber(value: Double?): String = when {
+    value == null -> ""
+    value % 1.0 == 0.0 -> value.toLong().toString()
+    else -> value.toString()
 }
 
 @Composable

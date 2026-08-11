@@ -1,10 +1,10 @@
-# PriceTrace Receipt OCR Android Prototype
+# PriceTrace · Fitness 공통 OCR Android App
 
-Android에서 영수증을 촬영·보정하고, 한국어 OCR 초안을 사용자가 직접 검수한 뒤 PriceTrace 호환 `receipt.v2` JSON을 로컬에 생성하는 독립 앱입니다. 필요할 때만 Gemini에 기존 상품 행의 교정 후보를 요청할 수 있지만, AI 결과는 자동 확정하지 않습니다. OCR이나 AI만으로 가격을 검증하거나 표준 상품을 연결하지 않습니다.
+촬영·보정·한국어 OCR·원본 페이지 보존은 하나의 공통 파이프라인으로 사용하고, 홈에서 선택한 세션 타입에 따라 후속 작업만 분기하는 독립 Android 앱입니다. `PriceTrace` 탭은 영수증을 검수해 `receipt.v2` JSON을 만들고, `Fitness App` 탭은 상품 라벨의 영양성분을 검수한 뒤 사용자 인증으로 Nutrition DB의 본인 소유 `private` 식품에 직접 저장합니다. OCR·Gemini·상품명 유사도만으로 값을 확정하거나 PriceTrace 상품을 자동 연결하지 않습니다.
 
 ## 현재 증거 경계
 
-이 문서의 구현 주장은 2026-08-11 `feat/android-receipt-ocr-prototype`의 커밋 전 작업 트리와 로컬 Gradle 실행을 기준으로 합니다. 로컬 빌드 성공은 에뮬레이터, Google Play Services 다운로드, 실제 영수증 정확도 또는 Gemini 실호출 성공을 의미하지 않습니다.
+이 문서의 구현 주장은 2026-08-11 `feat/multi-workflow-ocr` 작업 트리와 로컬 Gradle 실행을 기준으로 합니다. 계약 대조 기준은 PriceTrace `origin/main` `34c06d0`, FitnessApp `origin/main` `25081ed`입니다. 로컬 빌드 성공은 에뮬레이터, Google Play Services 다운로드, 실제 라벨 정확도, Gemini 실호출 또는 실제 Nutrition DB 저장 성공을 의미하지 않습니다.
 
 | 검증 영역 | 현재 상태 | 근거 |
 | --- | --- | --- |
@@ -16,13 +16,26 @@ Android에서 영수증을 촬영·보정하고, 한국어 OCR 초안을 사용�
 | 실제 Android 기기 검증 | 설치·실행 확인, OCR 재검증 전 | `0.1.14`를 `SM-A256N`에 업데이트 설치했고 package metadata와 resumed `MainActivity`를 확인했으며 실제 영수증 재검증은 남음 |
 | 행 추가·삭제, 되돌리기, 차액 진단 | 단위 테스트 통과, 실기기 미검증 | `ReceiptReviewControllerTest`, `ReconciliationDiagnosticsTest`, `OcrDigitConfusionTest`; 계측 테스트는 컴파일까지만 확인 |
 | 검수 이력 기반 필드 오류율 | 단위 테스트 통과, 실측 표본 없음 | `ReviewAccuracyCalculatorTest`; 실제 영수증으로 계산한 수치는 아직 없음 |
-| Room v2→v3 migration | 미검증 | `MIGRATION_2_3` 구현과 계측 테스트 갱신까지만 완료, 실행 안 함 |
+| Room v1→v4 migration | 미검증 | 기존 세션을 PriceTrace로 유지하는 `MIGRATION_3_4`와 계측 테스트 소스는 구현·컴파일했지만 기기에서 실행하지 않음 |
 | 문서 스캐너 구성요소 다운로드 | 미검증 | 실제 기기/Google Play Services 실행 안 함 |
 | 실제 영수증 정확도 측정 | 정량 미측정 | 사용자 수동 표본에서 결함을 확인했지만 개인정보 원문을 저장소 테스트 fixture로 사용하지 않음 |
 | Gemini 교정 계약·정책 | 단위 테스트 통과 | 전송 최소화, 허용 필드, OCR 근거, stale 값, 산술 보존식, 개별 승인 규칙을 합성 입력으로 검증 |
 | Gemini Developer API 직접 연결 | 구현·가짜 HTTP 단위 테스트 통과, 실호출 미검증 | 키 없는 로컬 테스트만 실행했으며 실제 키·네트워크·할당량은 사용하지 않음 |
-| PriceTrace 연결 | 미구현 | `LocalOnlyReceiptPublisher`만 구현 |
-| Supabase/원격 서버 등록 | 미구현 | 네트워크 업로드 코드 없음 |
+| PriceTrace 서버 연결 | 미구현 | `receipt.v2` 로컬 저장·공유까지만 제공하며 `LocalOnlyReceiptPublisher` 유지 |
+| Fitness Nutrition DB 직접 저장 | 구현·가짜 HTTP 단위 테스트 통과, 실연결 미검증 | 비밀번호 로그인, 암호화 토큰, 401 refresh 1회, owner/private 행, revision 충돌 방지를 합성 응답으로 검증 |
+
+## 두 워크플로
+
+| 공통 단계 | PriceTrace | Fitness App |
+| --- | --- | --- |
+| 홈 선택 | `pricetrace_receipt` 세션 | `fitness_nutrition` 세션 |
+| 촬영·갤러리·보정 | 동일한 ML Kit Document Scanner | 동일한 ML Kit Document Scanner |
+| 페이지·OCR 보존 | 동일한 Room 세션, 앱 전용 파일, `OcrDocument` | 동일한 Room 세션, 앱 전용 파일, `OcrDocument` |
+| 파싱 | `generic-parser.v15` | `nutrition-label-parser.v1` |
+| 사용자 확정 | receipt 필드·상품 행·합계 검수 | 상품명·기준량·필수 7종·선택 4종 검수 |
+| 후속 처리 | `user_verified receipt.v2` 로컬 저장/공유 | Fitness 사용자 토큰으로 `nutrition_foods` private 행 저장 |
+
+Fitness 전송 계약, 설정 절차와 실패 경계는 [Fitness 영양성분 워크플로](docs/FITNESS_NUTRITION_WORKFLOW.md)에 정리했습니다.
 
 ## 구현 범위
 
@@ -48,7 +61,7 @@ Android에서 영수증을 촬영·보정하고, 한국어 OCR 초안을 사용�
 - 모든 검수 편집은 되돌리기·다시 적용을 지원합니다. 되돌리기는 이력을 지우지 않고 역방향 수정을 새 행으로 추가하므로, 이미 저장된 수정 이력과 어긋나지 않습니다.
 - 합계가 맞지 않으면 차액 원인 후보를 제시합니다. 각 후보의 금액은 초안의 숫자에서 산술로 정해지며(`행 금액 + 차액`), 열화된 감열지에서 섞이기 쉬운 숫자 모양·자릿수 누락·자리 뒤바뀜 규칙은 그 후보를 보여줄지 판단하는 데만 사용합니다. `수량 × 단가` 불일치, 최종 합계 자체의 오인식, 중복 인식된 행, 할인·세금·수수료 행 누락, 누락된 행도 함께 진단합니다. 어떤 후보도 자동 적용하지 않으며, 사용자가 원본과 대조해 적용하면 일반 수정과 동일하게 기록됩니다.
 - 검수 진행 상태(확인 완료 행 수, 차단·경고 건수)를 필드·행·합계 화면에 표시하고, 확인이 필요한 행만 보는 필터를 제공합니다.
-- Room은 세션·페이지·수정 이력·OCR/검수/내보내기/향후 업로드 상태와 OCR 초안 생성 시각·실제 검수 완료 시각을 보존합니다. 기존 DB는 v1→v2→v3 migration으로 유지하며, 초안의 수정 이력과 세션 요약은 한 transaction으로 갱신합니다.
+- Room은 공통 세션·페이지·수정 이력·OCR/검수/내보내기/업로드 상태와 OCR 초안 생성 시각·실제 검수 완료 시각을 보존합니다. schema v4의 `workflow_type`, `display_title`, `workflow_draft_storage_key`가 후속 파서와 초안만 구분하며, 기존 v1~v3 세션은 migration에서 PriceTrace 세션으로 유지합니다.
 - 이미지와 JSON은 앱 전용 파일 저장소에 두고 `AtomicFile`로 교체해, 덮어쓰기 도중 실패해도 직전 정상 초안을 보존합니다.
 - 동일한 JSON은 정렬된 canonical JSON으로 같은 revision SHA-256과 idempotency key를 생성합니다.
 - Android 공유 시트에는 `FileProvider`로 `receipt.json` 하나만 전달합니다. raw OCR은 기본 제외이며 이미지와 `ocr-debug.json`은 공유하지 않습니다.
@@ -71,11 +84,13 @@ Android에서 영수증을 촬영·보정하고, 한국어 OCR 초안을 사용�
 ## 프로젝트 구조
 
 ```text
-app/                 Compose 테스트 앱, 상태 흐름, Gemini REST adapter·Keystore, FileProvider 공유
+app/                 Compose 앱, 워크플로 상태, Gemini/Fitness HTTPS adapter·Keystore, FileProvider 공유
 receipt-scanner/     재사용 Android Library
   capture/           스캔 경계와 ML Kit Android adapter
-  ocr/               OCR interface와 순수 DTO
+  ocr/               모든 워크플로가 공유하는 OCR interface와 순수 DTO
+  workflow/          세션 워크플로 식별자
   parser/            범용 규칙 파서와 ParserProfile
+  nutrition/         Fitness 영양 라벨 파서, 검증, 로컬/서버 JSON 계약
   domain/            receipt.v2 모델, 검증, 평가 계산
   storage/           Room metadata와 앱 전용 파일
   review/            사용자 수정 이력과 검수 상태
@@ -126,7 +141,7 @@ Gemini는 선택 기능입니다. API 키 없이도 기존 로컬 OCR 앱은 동
 | Kotlin / Compose BOM | 2.4.10 / 2026.06.01 | Compose compiler plugin과 UI 버전 정렬 |
 | Activity / Lifecycle | 1.13.0 / 2.11.0 | Activity Result와 lifecycle-aware Flow 수집 |
 | Fragment | 1.8.9 | ML Kit transitive 버전을 Activity Result 호환 stable release로 정렬 |
-| Room / KSP | 2.8.4 / 2.3.9 | 로컬 metadata 보존; schema v3와 migration 유지 비용 발생 |
+| Room / KSP | 2.8.4 / 2.3.9 | 공통 metadata 보존; schema v4와 migration 유지 비용 발생 |
 | ML Kit Document Scanner | 16.0.0 | Play Services 기반 보정 UI; 지원 기기와 최초 구성요소 다운로드에 의존 |
 | ML Kit Korean Text Recognition | 16.0.1 | 한국어·영문·숫자 OCR; 앱 크기와 처리 메모리 증가 |
 | Gemini transport | Interactions API v1beta / platform HTTPS | Firebase SDK 없이 직접 호출; 키를 기기에서 관리하고 공개 배포 시 backend 전환 필요 |
@@ -141,10 +156,11 @@ Gemini는 선택 기능입니다. API 키 없이도 기존 로컬 OCR 앱은 동
 - [실제 기기 테스트 체크리스트](docs/DEVICE_TEST_CHECKLIST.md)
 - [개인정보 및 보안 경계](docs/PRIVACY_BOUNDARIES.md)
 - [Gemini 교정 제안 설정](docs/GEMINI_CORRECTION_SETUP.md)
+- [Fitness 영양성분 검수·DB 저장](docs/FITNESS_NUTRITION_WORKFLOW.md)
 - [PriceTrace Capacitor 연결 설계](docs/PRICETRACE_CAPACITOR_INTEGRATION.md)
 - [알려진 제한사항](docs/KNOWN_LIMITATIONS.md)
 - [합성 receipt.v2 예제](examples/receipt.v2.example.json)
 
 ## 완료의 의미
 
-저장소 수준에서는 전체 촬영→OCR→검수→JSON 상태 흐름, 선택적 Gemini 교정 후보 흐름과 APK 패키징이 구현되어 있습니다. 요청한 완료 조건을 실제 환경에서 입증하려면 [기기 체크리스트](docs/DEVICE_TEST_CHECKLIST.md)의 촬영, 모델 준비, OCR, 복원, 공유 항목을 현재 `0.1.16` APK로 통과하고 [Gemini 설정 문서](docs/GEMINI_CORRECTION_SETUP.md)의 실제 키·네트워크 체크리스트를 별도로 확인해야 합니다. 설치·실행만으로는 현재 파서의 실제 영수증 정확도나 AI 교정 효과가 입증되지 않으므로 “실기기 완료” 또는 특정 정확도 향상을 주장하지 않습니다.
+저장소 수준에서는 공통 촬영→OCR 뒤 PriceTrace 또는 Fitness로 분기하는 상태 흐름, 선택적 Gemini 교정, Fitness 사용자 인증·private DB 저장 adapter와 APK 패키징이 구현되어 있습니다. 실제 완료를 입증하려면 `0.2.0` APK에서 두 탭의 촬영·복원·검수, 실제 Gemini 호출, 실제 Nutrition 프로젝트 로그인·RLS·insert/update를 각각 실행해야 합니다. 로컬 테스트만으로 실기기 정확도, 원격 migration 적용, AI 개선 폭 또는 운영 DB 저장 성공을 주장하지 않습니다.

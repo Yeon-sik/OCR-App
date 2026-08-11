@@ -4,6 +4,7 @@
 
 - 원본/보정 이미지: 앱 전용 `filesDir/receipt-scanner/<document-id>/pages/`
 - 검수 중 JSON: 앱 전용 `<document-id>/draft/receipt.json`
+- Fitness 검수 중 JSON: 앱 전용 `<document-id>/draft/fitness-nutrition.json`
 - 검증본과 manifest: 앱 전용 `<document-id>/exports/<revision>/`
 - OCR 위치 디버그: 앱 전용 `<document-id>/ocr/` 및 export 내부 private artifact
 - 세션, 페이지 metadata, 수정 이력: Room
@@ -37,7 +38,17 @@
 - 요청 시 키를 복호화해 `x-goog-api-key` header에만 둡니다. request JSON과 correction provenance에는 포함하지 않습니다.
 - 키 삭제는 ciphertext/IV와 Keystore alias를 함께 제거합니다.
 - Android Keystore는 루팅·디버깅·런타임 계측 환경의 추출을 막는 production server boundary가 아닙니다. 직접 API 호출은 개인 사용으로 제한하며 공개 배포 시 backend proxy로 이동해야 합니다. [Gemini API key security](https://ai.google.dev/gemini-api/docs/api-key)
-- PriceTrace/Supabase 업로드 구현이 없으므로 사용자 로그인 token은 저장하지 않습니다. 선택적 Gemini 요청 외의 영수증 원격 전송 경로는 없습니다.
+- PriceTrace 영수증 업로드는 구현하지 않았으므로 영수증 이미지·OCR·`receipt.v2`는 선택적 Gemini 요청 외에 원격 전송하지 않습니다.
+
+## Fitness Nutrition DB 전송
+
+- 사용자가 `Fitness App` 탭에서 필수 값을 원본 대조하고 저장 버튼을 누른 경우에만 원격 요청합니다. 자동·백그라운드 업로드는 없습니다.
+- 별도 Nutrition Supabase의 publishable/anon key와 Fitness 사용자 Bearer token을 사용합니다. `service_role` 키는 사용하지 않습니다.
+- 비밀번호는 로그인 요청 body에만 사용하고 앱 상태·Room·SharedPreferences·로그에 저장하지 않습니다.
+- access/refresh token은 Android Keystore AES-GCM으로 암호화한 세션 payload로 저장합니다. URL과 클라이언트 배포용 publishable/anon key는 private SharedPreferences에 저장합니다.
+- 전송값은 사용자가 확정한 상품명·브랜드·기준량·영양성분·private 소유 metadata뿐입니다. 원본 이미지, OCR raw text, line evidence, bounding box, PriceTrace 상품 ID는 전송하지 않습니다.
+- 신규 행은 `owner_id=로그인 user.id`, `visibility=private`로 제한합니다. 기존 행은 같은 OCR source와 원격 revision이 맞을 때만 수정합니다.
+- 실제 원격 RLS와 migration 적용 여부는 로컬 테스트로 검증되지 않았습니다. 실제 계정으로 insert/update와 다른 사용자 접근 차단을 별도 확인해야 합니다.
 
 ## 삭제 일관성
 
