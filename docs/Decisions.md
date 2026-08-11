@@ -20,7 +20,7 @@
 | lint | `app` + `receipt-scanner` debug XML 보고서 | 로컬 정적 분석 | 0 issues |
 | Gemini key 정적 검사 | API key·header assignment 패턴 `rg` | source/docs, build 제외 | embedded Gemini key 패턴 없음 |
 
-`0.2.0` debug APK는 58,704,077 bytes이고 SHA-256은 `6C0C83CE4363839045141A568C14D4EB0C637655BB26F70A54FDFF38AC0801D1`이다. `connectedDebugAndroidTest`, 기기 설치, Android Keystore 계측 테스트 실행, 실제 Gemini·Nutrition 네트워크 요청과 영수증/라벨 정확도 비교는 실행하지 않았다.
+`0.2.0` debug APK는 58,704,077 bytes이고 SHA-256은 `46013818A8D45DCADDAB651B3DCC4E63EF1EDCFF77F1AB723FD3328C8C36CB43`이다. `connectedDebugAndroidTest`, 기기 설치, Android Keystore 계측 테스트 실행, 실제 Gemini·Nutrition 네트워크 요청과 영수증/라벨 정확도 비교는 실행하지 않았다.
 
 ## 2026-08-08 검증 기록
 
