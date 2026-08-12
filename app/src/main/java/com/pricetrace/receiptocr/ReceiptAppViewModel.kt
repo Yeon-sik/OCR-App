@@ -184,6 +184,20 @@ class ReceiptAppViewModel(
 
     init {
         refreshNutritionConnectionState()
+        autoSignInFromBuildEnvironment()
+    }
+
+    private fun autoSignInFromBuildEnvironment() {
+        val config = nutritionSupabaseStore.read()
+        if (
+            config.isSignedIn ||
+            BuildConfig.DEFAULT_NUTRITION_EMAIL.isBlank() ||
+            BuildConfig.DEFAULT_NUTRITION_PASSWORD.isBlank()
+        ) return
+        signInNutrition(
+            email = BuildConfig.DEFAULT_NUTRITION_EMAIL,
+            password = BuildConfig.DEFAULT_NUTRITION_PASSWORD,
+        )
     }
 
     fun prepareScanner(
@@ -671,7 +685,7 @@ class ReceiptAppViewModel(
             aiCorrectionCandidates = emptyList(),
             rejectedAiCorrectionCount = 0,
             message = if (cleared) {
-                "이 기기에 저장된 Gemini API 키를 삭제했습니다."
+                "암호화 저장된 Gemini API 키를 삭제했습니다. 빌드 기본 키가 있으면 계속 사용합니다."
             } else {
                 "API 키 삭제를 완전히 확인하지 못했습니다. 앱을 다시 열어 구성 상태를 확인하세요."
             },

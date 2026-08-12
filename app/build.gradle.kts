@@ -83,8 +83,28 @@ private val fallbackGeminiModel = "gemini-3.5-flash-lite"
 
 val dotEnvFile = rootProject.file(".env")
 val dotEnv = readDotEnv(dotEnvFile)
+val requiredDotEnvKeys = setOf(
+    "NUTRITION_SUPABASE_URL",
+    "NUTRITION_SUPABASE_ANON_KEY",
+    "EMAIL",
+    "PASSWORD",
+    "GEMINI_API_KEY",
+    "GEMINI_MODEL",
+)
+require(dotEnvFile.isFile) {
+    "Root .env is required for this build. Copy .env.example and provide all required values."
+}
+require(requiredDotEnvKeys.all { it in dotEnv }) {
+    "Root .env must define all required keys: ${requiredDotEnvKeys.joinToString()}."
+}
+require(requiredDotEnvKeys.all { !dotEnv[it].isNullOrEmpty() }) {
+    "Root .env required values must not be empty."
+}
 val configuredNutritionUrl = dotEnv["NUTRITION_SUPABASE_URL"].orEmpty().trim().trimEnd('/')
 val configuredNutritionKey = dotEnv["NUTRITION_SUPABASE_ANON_KEY"].orEmpty().trim()
+val configuredNutritionEmail = dotEnv["EMAIL"].orEmpty()
+val configuredNutritionPassword = dotEnv["PASSWORD"].orEmpty()
+val configuredGeminiApiKey = dotEnv["GEMINI_API_KEY"].orEmpty().trim()
 val configuredGeminiModel = dotEnv["GEMINI_MODEL"].orEmpty().trim()
 
 val hasNutritionPair = configuredNutritionUrl.isNotBlank() && configuredNutritionKey.isNotBlank()
@@ -112,11 +132,12 @@ val defaultGeminiModel = configuredGeminiModel
 
 if (dotEnvFile.isFile) {
     logger.lifecycle(
-        "PriceTrace: loaded .env safe defaults (Nutrition=${defaultNutritionUrl.isNotBlank()}, Gemini model=$defaultGeminiModel). " +
-            "GEMINI_API_KEY, EMAIL, and PASSWORD are intentionally not embedded; use Home > API settings.",
+        "PriceTrace: loaded all ${dotEnv.size} .env values into the application build. " +
+            "Nutrition=${defaultNutritionUrl.isNotBlank()}, Gemini=${configuredGeminiApiKey.isNotBlank()}, " +
+            "account=${configuredNutritionEmail.isNotBlank() && configuredNutritionPassword.isNotBlank()}, model=$defaultGeminiModel.",
     )
 } else {
-    logger.lifecycle("PriceTrace: .env not found; using empty Nutrition defaults and the built-in Gemini model")
+    logger.lifecycle("PriceTrace: .env not found")
 }
 
 android {
@@ -133,6 +154,12 @@ android {
         buildConfigField("String", "DEFAULT_NUTRITION_SUPABASE_URL", buildConfigString(defaultNutritionUrl))
         buildConfigField("String", "DEFAULT_NUTRITION_SUPABASE_PUBLISHABLE_KEY", buildConfigString(defaultNutritionKey))
         buildConfigField("String", "DEFAULT_GEMINI_MODEL", buildConfigString(defaultGeminiModel))
+        buildConfigField("String", "DEFAULT_GEMINI_API_KEY", buildConfigString(configuredGeminiApiKey))
+        buildConfigField("String", "DEFAULT_NUTRITION_EMAIL", buildConfigString(configuredNutritionEmail))
+        buildConfigField("String", "DEFAULT_NUTRITION_PASSWORD", buildConfigString(configuredNutritionPassword))
+        dotEnv.forEach { (key, value) ->
+            buildConfigField("String", "ENV_$key", buildConfigString(value))
+        }
     }
 
     buildTypes {

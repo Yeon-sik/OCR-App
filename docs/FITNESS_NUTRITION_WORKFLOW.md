@@ -49,15 +49,15 @@
 
 ## 앱 설정과 사용
 
-1. 홈에서 `API 설정`을 엽니다. 루트 `.env`에 `NUTRITION_SUPABASE_URL`과 `NUTRITION_SUPABASE_ANON_KEY`가 있으면 빌드 기본값으로 자동 표시되며, 없으면 별도 Nutrition Supabase HTTPS URL과 publishable/anon key를 저장합니다.
-2. 같은 화면에서 Fitness 계정 이메일·비밀번호로 로그인합니다. 비밀번호는 요청에만 사용하고 저장하지 않습니다.
+1. 루트 `.env`의 `NUTRITION_SUPABASE_URL`, `NUTRITION_SUPABASE_ANON_KEY`, `EMAIL`, `PASSWORD`를 채우고 빌드합니다. 앱이 연결값을 자동 사용하고 시작 시 Fitness 계정 로그인을 시도합니다.
+2. 홈의 `API 설정`에서 자동으로 채워진 값을 확인하거나 교체합니다.
 3. 홈에서 `Fitness App` 탭을 선택합니다.
 4. 상품 라벨의 상품명·기준량·영양성분 표가 읽히도록 촬영하거나 이미지를 선택합니다.
 5. OCR은 영양정보 박스 내부의 필수 7종과 인식 가능한 선택 영양소를 채우고, 상품명·브랜드는 빈 값으로 둡니다. 사용자가 원본 라벨을 보고 상품명·브랜드·분류·기준량·단위를 직접 입력·대조합니다.
 6. 라벨에 없는 선택 영양소는 비워 둡니다.
 7. `원본 대조 확정 후 DB 저장`을 누릅니다.
 
-publishable/anon key는 클라이언트 배포용 값이며 앱 설정에 저장됩니다. access/refresh token은 Android Keystore AES-GCM으로 암호화한 뒤 private SharedPreferences에 저장합니다. `service_role` 키를 입력하거나 앱에 포함하지 않습니다. `.env`의 이메일·비밀번호는 빌드에 포함하지 않으며 로그인 화면에서만 사용합니다.
+publishable/anon key는 클라이언트 배포용 값이며 앱 설정에 저장됩니다. access/refresh token은 Android Keystore AES-GCM으로 암호화한 뒤 private SharedPreferences에 저장합니다. 이 개인용 빌드는 `.env`의 이메일·비밀번호를 `BuildConfig`/APK에 포함해 자동 로그인에 사용하므로 APK를 공개 배포하지 않습니다. `service_role` 키는 여전히 입력하거나 앱에 포함하지 않습니다.
 
 ## 충돌·재시도
 

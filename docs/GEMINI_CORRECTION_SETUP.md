@@ -2,7 +2,7 @@
 
 ## 현재 경계
 
-`0.1.16`부터 Firebase를 사용하지 않고 Gemini Developer API의 Interactions API를 직접 호출합니다. API 키는 앱의 PriceTrace 교정 화면에서 사용자가 입력하며, 소스·Gradle·APK에 빌드 시점 비밀로 넣지 않습니다. 저장소 테스트와 APK 컴파일은 실제 키, 네트워크, 할당량 또는 OCR 정확도 향상을 증명하지 않습니다.
+`0.1.16`부터 Firebase를 사용하지 않고 Gemini Developer API의 Interactions API를 직접 호출합니다. 현재 개인용 빌드는 루트 `.env`의 Gemini API 키를 `BuildConfig`와 APK에 넣어 앱 시작부터 자동 사용합니다. 저장소 테스트와 APK 컴파일은 실제 네트워크, 할당량 또는 OCR 정확도 향상을 증명하지 않습니다.
 
 Gemini는 OCR 엔진의 대체물이 아닙니다.
 
@@ -18,29 +18,32 @@ Gemini는 OCR 엔진의 대체물이 아닙니다.
 
 ## API 키 연결
 
-1. [Google AI Studio API 키 안내](https://ai.google.dev/gemini-api/docs/api-key)에서 본인 키를 준비합니다.
-2. 앱에서 영수증의 `항목 검수` → `Gemini 교정 제안`으로 이동합니다.
-3. `새 API 키`에 키를 입력하고 `API 키 저장`을 누릅니다.
-4. 키가 저장된 뒤 `전송 범위를 확인하고 제안 요청`을 누릅니다.
-5. 키를 회전하거나 사용을 중단할 때는 같은 화면의 `저장된 키 삭제`를 누릅니다.
+1. [Google AI Studio API 키 안내](https://ai.google.dev/gemini-api/docs/api-key)에서 키를 준비합니다.
+2. 루트 `.env`의 `GEMINI_API_KEY`와 `GEMINI_MODEL`에 값을 넣습니다.
+3. `assembleDebug` 또는 `assembleRelease`를 실행하면 API 키가 앱에 자동 적용됩니다.
+4. 앱에서 영수증의 `항목 검수` → `Gemini 교정 제안`으로 이동해 전송 범위를 확인하고 요청합니다.
+5. API 설정 화면에서 다른 키를 입력하면 Keystore 저장 키가 우선 사용됩니다.
 
-키를 저장소, `local.properties`, Gradle, 문서, 스크린샷 또는 채팅에 붙여 넣지 않습니다. 앱은 키를 Android Keystore의 AES-GCM 키로 암호화해 private SharedPreferences에 저장하고 현재 값을 다시 표시하지 않습니다. 요청 시에만 복호화해 `x-goog-api-key` 헤더로 보냅니다.
+루트 `.env`는 Git에 커밋하지 않습니다. 이 요청의 개인용 빌드는 키를 의도적으로 `BuildConfig`/APK에 포함하므로 APK 분석으로 추출할 수 있습니다. 런타임에서 사용자가 교체한 키는 Android Keystore의 AES-GCM 키로 암호화해 저장하고, 요청 시 `x-goog-api-key` 헤더로 보냅니다.
 
 이 저장은 평문 파일보다 안전하지만 공개 배포용 비밀 보호를 보장하지 않습니다. 직접 API를 호출하는 모바일 앱의 키는 루팅·디버깅·런타임 계측 환경에서 추출될 수 있습니다. 현재 방식은 소유자가 직접 쓰는 개인 앱 경계입니다. 다른 사용자에게 배포하려면 키를 앱에서 제거하고 인증·사용자별 제한·비용 한도가 있는 백엔드 프록시로 이동해야 합니다. Google도 client-side production 배포에서 키 노출을 금지하고 서버 측 호출을 권장합니다.
 
 ## 로컬 `.env`와 빌드 연결
 
-루트 `.env`를 두면 Gradle이 빌드 시 다음 비밀이 아닌 기본값을 읽습니다.
+루트 `.env`의 모든 필수 값을 Gradle이 빌드 시 읽어 앱에 연결합니다.
 
 ```text
 NUTRITION_SUPABASE_URL=https://...
 NUTRITION_SUPABASE_ANON_KEY=eyJ...
 GEMINI_MODEL=gemini-...
+EMAIL=...
+PASSWORD=...
+GEMINI_API_KEY=...
 ```
 
-Fitness 화면은 저장된 연결이 없을 때 이 URL과 publishable/anon key를 사용합니다. Supabase `service_role`/`sb_secret_` 키, query가 붙은 URL, HTTPS가 아닌 URL은 빌드를 중단합니다.
+Fitness 화면은 이 URL/key를 사용하고 앱 시작 시 EMAIL/PASSWORD로 자동 로그인을 시도합니다. Gemini는 GEMINI_API_KEY를 직접 사용합니다. Supabase `service_role`/`sb_secret_` 키, query가 붙은 URL, HTTPS가 아닌 URL은 빌드를 중단합니다.
 
-`.env`의 `GEMINI_API_KEY`, `EMAIL`, `PASSWORD`는 의도적으로 무시합니다. 이를 `BuildConfig`나 APK에 넣으면 누구나 앱에서 추출할 수 있으므로, Gemini 키는 위의 Keystore 저장 절차로 입력하고 Fitness 계정은 API 설정 화면에서 로그인합니다. `.env`와 `.env.*`는 Git에 커밋되지 않습니다.
+`.env`의 6개 키가 모두 필요하며, 누락·빈 값이면 빌드가 실패합니다. 값은 `BuildConfig`와 APK에 포함되므로 이 구성은 개인용/내부용으로만 사용합니다. `.env`와 `.env.*`는 Git에 커밋되지 않습니다.
 
 ```powershell
 .\gradlew.bat assembleDebug --no-daemon
