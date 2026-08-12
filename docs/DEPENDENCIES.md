@@ -14,14 +14,14 @@
 - Coroutines 1.11.0과 Kotlin Serialization 1.11.0은 비동기 처리와 JSON 계약에 사용합니다. [Coroutines](https://github.com/Kotlin/kotlinx.coroutines), [Serialization](https://github.com/Kotlin/kotlinx.serialization/releases)
 - Gemini는 유지 중단된 예전 Android Gemini SDK나 Firebase SDK를 추가하지 않고 플랫폼 `HttpURLConnection`으로 Interactions API를 직접 호출합니다. vendor-neutral 계약·정책은 `receipt-scanner/correction`, HTTP·이미지 crop·키 저장은 `app`에 둡니다. [Gemini libraries](https://ai.google.dev/gemini-api/docs/libraries), [Interactions API](https://ai.google.dev/gemini-api/docs/interactions-overview)
 - 구조화 출력은 Interactions 요청의 `response_format`에 JSON Schema를 지정합니다. 스키마 통과 자체를 신뢰하지 않고 앱 정책으로 다시 검증합니다. [Gemini structured output](https://ai.google.dev/gemini-api/docs/structured-output)
-- 기본 모델은 `.env`의 `GEMINI_MODEL`이며 값이 없거나 형식이 잘못되면 `gemini-3.5-flash-lite`를 사용합니다. 모델 가용성·무료 할당량·요금·데이터 사용 조건은 변경될 수 있으므로 실사용 전에 공식 문서를 다시 확인합니다. [Gemini model](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite), [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)
+- 기본 모델은 필수 `.env`의 `GEMINI_MODEL`입니다. 모델 가용성·무료 할당량·요금·데이터 사용 조건은 변경될 수 있으므로 실사용 전에 공식 문서를 다시 확인합니다. [Gemini model](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite), [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)
 
 ## 유지보수 경계
 
 - ML Kit 스캐너는 Google Play Services 및 지원 기기에 의존합니다. `unsupported`, `model_download_required`, `user_cancelled`, `capture_failed`를 정상 상태로 처리해야 합니다.
 - bundled 한국어 OCR은 설치 크기를 늘리지만 런타임 원격 OCR API나 service key가 필요하지 않습니다.
 - Gemini 네트워크는 사용자가 명시적으로 요청할 때만 사용합니다. 무료 tier를 무제한·영구 무료로 가정하지 않습니다.
-- Gemini API key는 빌드에 포함하지 않고 Android Keystore로 암호화해 기기에 저장합니다. 직접 mobile API key가 production secret boundary가 될 수 없다는 한계는 별도입니다.
+- 개인용 빌드는 `.env`의 Gemini API key를 `BuildConfig`/APK에 포함하고 자동 사용합니다. 직접 mobile API key가 production secret boundary가 될 수 없다는 한계가 있으므로 공개 배포 전 backend proxy로 전환해야 합니다.
 - Room schema 변경 시 migration과 복구 테스트가 필요합니다.
 - compileSdk/targetSdk, AGP/Gradle, Kotlin/Compose는 공식 호환표와 전체 빌드·기기 테스트를 함께 갱신합니다.
 - 새 의존성을 추가할 때 도메인 public API로 vendor 타입이 유출되는지 먼저 검사합니다.

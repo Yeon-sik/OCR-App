@@ -1,6 +1,7 @@
 package com.pricetrace.receiptocr.gemini
 
 import android.content.Context
+import com.pricetrace.receiptocr.BuildConfig
 import com.pricetrace.receiptocr.security.EncryptedStringStore
 
 interface GeminiApiKeyStore {
@@ -14,12 +15,14 @@ internal class EncryptedGeminiApiKeyStore(
     context: Context,
     keyAlias: String = DEFAULT_KEY_ALIAS,
     preferencesName: String = DEFAULT_PREFERENCES_NAME,
+    private val defaultApiKey: String = BuildConfig.DEFAULT_GEMINI_API_KEY,
 ) : GeminiApiKeyStore {
     private val encryptedValues = EncryptedStringStore(context, keyAlias, preferencesName)
 
     override fun isConfigured(): Boolean = read() != null
 
     override fun read(): String? = encryptedValues.read(LEGACY_VALUE_SLOT)?.takeIf(::isValidApiKey)
+        ?: defaultApiKey.trim().takeIf(::isValidApiKey)
 
     override fun save(rawApiKey: String): Boolean {
         val apiKey = rawApiKey.trim()

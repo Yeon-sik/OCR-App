@@ -67,6 +67,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
+import com.pricetrace.receiptocr.BuildConfig
 import androidx.compose.ui.unit.dp
 import com.pricetrace.receiptscanner.domain.BoundingBox
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionCandidate
@@ -527,13 +528,13 @@ private fun GeminiApiSettingsCard(
     onSaveApiKey: (String) -> Unit,
     onClearApiKey: () -> Unit,
 ) {
-    var apiKeyInput by remember { mutableStateOf("") }
+    var apiKeyInput by remember { mutableStateOf(BuildConfig.DEFAULT_GEMINI_API_KEY) }
     Card {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Gemini API 키", fontWeight = FontWeight.SemiBold)
             Text(
                 if (provider?.isAvailable == true) {
-                    "키가 이 기기에 저장되어 있습니다. 현재 키 값은 다시 표시하지 않습니다."
+                    "빌드 기본 키 또는 이 기기에 저장된 키가 구성되어 있습니다. 현재 키 값은 다시 표시하지 않습니다."
                 } else {
                     "Google AI Studio에서 발급한 API 키를 입력하세요."
                 },
@@ -573,7 +574,7 @@ private fun GeminiApiSettingsCard(
                 }
             }
             Text(
-                "키는 Android Keystore로 암호화해 저장하지만, 직접 API를 호출하는 모바일 앱은 공개 배포용 비밀 저장소가 아닙니다. 개인 사용 범위로 운영하세요.",
+                "빌드 기본 키는 APK에 포함되고, 교체 키는 Android Keystore에 저장됩니다. 직접 API를 호출하는 모바일 앱은 공개 배포용 비밀 저장소가 아닙니다.",
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -592,9 +593,11 @@ private fun NutritionConnectionCard(
     onSignIn: (String, String) -> Unit,
 ) {
     var connectionUrl by remember(supabaseUrl) { mutableStateOf(supabaseUrl) }
-    var publishableKey by remember { mutableStateOf("") }
-    var email by remember(signedInEmail) { mutableStateOf(signedInEmail.orEmpty()) }
-    var password by remember { mutableStateOf("") }
+    var publishableKey by remember { mutableStateOf(BuildConfig.DEFAULT_NUTRITION_SUPABASE_PUBLISHABLE_KEY) }
+    var email by remember(signedInEmail) {
+        mutableStateOf(signedInEmail.orEmpty().ifBlank { BuildConfig.DEFAULT_NUTRITION_EMAIL })
+    }
+    var password by remember { mutableStateOf(BuildConfig.DEFAULT_NUTRITION_PASSWORD) }
     val isBusy = isSigningIn || isPublishing
 
     Card {

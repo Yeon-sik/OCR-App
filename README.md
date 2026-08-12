@@ -56,7 +56,7 @@ Fitness 전송 계약, 설정 절차와 실패 경계는 [Fitness 영양성분 �
 - `과세물품가액`·`면세물품가액`은 세금 합계로 간주하지 않으며, 세금은 부가세·VAT·세액처럼 명시된 행만 채웁니다.
 - 검수 화면은 이미지 확대, OCR bounding box 연결, 저신뢰 행 강조, 필드·행 편집, 합계 reconciliation, `user_verified` 차단 규칙을 제공합니다.
 - 선택적 Gemini 교정 제안기는 사용자가 버튼을 누른 경우에만 아직 사용자가 확인하지 않은 기존 OCR 상품 행 최대 12개, 그 행이 참조하며 민감정보 형태 필터를 통과한 OCR 문자열, 각 line bounding box 주변 JPEG crop 최대 8개를 Gemini Developer API에 직접 전달합니다. Interactions 요청은 `store=false`이며, 전체 영수증 이미지와 판매처·주소·전화번호·사업자번호·카드·거래 식별 필드는 요청 계약에 포함하지 않습니다.
-- Gemini API 키는 홈의 `API 설정` 또는 교정 화면에서 입력받아 Android Keystore의 AES-GCM 키로 암호화해 기기에 저장합니다. APK·Gradle·Git에는 넣지 않고 현재 키를 화면에 다시 표시하지 않습니다. 직접 API를 호출하는 모바일 앱은 production secret boundary가 아니므로 현재 방식은 개인 사용 범위입니다.
+- Gemini API 키와 Fitness 계정 정보는 루트 `.env`에서 빌드 시 `BuildConfig`로 주입하고 앱이 자동 사용합니다. API 설정 화면에서도 빌드 기본값이 채워지며, 사용자가 바꾼 Gemini 키는 Android Keystore에 저장합니다. 이 빌드 방식은 APK에서 값이 추출될 수 있으므로 개인용 실기기/내부 빌드로만 사용합니다.
 - Gemini는 상품명·수량·단가·행 금액의 후보만 만들 수 있습니다. 앱이 현재 값, source line, 허용 필드, 중복 제안, 값 형식, `수량 × 단가 = 행 금액`을 다시 검사하며, 통과한 후보도 사용자가 하나씩 적용해야 합니다. 적용 후 신뢰도는 낮게 유지되고 최종 `user_verified` 검수는 그대로 필요합니다.
 - OCR이 통째로 놓친 행은 사용자가 직접 추가할 수 있고, 안내문을 상품으로 오인식한 행은 삭제할 수 있습니다. 직접 입력한 행은 OCR 근거 대신 `user_entered:<line_id>` 표식을 `source_line_references`에 남기고, 검수 화면과 내보낸 JSON 모두에서 "OCR 근거 없음"으로 구분됩니다. 이 표식은 확정을 막지 않고 경고로만 표시하며, 근거가 아예 없는 행은 계속 차단합니다. 삭제한 행은 전체 JSON이 수정 이력에 남습니다.
 - 모든 검수 편집은 되돌리기·다시 적용을 지원합니다. 되돌리기는 이력을 지우지 않고 역방향 수정을 새 행으로 추가하므로, 이미 저장된 수정 이력과 어긋나지 않습니다.
@@ -126,19 +126,22 @@ ML Kit, Room entity, Android URI는 `receipt.v2` 도메인 모델이나 `Receipt
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-### 로컬 `.env` 빌드 기본값
+### 로컬 `.env` 빌드 연결
 
-저장소 루트의 `.env`가 있으면 `assembleDebug`/`assembleRelease` 설정 단계에서 다음 값만 읽어 앱 기본값으로 연결합니다.
+저장소 루트의 `.env`에 아래 6개 값을 채우면 `assembleDebug`/`assembleRelease` 설정 단계에서 모두 `BuildConfig`로 주입합니다.
 
 - `NUTRITION_SUPABASE_URL`
 - `NUTRITION_SUPABASE_ANON_KEY` (publishable/anon key만 허용)
+- `EMAIL`
+- `PASSWORD`
+- `GEMINI_API_KEY`
 - `GEMINI_MODEL`
 
-URL과 publishable/anon key는 앱의 Fitness 연결 카드에 자동으로 표시되므로 별도 재입력이 필요 없습니다. `GEMINI_API_KEY`, `EMAIL`, `PASSWORD`는 APK·`BuildConfig`에 넣지 않습니다. 이 값들은 APK에서 추출 가능한 비밀이므로 Gemini API 키는 홈의 `API 설정`에 저장하고, Fitness 계정은 같은 화면에서 로그인합니다. `.env`와 `.env.*`는 Git에서 무시됩니다.
+모든 값은 앱 시작 시 자동 적용됩니다. Nutrition URL/key는 연결 기본값으로 사용되고, 이메일/비밀번호는 Fitness 로그인에 자동 사용되며, Gemini 키는 직접 API 호출에 자동 사용됩니다. API 설정 화면에도 현재 빌드값이 채워집니다. `.env`와 `.env.*`는 Git에서 무시됩니다.
 
-`.env`가 없거나 안전한 Nutrition 쌍이 없으면 기존의 빈 설정으로 빌드하며, 잘못된 URL·service-role/secret key는 빌드 단계에서 거부합니다. 빌드 로그에는 비밀값을 출력하지 않습니다.
+6개 키가 없거나 비어 있으면 빌드가 실패합니다. 잘못된 URL·service-role/secret key도 빌드 단계에서 거부합니다. 빌드 로그에는 실제 값이 출력되지 않습니다.
 
-Gemini는 선택 기능입니다. API 키 없이도 기존 로컬 OCR 앱은 동작하며 AI 요청만 비활성화됩니다. 키를 소스나 Gradle에 넣지 말고 [Gemini 교정 제안 설정](docs/GEMINI_CORRECTION_SETUP.md)의 앱 내 저장 절차와 개인 사용 경계를 따릅니다.
+Gemini 교정은 `.env`의 키가 빌드된 개인용 APK에서 자동 활성화됩니다. 공개 배포가 필요하면 이 방식을 제거하고 backend proxy로 전환해야 합니다.
 
 실제 기기 또는 에뮬레이터가 연결된 환경에서 UI 테스트를 실행하려면:
 

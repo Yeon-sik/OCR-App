@@ -22,6 +22,7 @@ class EncryptedGeminiApiKeyStoreInstrumentedTest {
             context = context,
             keyAlias = "pricetrace_gemini_api_key_test_$suffix",
             preferencesName = preferencesName,
+            defaultApiKey = "",
         )
         try {
             assertFalse(store.save("short"))

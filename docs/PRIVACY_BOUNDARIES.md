@@ -33,8 +33,8 @@
 
 - OCR 전체 텍스트, 이미지 경로, API key와 provider error body를 로그에 출력하지 않습니다.
 - debug/release 모두 `OCR_DEBUG_LOGGING=false`입니다.
-- Gemini API key는 앱 화면에서만 입력받고 빌드 파일·소스·문서·Git에 넣지 않습니다.
-- 루트 `.env`에서 빌드하는 값은 Nutrition의 HTTPS URL·publishable/anon key와 Gemini 모델명뿐입니다. `GEMINI_API_KEY`, 이메일·비밀번호는 `.env`에 있어도 `BuildConfig`·APK에 포함하지 않습니다.
+- 개인용 빌드에서는 루트 `.env`의 Gemini API key·Fitness 이메일·비밀번호도 `BuildConfig`와 APK에 포함해 자동 사용합니다. `.env` 자체는 Git에 커밋하지 않습니다.
+- 이 방식은 APK 분석·런타임 계측으로 값이 추출될 수 있으므로 공개 배포용 비밀 경계가 아닙니다. 공개 배포 전 backend proxy와 사용자별 인증/quota로 전환해야 합니다.
 - 키는 Android Keystore의 AES-GCM key로 암호화한 ciphertext와 IV만 private SharedPreferences에 저장하며, 화면에서 현재 값을 다시 표시하지 않습니다.
 - 요청 시 키를 복호화해 `x-goog-api-key` header에만 둡니다. request JSON과 correction provenance에는 포함하지 않습니다.
 - 키 삭제는 ciphertext/IV와 Keystore alias를 함께 제거합니다.

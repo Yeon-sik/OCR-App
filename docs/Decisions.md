@@ -16,10 +16,14 @@
 | 검사 | 명령/절차 | 환경·경계 | 결과 |
 | --- | --- | --- | --- |
 | 전체 unit test | `.\gradlew.bat test --rerun-tasks` | Windows, 로컬 합성 입력과 가짜 Gemini·Nutrition HTTP 응답 | 통과: 21 suites, 147 tests, failures/errors/skipped 0 |
-| 전체 Gradle 확인 | `.\gradlew.bat test lint assembleDebug assembleDebugAndroidTest :app:compileReleaseKotlin --no-daemon` | 루트 `.env`의 안전한 Nutrition/Gemini model 기본값, 비밀값은 BuildConfig에 미포함 | 통과: unit test·lint·debug APK·instrumentation APK·debug/release Kotlin compile |
+| 전체 Gradle 확인 | `.\gradlew.bat test lint assembleDebug assembleDebugAndroidTest :app:compileReleaseKotlin --no-daemon` | 루트 `.env` 6개 값을 BuildConfig/APK에 주입 | 통과: unit test·lint·debug APK·instrumentation APK·debug/release Kotlin compile |
 | 새 홈 API 설정 계측 | `.\gradlew.bat :app:connectedDebugAndroidTest '-Pandroid.testInstrumentationRunnerArguments.class=com.pricetrace.receiptocr.ReceiptUiInstrumentedTest#homeOpensApiSettingsForGeminiAndFitnessConnections' --rerun-tasks` | Samsung SM-A256N, Android 16 | 통과: 홈에서 API 설정을 열고 Gemini/Supabase 설정 필드가 표시됨 |
-| `.env` 기본값 계측 | `AndroidNutritionSupabaseStoreInstrumentedTest` | Samsung SM-A256N, 명시적 기본 URL/key와 새 APK | 통과: 저장 전 기본 연결값 노출·HTTPS/publishable 검증 경로 확인 |
-| debug APK | `app/build/outputs/apk/debug/app-debug.apk` | 루트 `.env`로 생성한 최신 산출물 | 59,059,792 bytes, SHA-256 `3BD2A2C34937CF767FA67763BF621FE8E543F7DE2CD2F44A875849336170FF9D` |
+| `.env` BuildConfig 생성 | `:app:generateDebugBuildConfig` + 생성 필드 점검 | 루트 `.env` 6개 값과 parsed key 전체, 실제 값은 출력하지 않음 | 통과: Gemini key·이메일·비밀번호·URL/key·모델 필드 모두 생성 |
+| Gemini key 기본값 계측 | `EncryptedGeminiApiKeyStoreInstrumentedTest` | Samsung SM-A256N, BuildConfig fallback + isolated Keystore | 통과: 저장·읽기·삭제 계약 유지 |
+| Nutrition 기본값 계측 | `AndroidNutritionSupabaseStoreInstrumentedTest` | Samsung SM-A256N, 명시적 기본 URL/key와 새 APK | 통과: 저장 전 기본 연결값 노출·HTTPS/publishable 검증 경로 확인 |
+| 홈 API 설정 계측 | `ReceiptUiInstrumentedTest#homeOpensApiSettingsForGeminiAndFitnessConnections` | Samsung SM-A256N, 새 BuildConfig 자동 입력 | 통과: API 설정 진입과 Gemini/Supabase 필드 표시 |
+| 실기기 설치·실행 | `adb install -r` + `monkey` | Samsung SM-A256N, Android 16 | 통과: `Success`, `MainActivity` top resumed, versionCode 18 |
+| debug APK | `app/build/outputs/apk/debug/app-debug.apk` | 루트 `.env` 전체 주입 최신 산출물 | 59,060,406 bytes, SHA-256 `8F4DD83CE509F904235B3CE8706B922D68A0D19C26C551F3A7FAC7F20491E297` |
 | 전체 connected 계측 | `.\gradlew.bat connectedDebugAndroidTest --rerun-tasks` | Samsung SM-A256N | 전체 성공 아님: 현재 기기에서 Compose/UI 테스트 3건과 Room migration schema asset 누락 1건 실패. 새 API 설정 단독 테스트는 별도 통과 |
 
 새 APK를 사용한 실제 상품 라벨 OCR 정확도, 실제 Gemini 호출, 실제 Nutrition Supabase 로그인/저장과 원격 migration/RLS는 여전히 검증하지 않았다.
@@ -592,8 +596,6 @@
 - **보안 경계**: APK·소스에 API 키를 넣지 않았고 저장 키 삭제 경로를 제공한다. Android Keystore 사용만으로 rooted/debuggable 기기에서의 추출 불가능성을 주장하지 않는다.
 - **미검증**: 실제 사용자 키 저장·복원, Gemini 네트워크 응답, quota, 기기 crop, 무료 tier 조건과 정확도 개선은 아직 실환경에서 확인하지 않았다.
 
----
-
 ## DEC016: 촬영·OCR은 공통 세션으로 통일하고 후속 계약만 워크플로별로 분기함
 
 ### (버전 이름 혹은 브랜치 이름)
@@ -635,3 +637,27 @@
 - **저장소 검증**: 합성 라벨 파싱, null 보존, 필수 계약, local JSON, 가짜 로그인/refresh, private insert, revision PATCH, 충돌 차단 테스트를 추가했다.
 - **계약 근거**: PriceTrace `origin/main` `34c06d0`, FitnessApp `origin/main` `25081ed`의 코드·migration을 대조했다. PriceTrace의 새 커밋은 문서만 변경했고, FitnessApp의 새 개발 탭·검증 단일식품 seed는 기존 Nutrition Supabase 저장 계약을 변경하지 않았다.
 - **미검증**: `0.2.0` 실기기 UI, 실제 라벨 정확도, 실제 Nutrition 계정 로그인, 원격 migration/RLS와 Fitness App pull 종단간 흐름은 아직 실행하지 않았다.
+
+---
+
+## DEC017: 개인용 `.env`의 모든 값을 빌드와 앱 시작에 자동 주입함
+
+### (버전 이름 혹은 브랜치 이름)
+
+`dotenv-build-bootstrap.v1` / `0.2.0`
+
+#### 배경 / 제약
+
+- 사용자는 루트 `.env`의 Gemini API 키, Fitness Supabase URL/key, 이메일, 비밀번호, 모델을 별도 입력 없이 빌드에 반영하기를 명시적으로 요청했다.
+- `BuildConfig`와 APK의 문자열은 디컴파일·런타임 계측으로 추출할 수 있으므로 개인용/내부용으로만 허용한다.
+
+#### 결정과 근거
+
+- **결정**: `.env`가 없거나 6개 필수 키 중 하나라도 없거나 비어 있으면 Gradle 빌드를 실패시킨다.
+- **결정**: 알려진 6개 값과 `.env`의 모든 parsed key를 `BuildConfig` 문자열 필드로 생성한다. 실제 값은 Gradle 로그에 출력하지 않는다.
+- **결정**: 앱은 Nutrition URL/key를 기본 연결로 사용하고, 앱 시작 시 `.env` 이메일/비밀번호로 자동 로그인을 시도하며, Gemini API 키를 직접 API 호출에 사용한다. API 설정 화면에도 같은 값이 채워진다.
+- **결정**: 사용자가 입력한 Gemini 키는 기존 Android Keystore 저장값으로 우선한다. 저장 키 삭제 후에는 빌드 기본 키가 다시 사용된다.
+
+#### 재검토 조건
+
+- APK를 외부 사용자에게 배포하거나 저장소/릴리스 artifact를 공개할 때는 `.env` BuildConfig 주입을 제거하고 backend proxy, 사용자별 인증, quota 및 키 회전으로 전환한다.
