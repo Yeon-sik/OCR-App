@@ -11,6 +11,8 @@ import com.pricetrace.receiptocr.fitness.NutritionAuthOutcome
 import com.pricetrace.receiptocr.fitness.NutritionGatewayFailure
 import com.pricetrace.receiptocr.fitness.NutritionPublishOutcome
 import com.pricetrace.receiptocr.gemini.ReceiptCorrectionEvidenceCropper
+import com.pricetrace.receiptocr.pricetrace.PriceObservationReadOutcome
+import com.pricetrace.receiptocr.pricetrace.PriceTraceAuthOutcome
 import com.pricetrace.receiptscanner.capture.CaptureOutcome
 import com.pricetrace.receiptscanner.capture.ScannerLaunchPreparation
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionCandidate
@@ -49,8 +51,14 @@ import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelJson
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelValidator
 import com.pricetrace.receiptscanner.nutrition.NutritionUnit
+import com.pricetrace.receiptscanner.publisher.PriceObservationAppliedAction
+import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
+import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
+import com.pricetrace.receiptscanner.publisher.PriceObservationSource
 import com.pricetrace.receiptscanner.review.ReceiptReviewController
 import com.pricetrace.receiptscanner.review.toFieldCorrection
+import com.pricetrace.receiptscanner.storage.PriceObservationQueueEntry
+import com.pricetrace.receiptscanner.storage.PriceObservationQueueStatus
 import com.pricetrace.receiptscanner.storage.ReceiptSession
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
 import kotlinx.coroutines.CancellationException
@@ -71,6 +79,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.time.LocalDate
 import java.time.OffsetDateTime
 
 enum class AppScreen {
@@ -83,6 +92,7 @@ enum class AppScreen {
     AI_CORRECTION,
     RECONCILIATION,
     JSON_PREVIEW,
+    PRICE_OBSERVATION_SUBMIT,
     NUTRITION_REVIEW,
     EVALUATION,
 }
@@ -97,6 +107,7 @@ data class ReceiptAppUiState(
     val isExporting: Boolean = false,
     val isNutritionSigningIn: Boolean = false,
     val isNutritionPublishing: Boolean = false,
+    val isPriceTraceSigningIn: Boolean = false,
     val message: String? = null,
     val possibleDuplicatePageIds: List<String> = emptyList(),
     val currentDocumentId: String? = null,
@@ -127,6 +138,24 @@ data class ReceiptAppUiState(
     val nutritionSupabaseUrl: String = "",
     val isNutritionPublishableKeyConfigured: Boolean = false,
     val nutritionSignedInEmail: String? = null,
+    val priceTraceSupabaseUrl: String = "",
+    val isPriceTracePublishableKeyConfigured: Boolean = false,
+    val priceTraceSignedInEmail: String? = null,
+    val priceObservationSources: List<PriceObservationSource> = emptyList(),
+    val priceObservationProducts: List<PriceObservationProduct> = emptyList(),
+    val priceObservationQuery: String = "",
+    val priceObservationSelectedStoreId: String? = null,
+    val priceObservationSelectedCatalogProductId: String? = null,
+    val priceObservationSelectedLineItemId: String? = null,
+    val priceObservationObservedOn: String = "",
+    val priceObservationUnitPriceKrw: String = "",
+    val priceObservationQueueId: String? = null,
+    val priceObservationQueueStatus: PriceObservationQueueStatus? = null,
+    val priceObservationAppliedAction: PriceObservationAppliedAction? = null,
+    val priceObservationLastError: String? = null,
+    val isLoadingPriceObservationSources: Boolean = false,
+    val isLoadingPriceObservationProducts: Boolean = false,
+    val isSubmittingPriceObservation: Boolean = false,
 )
 
 sealed interface ReceiptUiEvent {
@@ -148,6 +177,9 @@ class ReceiptAppViewModel(
     private val nutritionParser = container.nutritionParser
     private val exportService = container.exportService
     private val publisher = container.publisher
+    private val priceObservationQueue = container.priceObservationQueue
+    private val priceObservationGateway = container.priceObservationGateway
+    private val priceObservationProcessor = container.priceObservationProcessor
     private val geminiApiKeyStore = container.geminiApiKeyStore
     private val correctionSuggester = container.correctionSuggester
     private val nutritionSupabaseStore = container.nutritionSupabaseStore
@@ -184,6 +216,7 @@ class ReceiptAppViewModel(
 
     init {
         refreshNutritionConnectionState()
+        refreshPriceTraceConnectionState()
         autoSignInFromBuildEnvironment()
     }
 
@@ -521,6 +554,39 @@ class ReceiptAppViewModel(
                 is NutritionAuthOutcome.Failure -> mutableUiState.value = mutableUiState.value.copy(
                     isNutritionSigningIn = false,
                     message = nutritionFailureMessage(outcome.reason),
+                )
+            }
+        }
+    }
+
+    fun savePriceTraceConnection(url: String, publishableKey: String) {
+        val existing = container.priceTraceSupabaseStore.read()
+        val effectiveKey = publishableKey.trim().ifEmpty { existing.publishableKey }
+        container.priceTraceSupabaseStore.saveConnection(url, effectiveKey)
+            .onSuccess {
+                refreshPriceTraceConnectionState(
+                    message = "PriceTrace connection saved. Nutrition Supabase settings and session remain separate.",
+                )
+            }
+            .onFailure { error ->
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = error.message ?: "PriceTrace connection could not be saved.",
+                )
+            }
+    }
+
+    fun signInPriceTrace(email: String, password: String) {
+        val state = mutableUiState.value
+        if (state.isPriceTraceSigningIn || state.isSubmittingPriceObservation) return
+        viewModelScope.launch {
+            mutableUiState.value = mutableUiState.value.copy(isPriceTraceSigningIn = true, message = null)
+            when (val outcome = priceObservationGateway.signIn(email, password)) {
+                is PriceTraceAuthOutcome.Success -> refreshPriceTraceConnectionState(
+                    message = "${outcome.email} is signed in to PriceTrace.",
+                )
+                is PriceTraceAuthOutcome.Failure -> mutableUiState.value = mutableUiState.value.copy(
+                    isPriceTraceSigningIn = false,
+                    message = priceObservationFailureMessage(outcome.kind),
                 )
             }
         }
@@ -870,6 +936,216 @@ class ReceiptAppViewModel(
     fun showAiCorrectionReview() = showAiCorrection()
     fun showReconciliation() = navigate(AppScreen.RECONCILIATION)
     fun showJsonPreview() = navigate(AppScreen.JSON_PREVIEW)
+    fun showPriceObservationSubmit() {
+        val state = mutableUiState.value
+        val receipt = state.receipt
+        if (receipt?.document?.source?.transcriptionStatus != TranscriptionStatus.USER_VERIFIED) {
+            mutableUiState.value = state.copy(
+                message = "Confirm the receipt as user_verified before submitting a PriceTrace observation.",
+            )
+            return
+        }
+        mutableUiState.value = state.copy(
+            screen = AppScreen.PRICE_OBSERVATION_SUBMIT,
+            priceObservationSources = emptyList(),
+            priceObservationProducts = emptyList(),
+            priceObservationQuery = "",
+            priceObservationSelectedStoreId = null,
+            priceObservationSelectedCatalogProductId = null,
+            priceObservationSelectedLineItemId = null,
+            priceObservationObservedOn = receipt.document.issuedOn.orEmpty(),
+            priceObservationUnitPriceKrw = "",
+            priceObservationQueueId = null,
+            priceObservationQueueStatus = null,
+            priceObservationAppliedAction = null,
+            priceObservationLastError = null,
+            message = null,
+        )
+        viewModelScope.launch { loadPriceObservationSources() }
+    }
+
+    fun updatePriceObservationQuery(value: String) {
+        mutableUiState.value = mutableUiState.value.copy(priceObservationQuery = value)
+    }
+
+    fun selectPriceObservationStore(storeId: String) {
+        if (mutableUiState.value.priceObservationSources.none { it.storeId == storeId }) return
+        mutableUiState.value = mutableUiState.value.copy(
+            priceObservationSelectedStoreId = storeId,
+            priceObservationQueueId = null,
+            priceObservationQueueStatus = null,
+            priceObservationLastError = null,
+        )
+    }
+
+    fun selectPriceObservationProduct(catalogProductId: String) {
+        if (mutableUiState.value.priceObservationProducts.none { it.catalogProductId == catalogProductId }) return
+        mutableUiState.value = mutableUiState.value.copy(
+            priceObservationSelectedCatalogProductId = catalogProductId,
+            priceObservationQueueId = null,
+            priceObservationQueueStatus = null,
+            priceObservationLastError = null,
+        )
+    }
+
+    fun selectPriceObservationLineItem(lineItemId: String) {
+        val item = mutableUiState.value.receipt?.lineItems?.firstOrNull { it.id == lineItemId } ?: return
+        mutableUiState.value = mutableUiState.value.copy(
+            priceObservationSelectedLineItemId = lineItemId,
+            priceObservationUnitPriceKrw = (item.unitPriceAmountMinor ?: item.netAmountMinor)?.toString().orEmpty(),
+            priceObservationQueueId = null,
+            priceObservationQueueStatus = null,
+            priceObservationLastError = null,
+        )
+    }
+
+    fun updatePriceObservationObservedOn(value: String) {
+        mutableUiState.value = mutableUiState.value.copy(
+            priceObservationObservedOn = value,
+            priceObservationQueueId = null,
+            priceObservationQueueStatus = null,
+        )
+    }
+
+    fun updatePriceObservationUnitPrice(value: String) {
+        mutableUiState.value = mutableUiState.value.copy(
+            priceObservationUnitPriceKrw = value,
+            priceObservationQueueId = null,
+            priceObservationQueueStatus = null,
+        )
+    }
+
+    fun searchPriceObservationProducts() {
+        if (mutableUiState.value.isLoadingPriceObservationProducts) return
+        viewModelScope.launch { loadPriceObservationProducts() }
+    }
+
+    private suspend fun loadPriceObservationSources() {
+        mutableUiState.value = mutableUiState.value.copy(isLoadingPriceObservationSources = true, message = null)
+        when (val outcome = priceObservationGateway.fetchSources()) {
+            is PriceObservationReadOutcome.Success -> mutableUiState.value = mutableUiState.value.copy(
+                isLoadingPriceObservationSources = false,
+                priceObservationSources = outcome.value,
+            )
+            is PriceObservationReadOutcome.Failure -> mutableUiState.value = mutableUiState.value.copy(
+                isLoadingPriceObservationSources = false,
+                message = priceObservationFailureMessage(outcome.kind),
+            )
+        }
+    }
+
+    private suspend fun loadPriceObservationProducts() {
+        val query = mutableUiState.value.priceObservationQuery.trim()
+        if (query.isBlank()) {
+            mutableUiState.value = mutableUiState.value.copy(
+                priceObservationProducts = emptyList(),
+                message = "Search for a product, then select one exact catalog product.",
+            )
+            return
+        }
+        mutableUiState.value = mutableUiState.value.copy(
+            isLoadingPriceObservationProducts = true,
+            priceObservationProducts = emptyList(),
+            message = null,
+        )
+        when (val outcome = priceObservationGateway.searchProducts(query)) {
+            is PriceObservationReadOutcome.Success -> mutableUiState.value = mutableUiState.value.copy(
+                isLoadingPriceObservationProducts = false,
+                priceObservationProducts = outcome.value,
+            )
+            is PriceObservationReadOutcome.Failure -> mutableUiState.value = mutableUiState.value.copy(
+                isLoadingPriceObservationProducts = false,
+                message = priceObservationFailureMessage(outcome.kind),
+            )
+        }
+    }
+
+    fun submitPriceObservation() {
+        val state = mutableUiState.value
+        val receipt = state.receipt
+        if (state.isSubmittingPriceObservation) return
+        if (receipt?.document?.source?.transcriptionStatus != TranscriptionStatus.USER_VERIFIED) {
+            mutableUiState.value = state.copy(message = "Only a user_verified receipt can submit an observation.")
+            return
+        }
+        if (state.priceTraceSignedInEmail == null) {
+            mutableUiState.value = state.copy(message = "Sign in to the separate PriceTrace Supabase session first.")
+            return
+        }
+        val storeId = state.priceObservationSelectedStoreId
+        val catalogProductId = state.priceObservationSelectedCatalogProductId
+        val lineItemId = state.priceObservationSelectedLineItemId
+        val observedOn = runCatching { LocalDate.parse(state.priceObservationObservedOn.trim()).toString() }.getOrNull()
+        val unitPrice = state.priceObservationUnitPriceKrw.trim().replace(",", "").toIntOrNull()
+        val hasApprovedStore = storeId != null && state.priceObservationSources.any { it.storeId == storeId }
+        val hasExactCatalogProduct = catalogProductId != null &&
+            state.priceObservationProducts.any { it.catalogProductId == catalogProductId }
+        val hasReceiptLine = lineItemId != null && receipt.lineItems.any { it.id == lineItemId }
+        if (!hasApprovedStore || !hasExactCatalogProduct || !hasReceiptLine || observedOn == null ||
+            unitPrice == null || unitPrice < 0
+        ) {
+            mutableUiState.value = state.copy(
+                message = "Select an approved store, an exact catalog product, a receipt line, a valid date, and a non-negative KRW price.",
+            )
+            return
+        }
+        val localDocumentId = receipt.document.id
+        viewModelScope.launch {
+            mutableUiState.value = mutableUiState.value.copy(isSubmittingPriceObservation = true, message = null)
+            try {
+                val currentEntry = mutableUiState.value.priceObservationQueueId
+                    ?.let { queueId -> priceObservationQueue.get(queueId) }
+                val persistedEntry = priceObservationQueue.latestForLine(localDocumentId, lineItemId)
+                val matchingEntry = listOfNotNull(currentEntry, persistedEntry)
+                    .distinctBy { it.queueId }
+                    .firstOrNull { entry ->
+                        entry.payload.storeId == storeId &&
+                            entry.payload.observedOn == observedOn &&
+                            entry.payload.catalogProductId == catalogProductId &&
+                            entry.payload.unitPriceKrw == unitPrice
+                    }
+                if (matchingEntry?.status == PriceObservationQueueStatus.SUCCEEDED) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isSubmittingPriceObservation = false,
+                        priceObservationQueueId = matchingEntry.queueId,
+                        priceObservationQueueStatus = matchingEntry.status,
+                        priceObservationAppliedAction = matchingEntry.appliedAction,
+                        priceObservationLastError = matchingEntry.lastError,
+                        message = priceObservationQueueMessage(matchingEntry),
+                    )
+                } else {
+                    val entry = matchingEntry?.takeIf { candidate ->
+                        candidate.status == PriceObservationQueueStatus.PENDING ||
+                            candidate.status == PriceObservationQueueStatus.RETRYABLE_FAILURE
+                    } ?: priceObservationQueue.enqueue(
+                        storeId = storeId,
+                        observedOn = observedOn,
+                        catalogProductId = catalogProductId,
+                        unitPriceKrw = unitPrice,
+                        localDocumentId = localDocumentId,
+                        localLineItemId = lineItemId,
+                    )
+                    val result = priceObservationProcessor.submit(entry.queueId)
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isSubmittingPriceObservation = false,
+                        priceObservationQueueId = result.queueId,
+                        priceObservationQueueStatus = result.status,
+                        priceObservationAppliedAction = result.appliedAction,
+                        priceObservationLastError = result.lastError,
+                        message = priceObservationQueueMessage(result),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    isSubmittingPriceObservation = false,
+                    message = "PriceTrace observation stayed local and needs review: ${error::class.java.simpleName}.",
+                )
+            }
+        }
+    }
+
     fun showEvaluation() {
         mutableUiState.value = mutableUiState.value.copy(screen = AppScreen.EVALUATION, message = null)
         buildAccuracyReport()
@@ -1003,6 +1279,7 @@ class ReceiptAppViewModel(
             AppScreen.AI_CORRECTION -> AppScreen.ITEM_REVIEW
             AppScreen.RECONCILIATION -> AppScreen.ITEM_REVIEW
             AppScreen.JSON_PREVIEW -> AppScreen.RECONCILIATION
+            AppScreen.PRICE_OBSERVATION_SUBMIT -> AppScreen.JSON_PREVIEW
             AppScreen.NUTRITION_REVIEW -> AppScreen.IMAGE_CONFIRM
             AppScreen.EVALUATION -> AppScreen.SESSION_LIST
         }
@@ -1224,6 +1501,7 @@ class ReceiptAppViewModel(
         possibleDuplicatePageIds: List<String> = emptyList(),
     ): ReceiptAppUiState {
         val config = nutritionSupabaseStore.read()
+        val priceTraceConfig = container.priceTraceSupabaseStore.read()
         return ReceiptAppUiState(
             screen = screen,
             selectedWorkflow = workflow,
@@ -1234,6 +1512,9 @@ class ReceiptAppViewModel(
             nutritionSupabaseUrl = config.url,
             isNutritionPublishableKeyConfigured = config.publishableKey.isNotBlank(),
             nutritionSignedInEmail = config.email.takeIf { config.isSignedIn },
+            priceTraceSupabaseUrl = priceTraceConfig.url,
+            isPriceTracePublishableKeyConfigured = priceTraceConfig.publishableKey.isNotBlank(),
+            priceTraceSignedInEmail = priceTraceConfig.email.takeIf { priceTraceConfig.isSignedIn },
         )
     }
 
@@ -1245,6 +1526,17 @@ class ReceiptAppViewModel(
             nutritionSupabaseUrl = config.url,
             isNutritionPublishableKeyConfigured = config.publishableKey.isNotBlank(),
             nutritionSignedInEmail = config.email.takeIf { config.isSignedIn },
+            message = message,
+        )
+    }
+
+    private fun refreshPriceTraceConnectionState(message: String? = mutableUiState.value.message) {
+        val config = container.priceTraceSupabaseStore.read()
+        mutableUiState.value = mutableUiState.value.copy(
+            isPriceTraceSigningIn = false,
+            priceTraceSupabaseUrl = config.url,
+            isPriceTracePublishableKeyConfigured = config.publishableKey.isNotBlank(),
+            priceTraceSignedInEmail = config.email.takeIf { config.isSignedIn },
             message = message,
         )
     }
@@ -1521,6 +1813,38 @@ class ReceiptAppViewModel(
         "image_decode_failed", "image_read_failed" -> "보존된 이미지를 읽지 못했습니다. 원본 페이지를 확인하세요."
         "parse_or_persist_failed" -> "OCR 결과를 초안으로 저장하지 못했습니다. 세션을 보존했으므로 다시 시도하세요."
         else -> "OCR 처리에 실패했습니다. 세션을 보존했으므로 다시 시도할 수 있습니다."
+    }
+
+    private fun priceObservationFailureMessage(kind: PriceObservationFailureKind): String = when (kind) {
+        PriceObservationFailureKind.NOT_CONFIGURED ->
+            "PriceTrace URL/key and an authenticated PriceTrace session are required."
+        PriceObservationFailureKind.AUTHENTICATION ->
+            "PriceTrace authentication failed or expired. Sign in again; this item was not retried automatically."
+        PriceObservationFailureKind.INVALID_SELECTION ->
+            "The selected store or catalog product is not an approved PriceTrace identity. Review the selection."
+        PriceObservationFailureKind.IDEMPOTENCY_MISMATCH ->
+            "The preserved idempotency key was rejected for a different request. This item needs review."
+        PriceObservationFailureKind.CONTRACT ->
+            "PriceTrace returned an unexpected contract response. This item needs review."
+        PriceObservationFailureKind.NETWORK ->
+            "The PriceTrace network request failed without a timeout. This item needs review; it was not retried automatically."
+        PriceObservationFailureKind.NETWORK_TIMEOUT ->
+            "PriceTrace timed out. The local queue is retryable and preserves the same opaque key."
+        PriceObservationFailureKind.SERVER ->
+            "PriceTrace returned a server error. The local queue is retryable."
+    }
+
+    private fun priceObservationQueueMessage(entry: PriceObservationQueueEntry): String {
+        val appliedAction = entry.appliedAction
+        return when {
+            entry.status == PriceObservationQueueStatus.SUCCEEDED && appliedAction != null ->
+                "PriceTrace observation succeeded: ${appliedAction.wireValue}."
+            entry.status == PriceObservationQueueStatus.RETRYABLE_FAILURE ->
+                "PriceTrace submission is retryable. The same local queue entry and idempotency key are preserved."
+            entry.status == PriceObservationQueueStatus.NEEDS_REVIEW ->
+                "PriceTrace submission needs review and was not retried automatically: ${entry.lastError.orEmpty()}"
+            else -> "PriceTrace observation remains pending locally."
+        }
     }
 
     private fun nutritionFailureMessage(reason: NutritionGatewayFailure): String = when (reason) {

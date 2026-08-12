@@ -113,3 +113,45 @@ internal data class ReviewEditEntity(
     @ColumnInfo(name = "edited_at")
     val editedAt: String,
 )
+
+@Entity(
+    tableName = "price_observation_queue",
+    indices = [
+        Index("status"),
+        Index(value = ["local_document_id", "local_line_item_id"]),
+    ],
+)
+internal data class PriceObservationQueueEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "queue_id")
+    val queueId: String,
+    /** Local-only context. Neither value is included in the RPC payload. */
+    @ColumnInfo(name = "local_document_id")
+    val localDocumentId: String?,
+    @ColumnInfo(name = "local_line_item_id")
+    val localLineItemId: String?,
+    @ColumnInfo(name = "idempotency_key")
+    val idempotencyKey: String,
+    @ColumnInfo(name = "store_id")
+    val storeId: String,
+    @ColumnInfo(name = "observed_on")
+    val observedOn: String,
+    @ColumnInfo(name = "catalog_product_id")
+    val catalogProductId: String,
+    @ColumnInfo(name = "unit_price_krw")
+    val unitPriceKrw: Int,
+    val status: String,
+    @ColumnInfo(name = "attempt_count")
+    val attemptCount: Int,
+    @ColumnInfo(name = "last_error")
+    val lastError: String?,
+    @ColumnInfo(name = "observation_id")
+    val observationId: String?,
+    val replayed: Boolean?,
+    @ColumnInfo(name = "applied_action")
+    val appliedAction: String?,
+    @ColumnInfo(name = "created_at")
+    val createdAt: String,
+    @ColumnInfo(name = "updated_at")
+    val updatedAt: String,
+)

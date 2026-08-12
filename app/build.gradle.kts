@@ -104,6 +104,8 @@ val configuredNutritionUrl = dotEnv["NUTRITION_SUPABASE_URL"].orEmpty().trim().t
 val configuredNutritionKey = dotEnv["NUTRITION_SUPABASE_ANON_KEY"].orEmpty().trim()
 val configuredNutritionEmail = dotEnv["EMAIL"].orEmpty()
 val configuredNutritionPassword = dotEnv["PASSWORD"].orEmpty()
+val configuredPriceTraceUrl = dotEnv["PRICETRACE_SUPABASE_URL"].orEmpty().trim().trimEnd('/')
+val configuredPriceTraceKey = dotEnv["PRICETRACE_SUPABASE_PUBLISHABLE_KEY"].orEmpty().trim()
 val configuredGeminiApiKey = dotEnv["GEMINI_API_KEY"].orEmpty().trim()
 val configuredGeminiModel = dotEnv["GEMINI_MODEL"].orEmpty().trim()
 
@@ -126,6 +128,28 @@ val defaultNutritionUrl = if (!hasNutritionPair) {
     configuredNutritionUrl
 }
 val defaultNutritionKey = if (defaultNutritionUrl.isBlank()) "" else configuredNutritionKey
+val hasPriceTracePair = configuredPriceTraceUrl.isNotBlank() && configuredPriceTraceKey.isNotBlank()
+val defaultPriceTraceUrl = if (!hasPriceTracePair) {
+    if (configuredPriceTraceUrl.isNotBlank() || configuredPriceTraceKey.isNotBlank()) {
+        logger.warn(
+            "PriceTrace: PRICETRACE_SUPABASE_URL and PRICETRACE_SUPABASE_PUBLISHABLE_KEY " +
+                "must be provided together; ignoring both",
+        )
+    }
+    ""
+} else {
+    require(validNutritionUrl(configuredPriceTraceUrl)) {
+        "PRICETRACE_SUPABASE_URL must be an HTTPS URL without query, fragment, or user info"
+    }
+    require(configuredPriceTraceKey.length in 20..4096 && configuredPriceTraceKey.none(Char::isWhitespace)) {
+        "PRICETRACE_SUPABASE_PUBLISHABLE_KEY must be a non-whitespace publishable/anon key"
+    }
+    require(!looksLikeServiceRoleKey(configuredPriceTraceKey)) {
+        "PRICETRACE_SUPABASE_PUBLISHABLE_KEY must not be a service_role/secret key"
+    }
+    configuredPriceTraceUrl
+}
+val defaultPriceTraceKey = if (defaultPriceTraceUrl.isBlank()) "" else configuredPriceTraceKey
 val defaultGeminiModel = configuredGeminiModel
     .takeIf { it.matches(Regex("[A-Za-z0-9._:-]{1,128}")) }
     ?: fallbackGeminiModel
@@ -153,6 +177,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEFAULT_NUTRITION_SUPABASE_URL", buildConfigString(defaultNutritionUrl))
         buildConfigField("String", "DEFAULT_NUTRITION_SUPABASE_PUBLISHABLE_KEY", buildConfigString(defaultNutritionKey))
+        buildConfigField("String", "DEFAULT_PRICETRACE_SUPABASE_URL", buildConfigString(defaultPriceTraceUrl))
+        buildConfigField("String", "DEFAULT_PRICETRACE_SUPABASE_PUBLISHABLE_KEY", buildConfigString(defaultPriceTraceKey))
         buildConfigField("String", "DEFAULT_GEMINI_MODEL", buildConfigString(defaultGeminiModel))
         buildConfigField("String", "DEFAULT_GEMINI_API_KEY", buildConfigString(configuredGeminiApiKey))
         buildConfigField("String", "DEFAULT_NUTRITION_EMAIL", buildConfigString(configuredNutritionEmail))

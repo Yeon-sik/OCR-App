@@ -41,6 +41,8 @@ import com.pricetrace.receiptscanner.domain.TranscriptionStatus
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
+import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
+import com.pricetrace.receiptscanner.publisher.PriceObservationSource
 import com.pricetrace.receiptscanner.storage.ReceiptFileStore
 import com.pricetrace.receiptscanner.storage.RoomReceiptSessionRepository
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
@@ -163,6 +165,95 @@ class ReceiptUiInstrumentedTest {
         }
         composeRule.onNodeWithTag("confirm_publish_nutrition").assertIsEnabled().performClick()
         composeRule.runOnIdle { assertEquals(1, published) }
+    }
+
+    @Test
+    fun verifiedReceiptSaveAndShareDoNotSubmitPriceObservation() {
+        var saveClicks = 0
+        var shareClicks = 0
+        var observationSubmits = 0
+        val state = ReceiptAppUiState(
+            screen = AppScreen.JSON_PREVIEW,
+            receipt = receipt(true),
+            jsonPreview = ReceiptV2Json.encodePretty(receipt(true)),
+        )
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onSave = { saveClicks += 1 },
+                    onShare = { shareClicks += 1 },
+                    onShowPriceObservationSubmit = { observationSubmits += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("save_json_button").assertIsEnabled().performClick()
+        composeRule.onNodeWithTag("share_json_button").assertIsEnabled().performClick()
+        composeRule.runOnIdle {
+            assertEquals(1, saveClicks)
+            assertEquals(1, shareClicks)
+            assertEquals(0, observationSubmits)
+        }
+        composeRule.onNodeWithTag("price_observation_submit_button").assertIsEnabled().performClick()
+        composeRule.runOnIdle { assertEquals(1, observationSubmits) }
+    }
+
+    @Test
+    fun priceObservationScreenRequiresSelectionsAndOnlySubmitsOnExplicitClick() {
+        var submitClicks = 0
+        val product = PriceObservationProduct(
+            standardProductId = STANDARD_PRODUCT_ID,
+            standardProductName = "Coffee",
+            standardBrand = "Example brand",
+            standardUpdatedAt = "2026-08-01T00:00:00Z",
+            catalogProductId = CATALOG_PRODUCT_ID,
+            catalogProductName = "Coffee 500g",
+            specificationText = "500g",
+            contentAmount = 500.0,
+            contentUnit = "g",
+            packageCount = 1,
+            referenceUnit = "g",
+            listingReferenceUrl = null,
+            catalogUpdatedAt = "2026-08-01T00:00:00Z",
+            sellerProducts = emptyList(),
+            observations = emptyList(),
+        )
+        val state = ReceiptAppUiState(
+            screen = AppScreen.PRICE_OBSERVATION_SUBMIT,
+            receipt = receipt(true),
+            priceObservationSources = listOf(
+                PriceObservationSource(
+                    storeId = STORE_ID,
+                    sourceNamespace = "retail",
+                    sourceStoreCode = "store-1",
+                    displayName = "Approved store",
+                    locationLabel = "Seoul",
+                ),
+            ),
+            priceObservationProducts = listOf(product),
+            priceObservationSelectedStoreId = STORE_ID,
+            priceObservationSelectedCatalogProductId = CATALOG_PRODUCT_ID,
+            priceObservationSelectedLineItemId = "line-1",
+            priceObservationObservedOn = "2026-08-13",
+            priceObservationUnitPriceKrw = "1590",
+            priceTraceSignedInEmail = "user@example.com",
+        )
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onSubmitPriceObservation = { submitClicks += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("price_observation_submit").assertIsDisplayed()
+        composeRule.onNodeWithTag("price_observation_product_$CATALOG_PRODUCT_ID").assertIsDisplayed()
+        composeRule.onNodeWithTag("submit_price_observation_button").assertIsEnabled()
+        composeRule.runOnIdle { assertEquals(0, submitClicks) }
+        composeRule.onNodeWithTag("submit_price_observation_button").performClick()
+        composeRule.runOnIdle { assertEquals(1, submitClicks) }
     }
 
     @Test
@@ -482,5 +573,11 @@ class ReceiptUiInstrumentedTest {
             ),
             payments = emptyList(),
         )
+    }
+
+    private companion object {
+        const val STORE_ID = "11111111-1111-4111-8111-111111111111"
+        const val CATALOG_PRODUCT_ID = "22222222-2222-4222-8222-222222222222"
+        const val STANDARD_PRODUCT_ID = "44444444-4444-4444-8444-444444444444"
     }
 }

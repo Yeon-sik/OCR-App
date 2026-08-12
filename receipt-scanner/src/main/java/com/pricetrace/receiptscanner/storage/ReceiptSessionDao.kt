@@ -52,4 +52,20 @@ internal interface ReceiptSessionDao {
 
     @Delete
     suspend fun deleteSession(session: ScanSessionEntity)
+
+    @Query("SELECT * FROM price_observation_queue WHERE queue_id = :queueId")
+    suspend fun getPriceObservationQueue(queueId: String): PriceObservationQueueEntity?
+
+    @Query(
+        "SELECT * FROM price_observation_queue " +
+            "WHERE local_document_id = :localDocumentId AND local_line_item_id = :localLineItemId " +
+            "ORDER BY updated_at DESC LIMIT 1",
+    )
+    suspend fun latestPriceObservationForLine(
+        localDocumentId: String,
+        localLineItemId: String,
+    ): PriceObservationQueueEntity?
+
+    @Upsert
+    suspend fun upsertPriceObservationQueue(entry: PriceObservationQueueEntity)
 }

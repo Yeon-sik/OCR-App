@@ -95,6 +95,9 @@ import com.pricetrace.receiptscanner.nutrition.NutritionContract
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.nutrition.NutritionUnit
+import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
+import com.pricetrace.receiptscanner.publisher.PriceObservationSource
+import com.pricetrace.receiptscanner.storage.PriceObservationQueueStatus
 import com.pricetrace.receiptscanner.storage.ReceiptSession
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
 import kotlinx.coroutines.Dispatchers
@@ -126,6 +129,8 @@ fun ReceiptOcrContent(
     onSaveNutritionConnection: (String, String) -> Unit = { _, _ -> },
     onSignInNutrition: (String, String) -> Unit = { _, _ -> },
     onConfirmAndPublishNutrition: () -> Unit = {},
+    onSavePriceTraceConnection: (String, String) -> Unit = { _, _ -> },
+    onSignInPriceTrace: (String, String) -> Unit = { _, _ -> },
     onMerchantNameChanged: (String) -> Unit = {},
     onBranchNameChanged: (String) -> Unit = {},
     onBusinessRegistrationNumberChanged: (String) -> Unit = {},
@@ -168,6 +173,15 @@ fun ReceiptOcrContent(
     onShowReconciliation: () -> Unit = {},
     onShowJson: () -> Unit = {},
     onConfirmVerified: () -> Unit = {},
+    onShowPriceObservationSubmit: () -> Unit = {},
+    onPriceObservationQueryChanged: (String) -> Unit = {},
+    onSearchPriceObservationProducts: () -> Unit = {},
+    onPriceObservationStoreSelected: (String) -> Unit = {},
+    onPriceObservationProductSelected: (String) -> Unit = {},
+    onPriceObservationLineItemSelected: (String) -> Unit = {},
+    onPriceObservationObservedOnChanged: (String) -> Unit = {},
+    onPriceObservationUnitPriceChanged: (String) -> Unit = {},
+    onSubmitPriceObservation: () -> Unit = {},
     onIncludeRawTextChanged: (Boolean) -> Unit = {},
     onSave: () -> Unit = {},
     onShare: () -> Unit = {},
@@ -204,6 +218,12 @@ fun ReceiptOcrContent(
                     onClearGeminiApiKey = onClearGeminiApiKey,
                     onSaveNutritionConnection = onSaveNutritionConnection,
                     onSignInNutrition = onSignInNutrition,
+                    priceTraceUrl = uiState.priceTraceSupabaseUrl,
+                    isPriceTracePublishableKeyConfigured = uiState.isPriceTracePublishableKeyConfigured,
+                    priceTraceSignedInEmail = uiState.priceTraceSignedInEmail,
+                    isPriceTraceSigningIn = uiState.isPriceTraceSigningIn,
+                    onSavePriceTraceConnection = onSavePriceTraceConnection,
+                    onSignInPriceTrace = onSignInPriceTrace,
                 )
                 AppScreen.IMAGE_CONFIRM -> ImageConfirmationScreen(
                     workflow = uiState.selectedWorkflow,
@@ -319,7 +339,37 @@ fun ReceiptOcrContent(
                     onBack = onShowReconciliation,
                     onSave = onSave,
                     onShare = onShare,
+                    onShowPriceObservationSubmit = onShowPriceObservationSubmit,
                 )
+                AppScreen.PRICE_OBSERVATION_SUBMIT -> uiState.receipt?.let { receipt ->
+                    PriceObservationSubmitScreen(
+                        receipt = receipt,
+                        sources = uiState.priceObservationSources,
+                        products = uiState.priceObservationProducts,
+                        query = uiState.priceObservationQuery,
+                        selectedStoreId = uiState.priceObservationSelectedStoreId,
+                        selectedCatalogProductId = uiState.priceObservationSelectedCatalogProductId,
+                        selectedLineItemId = uiState.priceObservationSelectedLineItemId,
+                        observedOn = uiState.priceObservationObservedOn,
+                        unitPriceKrw = uiState.priceObservationUnitPriceKrw,
+                        queueStatus = uiState.priceObservationQueueStatus,
+                        appliedAction = uiState.priceObservationAppliedAction?.wireValue,
+                        lastError = uiState.priceObservationLastError,
+                        isSignedIn = uiState.priceTraceSignedInEmail != null,
+                        isLoadingSources = uiState.isLoadingPriceObservationSources,
+                        isLoadingProducts = uiState.isLoadingPriceObservationProducts,
+                        isSubmitting = uiState.isSubmittingPriceObservation,
+                        onBack = onBack,
+                        onQueryChanged = onPriceObservationQueryChanged,
+                        onSearchProducts = onSearchPriceObservationProducts,
+                        onStoreSelected = onPriceObservationStoreSelected,
+                        onProductSelected = onPriceObservationProductSelected,
+                        onLineItemSelected = onPriceObservationLineItemSelected,
+                        onObservedOnChanged = onPriceObservationObservedOnChanged,
+                        onUnitPriceChanged = onPriceObservationUnitPriceChanged,
+                        onSubmit = onSubmitPriceObservation,
+                    )
+                }
                 AppScreen.NUTRITION_REVIEW -> uiState.nutritionDraft?.let { draft ->
                     NutritionReviewScreen(
                         draft = draft,
@@ -479,6 +529,12 @@ private fun ApiSettingsScreen(
     onClearGeminiApiKey: () -> Unit,
     onSaveNutritionConnection: (String, String) -> Unit,
     onSignInNutrition: (String, String) -> Unit,
+    priceTraceUrl: String,
+    isPriceTracePublishableKeyConfigured: Boolean,
+    priceTraceSignedInEmail: String?,
+    isPriceTraceSigningIn: Boolean,
+    onSavePriceTraceConnection: (String, String) -> Unit,
+    onSignInPriceTrace: (String, String) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("api_settings"),
@@ -509,6 +565,16 @@ private fun ApiSettingsScreen(
                 isPublishing = false,
                 onSaveConnection = onSaveNutritionConnection,
                 onSignIn = onSignInNutrition,
+            )
+        }
+        item {
+            PriceTraceConnectionCard(
+                supabaseUrl = priceTraceUrl,
+                isPublishableKeyConfigured = isPriceTracePublishableKeyConfigured,
+                signedInEmail = priceTraceSignedInEmail,
+                isSigningIn = isPriceTraceSigningIn,
+                onSaveConnection = onSavePriceTraceConnection,
+                onSignIn = onSignInPriceTrace,
             )
         }
         item {
@@ -660,6 +726,84 @@ private fun NutritionConnectionCard(
                 }
             } else {
                 Text("로그인: $signedInEmail", fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PriceTraceConnectionCard(
+    supabaseUrl: String,
+    isPublishableKeyConfigured: Boolean,
+    signedInEmail: String?,
+    isSigningIn: Boolean,
+    onSaveConnection: (String, String) -> Unit,
+    onSignIn: (String, String) -> Unit,
+) {
+    var connectionUrl by remember(supabaseUrl) { mutableStateOf(supabaseUrl) }
+    var publishableKey by remember {
+        mutableStateOf(BuildConfig.DEFAULT_PRICETRACE_SUPABASE_PUBLISHABLE_KEY)
+    }
+    var email by remember(signedInEmail) { mutableStateOf(signedInEmail.orEmpty()) }
+    var password by remember { mutableStateOf("") }
+    Card {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("PriceTrace observation connection", fontWeight = FontWeight.SemiBold)
+            Text(
+                "Separate from Fitness Nutrition. Only the publishable key and the signed-in user's session are used; service_role/secret keys are rejected.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = connectionUrl,
+                onValueChange = { connectionUrl = it },
+                label = { Text("PriceTrace Supabase URL") },
+                placeholder = { Text("https://bpyvvcmdvgpwjrprkmtq.supabase.co") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("pricetrace_supabase_url"),
+            )
+            OutlinedTextField(
+                value = publishableKey,
+                onValueChange = { publishableKey = it },
+                label = { Text("PriceTrace publishable key") },
+                placeholder = { Text(if (isPublishableKeyConfigured) "Leave unchanged" else "Enter publishable key") },
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("pricetrace_publishable_key"),
+            )
+            OutlinedButton(
+                onClick = { onSaveConnection(connectionUrl, publishableKey) },
+                enabled = connectionUrl.isNotBlank() &&
+                    (publishableKey.isNotBlank() || isPublishableKeyConfigured) &&
+                    !isSigningIn,
+                modifier = Modifier.fillMaxWidth().testTag("save_pricetrace_connection"),
+            ) { Text("Save PriceTrace connection") }
+            if (signedInEmail == null) {
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    label = { Text("PriceTrace account email") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    modifier = Modifier.fillMaxWidth().testTag("pricetrace_email"),
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("Password (not saved)") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("pricetrace_password"),
+                )
+                Button(
+                    onClick = { onSignIn(email, password) },
+                    enabled = isPublishableKeyConfigured && email.isNotBlank() && password.isNotBlank() && !isSigningIn,
+                    modifier = Modifier.fillMaxWidth().testTag("pricetrace_sign_in"),
+                ) {
+                    if (isSigningIn) BusyIndicator()
+                    Text("Sign in to PriceTrace")
+                }
+            } else {
+                Text("Signed in: $signedInEmail", fontWeight = FontWeight.SemiBold)
             }
         }
     }
@@ -1673,6 +1817,7 @@ fun JsonPreviewScreen(
     onBack: () -> Unit,
     onSave: () -> Unit,
     onShare: () -> Unit,
+    onShowPriceObservationSubmit: () -> Unit = {},
 ) {
     val verified = receipt?.document?.source?.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
     LazyColumn(
@@ -1735,6 +1880,229 @@ fun JsonPreviewScreen(
                     if (isExporting) BusyIndicator()
                     Text("공유")
                 }
+            }
+        }
+        item {
+            OutlinedButton(
+                onClick = onShowPriceObservationSubmit,
+                enabled = verified && !isExporting,
+                modifier = Modifier.fillMaxWidth().testTag("price_observation_submit_button"),
+            ) {
+                Text("Submit one verified PriceTrace price observation")
+            }
+        }
+    }
+}
+
+@Suppress("LongParameterList")
+@Composable
+private fun PriceObservationSubmitScreen(
+    receipt: ReceiptV2,
+    sources: List<PriceObservationSource>,
+    products: List<PriceObservationProduct>,
+    query: String,
+    selectedStoreId: String?,
+    selectedCatalogProductId: String?,
+    selectedLineItemId: String?,
+    observedOn: String,
+    unitPriceKrw: String,
+    queueStatus: PriceObservationQueueStatus?,
+    appliedAction: String?,
+    lastError: String?,
+    isSignedIn: Boolean,
+    isLoadingSources: Boolean,
+    isLoadingProducts: Boolean,
+    isSubmitting: Boolean,
+    onBack: () -> Unit,
+    onQueryChanged: (String) -> Unit,
+    onSearchProducts: () -> Unit,
+    onStoreSelected: (String) -> Unit,
+    onProductSelected: (String) -> Unit,
+    onLineItemSelected: (String) -> Unit,
+    onObservedOnChanged: (String) -> Unit,
+    onUnitPriceChanged: (String) -> Unit,
+    onSubmit: () -> Unit,
+) {
+    var storeMenuExpanded by remember { mutableStateOf(false) }
+    var lineMenuExpanded by remember { mutableStateOf(false) }
+    val selectedStore = sources.firstOrNull { it.storeId == selectedStoreId }
+    val selectedProduct = products.firstOrNull { it.catalogProductId == selectedCatalogProductId }
+    val selectedLine = receipt.lineItems.firstOrNull { it.id == selectedLineItemId }
+    val canSubmit = isSignedIn && selectedStore != null && selectedProduct != null && selectedLine != null &&
+        observedOn.isNotBlank() && unitPriceKrw.isNotBlank() && !isSubmitting
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().testTag("price_observation_submit"),
+        contentPadding = PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item {
+            ScreenHeader(
+                "PriceTrace price observation",
+                "Submit only after choosing an approved store and one exact catalog_product_id.",
+                onBack,
+            )
+        }
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "The RPC receives only idempotency_key, store_id, observed_on, catalog_product_id, and unit_price_krw.",
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        "receipt.v2, receipt/document/item IDs, images, OCR raw text, and payment data stay local.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        if (isSignedIn) "Authenticated PriceTrace session ready." else "Sign in to PriceTrace in API settings before submitting.",
+                        color = if (isSignedIn) Color(0xFF1B7F3A) else MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        }
+        item {
+            Text("1. Select the receipt line", fontWeight = FontWeight.SemiBold)
+            Box {
+                OutlinedButton(
+                    onClick = { lineMenuExpanded = true },
+                    modifier = Modifier.fillMaxWidth().testTag("price_observation_line_selector"),
+                ) {
+                    Text(selectedLine?.description ?: "Choose a receipt product line")
+                }
+                DropdownMenu(
+                    expanded = lineMenuExpanded,
+                    onDismissRequest = { lineMenuExpanded = false },
+                ) {
+                    receipt.lineItems.forEach { line ->
+                        DropdownMenuItem(
+                            text = {
+                                Text("${line.description ?: "Unnamed line"} · ${line.unitPriceAmountMinor ?: line.netAmountMinor ?: "price missing"}")
+                            },
+                            onClick = {
+                                lineMenuExpanded = false
+                                onLineItemSelected(line.id)
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        item {
+            Text("2. Select an approved store", fontWeight = FontWeight.SemiBold)
+            Box {
+                OutlinedButton(
+                    onClick = { storeMenuExpanded = true },
+                    enabled = sources.isNotEmpty() && !isLoadingSources,
+                    modifier = Modifier.fillMaxWidth().testTag("price_observation_store_selector"),
+                ) {
+                    Text(selectedStore?.let { source ->
+                        listOfNotNull(source.displayName, source.locationLabel).joinToString(" · ")
+                    } ?: if (isLoadingSources) "Loading approved stores…" else "Choose an approved store")
+                }
+                DropdownMenu(
+                    expanded = storeMenuExpanded,
+                    onDismissRequest = { storeMenuExpanded = false },
+                ) {
+                    sources.forEach { source ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(listOfNotNull(source.displayName, source.locationLabel).joinToString(" · "))
+                            },
+                            onClick = {
+                                storeMenuExpanded = false
+                                onStoreSelected(source.storeId)
+                            },
+                        )
+                    }
+                }
+            }
+            if (!isLoadingSources && sources.isEmpty()) {
+                Text("No approved store was returned. Nothing is inferred from the OCR merchant name.", color = MaterialTheme.colorScheme.error)
+            }
+        }
+        item {
+            Text("3. Search and select the exact catalog product", fontWeight = FontWeight.SemiBold)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = onQueryChanged,
+                    label = { Text("Product search") },
+                    modifier = Modifier.weight(1f).testTag("price_observation_product_query"),
+                    singleLine = true,
+                )
+                Button(
+                    onClick = onSearchProducts,
+                    enabled = query.isNotBlank() && !isLoadingProducts,
+                    modifier = Modifier.align(Alignment.CenterVertically).testTag("price_observation_product_search"),
+                ) { Text(if (isLoadingProducts) "…" else "Search") }
+            }
+        }
+        if (products.isNotEmpty()) {
+            items(products, key = { it.catalogProductId }) { product ->
+                Card(
+                    modifier = Modifier.fillMaxWidth()
+                        .clickable { onProductSelected(product.catalogProductId) }
+                        .testTag("price_observation_product_${product.catalogProductId}"),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (product.catalogProductId == selectedCatalogProductId) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        },
+                    ),
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(product.exactSelectionLabel, fontWeight = FontWeight.SemiBold)
+                        Text("catalog_product_id: ${product.catalogProductId}", style = MaterialTheme.typography.bodySmall)
+                        Text("standard_product_id: ${product.standardProductId}", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+        item {
+            Text("4. Confirm date and unit price", fontWeight = FontWeight.SemiBold)
+            OutlinedTextField(
+                value = observedOn,
+                onValueChange = onObservedOnChanged,
+                label = { Text("Observed on (YYYY-MM-DD)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("price_observation_observed_on"),
+            )
+            OutlinedTextField(
+                value = unitPriceKrw,
+                onValueChange = onUnitPriceChanged,
+                label = { Text("Unit price (KRW)") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth().testTag("price_observation_unit_price"),
+            )
+        }
+        item {
+            queueStatus?.let { status ->
+                Text(
+                    "Queue status: ${status.wireValue}" +
+                        (appliedAction?.let { " · result: $it" } ?: ""),
+                    color = if (status == PriceObservationQueueStatus.SUCCEEDED) {
+                        Color(0xFF1B7F3A)
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
+                    modifier = Modifier.testTag("price_observation_queue_status"),
+                )
+            }
+            lastError?.let { error ->
+                Text("Last error: $error", color = MaterialTheme.colorScheme.error)
+            }
+        }
+        item {
+            Button(
+                onClick = onSubmit,
+                enabled = canSubmit,
+                modifier = Modifier.fillMaxWidth().testTag("submit_price_observation_button"),
+            ) {
+                if (isSubmitting) BusyIndicator()
+                Text("Submit explicitly to PriceTrace")
             }
         }
     }
