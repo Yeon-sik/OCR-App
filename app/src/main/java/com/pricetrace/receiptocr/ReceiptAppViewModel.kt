@@ -36,6 +36,11 @@ import com.pricetrace.receiptscanner.domain.ReviewAccuracyCalculator
 import com.pricetrace.receiptscanner.domain.ReviewAccuracySummary
 import com.pricetrace.receiptscanner.domain.ReviewedReceiptSample
 import com.pricetrace.receiptscanner.domain.ReceiptV2
+import com.pricetrace.receiptscanner.importer.CanonicalDraft
+import com.pricetrace.receiptscanner.importer.ExternalJsonImportErrorCode
+import com.pricetrace.receiptscanner.importer.ExternalJsonImportOutcome
+import com.pricetrace.receiptscanner.importer.ExternalJsonImporter
+import com.pricetrace.receiptscanner.input.InputOrigin
 import com.pricetrace.receiptscanner.domain.StableIds
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
 import com.pricetrace.receiptscanner.domain.parserVersion
@@ -76,6 +81,7 @@ import com.pricetrace.receiptscanner.review.toFieldCorrection
 import com.pricetrace.receiptscanner.storage.PriceObservationQueueEntry
 import com.pricetrace.receiptscanner.storage.PriceObservationQueueStatus
 import com.pricetrace.receiptscanner.storage.ReceiptSession
+import com.pricetrace.receiptscanner.storage.SessionInputMetadata
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -108,6 +114,7 @@ enum class AppScreen {
     SESSION_LIST,
     API_SETTINGS,
     IMAGE_CONFIRM,
+    IMPORT_PREVIEW,
     OCR_PROGRESS,
     FIELD_REVIEW,
     ITEM_REVIEW,
@@ -158,6 +165,7 @@ data class ReceiptAppUiState(
     val reconciliationReason: String? = null,
     val includeRawTextInShare: Boolean = false,
     val jsonPreview: String? = null,
+    val importPreview: com.pricetrace.receiptscanner.importer.ExternalJsonImportResult? = null,
     val reviewedAt: String? = null,
     val accuracySummary: ReviewAccuracySummary? = null,
     val isBuildingAccuracyReport: Boolean = false,
@@ -223,6 +231,7 @@ class ReceiptAppViewModel(
     private val nutritionCorrectionSuggester = container.nutritionCorrectionSuggester
     private val nutritionSupabaseStore = container.nutritionSupabaseStore
     private val nutritionGateway = container.nutritionGateway
+    private val externalJsonImporter = ExternalJsonImporter()
 
     private val mutableUiState = MutableStateFlow(ReceiptAppUiState())
     val uiState: StateFlow<ReceiptAppUiState> = mutableUiState.asStateFlow()
@@ -429,6 +438,143 @@ class ReceiptAppViewModel(
             }
         }
     }
+    fun importExternalJson(uri: Uri) {
+        val state = mutableUiState.value
+        if (state.isPreparingScanner || state.isImportingPages || state.isProcessingOcr) return
+        viewModelScope.launch {
+            mutableUiState.value = state.copy(message = null)
+            val text = try {
+                getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+                    input.readBytes().toString(Charsets.UTF_8)
+                } ?: throw IllegalStateException("empty_stream")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                mutableUiState.value = state.copy(message = "JSON 파일을 읽지 못했습니다. 다시 선택하세요.")
+                return@launch
+            }
+            val localDocumentId = StableIds.newOcrDocumentId()
+            when (val outcome = externalJsonImporter.import(text, localDocumentId, state.selectedWorkflow)) {
+                is ExternalJsonImportOutcome.Failure -> mutableUiState.value = state.copy(
+                    message = externalImportFailureMessage(outcome.error.code),
+                )
+                is ExternalJsonImportOutcome.Success -> persistExternalImport(outcome.result, state)
+            }
+        }
+    }
+
+    private suspend fun persistExternalImport(
+        result: com.pricetrace.receiptscanner.importer.ExternalJsonImportResult,
+        previousState: ReceiptAppUiState,
+    ) {
+        val sameFingerprint = repository.findSessionsByImportFingerprint(result.importFingerprint).firstOrNull()
+        if (sameFingerprint != null) {
+            selectedDocumentId.value = null
+            mutableUiState.value = homeState(
+                workflow = sameFingerprint.workflowType,
+                message = "동일한 JSON 데이터가 이미 있습니다. 기존 세션을 열어 확인하세요.",
+            )
+            return
+        }
+        val upstreamConflict = repository.findSessionsByUpstreamDocumentId(result.upstreamDocumentId)
+            .any { it.importFingerprint != null && it.importFingerprint != result.importFingerprint }
+        val draftKey = "${result.localDocumentId}/draft/" + when (result.draft) {
+            is CanonicalDraft.Receipt -> "receipt.json"
+            is CanonicalDraft.Nutrition -> "fitness-nutrition.json"
+        }
+        var created = false
+        try {
+            repository.createSession(
+                documentId = result.localDocumentId,
+                workflowType = result.workflowType,
+                inputMetadata = SessionInputMetadata(
+                    inputOrigin = InputOrigin.EXTERNAL_JSON,
+                    upstreamDocumentId = result.upstreamDocumentId,
+                    importFingerprint = result.importFingerprint,
+                ),
+            )
+            created = true
+            val encoded = when (val draft = result.draft) {
+                is CanonicalDraft.Receipt -> ReceiptV2Json.encodeCanonical(draft.value)
+                is CanonicalDraft.Nutrition -> NutritionLabelJson.encode(draft.value)
+            }
+            fileStore.writeText(draftKey, encoded)
+            val session = requireNotNull(repository.getSession(result.localDocumentId))
+            val updated = when (val draft = result.draft) {
+                is CanonicalDraft.Receipt -> session.copy(
+                    updatedAt = OffsetDateTime.now().toString(),
+                    ocrStatus = "parsed",
+                    reviewStatus = "draft",
+                    jsonRevision = StableIds.sha256(encoded),
+                    merchantName = draft.value.merchant.name,
+                    displayTitle = draft.value.merchant.name,
+                    issuedOn = draft.value.document.issuedOn,
+                    grandTotalAmountMinor = draft.value.totals.grandTotalAmountMinor,
+                    receiptStorageKey = draftKey,
+                    uploadStatus = "local_only",
+                )
+                is CanonicalDraft.Nutrition -> session.copy(
+                    updatedAt = OffsetDateTime.now().toString(),
+                    ocrStatus = "parsed",
+                    reviewStatus = draft.value.status.wireValue,
+                    jsonRevision = StableIds.sha256(encoded),
+                    displayTitle = draft.value.productName.takeIf(String::isNotBlank),
+                    workflowDraftStorageKey = draftKey,
+                    uploadStatus = "local_only",
+                )
+            }
+            repository.updateSession(updated)
+            selectedDocumentId.value = result.localDocumentId
+            mutableUiState.value = previousState.copy(
+                screen = AppScreen.IMPORT_PREVIEW,
+                selectedWorkflow = result.workflowType,
+                currentDocumentId = result.localDocumentId,
+                importPreview = result,
+                message = if (upstreamConflict) {
+                    "같은 upstream document ID의 다른 데이터입니다. 새 버전으로 저장했으며 기존 세션은 변경하지 않았습니다."
+                } else null,
+                isPreparingScanner = false,
+                isImportingPages = false,
+                isProcessingOcr = false,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            val cleanupComplete = if (created) {
+                runCatching { repository.deleteSession(result.localDocumentId).isComplete }.getOrDefault(false)
+            } else true
+            mutableUiState.value = previousState.copy(
+                message = if (cleanupComplete) {
+                    "가져온 데이터를 앱 전용 저장소에 저장하지 못했습니다. 새 세션은 남기지 않았습니다."
+                } else {
+                    "가져온 데이터 저장에 실패했으며 임시 세션 정리도 완료되지 않았습니다. 세션 목록에서 확인하세요."
+                },
+            )
+        }
+    }
+
+    fun startImportReview() {
+        mutableUiState.value.currentDocumentId?.let(::selectSession)
+    }
+
+    fun cancelImportPreview() {
+        val documentId = mutableUiState.value.currentDocumentId ?: return
+        viewModelScope.launch {
+            if (repository.getSession(documentId)?.inputOrigin == InputOrigin.EXTERNAL_JSON) {
+                deleteSession(documentId)
+            }
+        }
+    }
+
+    private fun externalImportFailureMessage(code: ExternalJsonImportErrorCode): String = when (code) {
+        ExternalJsonImportErrorCode.EMPTY_INPUT,
+        ExternalJsonImportErrorCode.INVALID_JSON -> "JSON 형식이 올바르지 않습니다. 지원되는 JSON 파일을 선택하세요."
+        ExternalJsonImportErrorCode.MISSING_SCHEMA,
+        ExternalJsonImportErrorCode.UNSUPPORTED_SCHEMA -> "지원하지 않는 JSON schema입니다. receipt.v2 또는 fitness-nutrition-draft.v1만 가져올 수 있습니다."
+        ExternalJsonImportErrorCode.WORKFLOW_MISMATCH -> "현재 선택한 workflow와 JSON schema가 맞지 않습니다. workflow를 바꿔 다시 시도하세요."
+        ExternalJsonImportErrorCode.INVALID_CANONICAL_JSON -> "JSON 필수 데이터가 canonical 형식과 맞지 않습니다."
+        ExternalJsonImportErrorCode.INVALID_LOCAL_DOCUMENT_ID -> "JSON 세션 ID를 만들지 못했습니다. 다시 시도하세요."
+    }
     fun selectSession(documentId: String) {
         nutritionPersistenceJob?.cancel()
         viewModelScope.launch {
@@ -436,7 +582,7 @@ class ReceiptAppViewModel(
             val session = repository.getSession(documentId)
             val pages = repository.getPages(documentId)
             preflightPages = pages
-            if (session == null || pages.isEmpty()) {
+            if (session == null || !session.canRestore(pages)) {
                 mutableUiState.value = homeState(
                     workflow = session?.workflowType ?: mutableUiState.value.selectedWorkflow,
                     message = "세션 메타데이터 또는 원본 페이지가 없어 복원할 수 없습니다.",
@@ -1771,6 +1917,7 @@ class ReceiptAppViewModel(
             AppScreen.SESSION_LIST -> return false
             AppScreen.API_SETTINGS -> AppScreen.SESSION_LIST
             AppScreen.IMAGE_CONFIRM -> AppScreen.SESSION_LIST
+            AppScreen.IMPORT_PREVIEW -> AppScreen.SESSION_LIST
             AppScreen.OCR_PROGRESS -> return true
             AppScreen.FIELD_REVIEW -> AppScreen.IMAGE_CONFIRM
             AppScreen.ITEM_REVIEW -> AppScreen.FIELD_REVIEW

@@ -42,6 +42,8 @@ import com.pricetrace.receiptscanner.domain.RetailChannel
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
 import com.pricetrace.receiptscanner.domain.withPurchaseLocalTime
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
+import com.pricetrace.receiptscanner.importer.CanonicalDraft
+import com.pricetrace.receiptscanner.importer.ExternalJsonImportResult
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
@@ -628,6 +630,61 @@ class ReceiptUiInstrumentedTest {
         }
     }
 
+    @Test
+    fun homeJsonImportActionReachesPickerCallback() {
+        var opened = false
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(uiState = ReceiptAppUiState(), onPickJson = { opened = true })
+            }
+        }
+
+        composeRule.onNodeWithTag("session_list").performScrollToNode(hasTestTag("pick_json_button"))
+        composeRule.onNodeWithTag("pick_json_button").assertIsEnabled().performClick()
+        composeRule.runOnIdle { assertTrue(opened) }
+    }
+
+    @Test
+    fun importPreviewShowsCanonicalSummaryAndExposesActions() {
+        var started = false
+        var attached = false
+        var cancelled = false
+        val result = ExternalJsonImportResult(
+            draft = CanonicalDraft.Receipt(receipt(false)),
+            workflowType = OcrWorkflowType.PRICE_TRACE_RECEIPT,
+            localDocumentId = "local-import",
+            upstreamDocumentId = "upstream-import",
+            importFingerprint = "abcdef1234567890",
+        )
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = ReceiptAppUiState(
+                        screen = AppScreen.IMPORT_PREVIEW,
+                        selectedWorkflow = OcrWorkflowType.PRICE_TRACE_RECEIPT,
+                        currentDocumentId = "local-import",
+                        importPreview = result,
+                    ),
+                    onStartImportReview = { started = true },
+                    onAttachImportImage = { attached = true },
+                    onCancelImport = { cancelled = true },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("import_preview").assertIsDisplayed()
+        composeRule.onNodeWithText("Input origin · External JSON").assertIsDisplayed()
+        composeRule.onNodeWithText("Upstream document ID · upstream-import").assertIsDisplayed()
+        composeRule.onNodeWithText("판매처 · 합성상점").assertIsDisplayed()
+        composeRule.onNodeWithTag("start_import_review_button").performClick()
+        composeRule.onNodeWithTag("attach_import_image_button").performClick()
+        composeRule.onNodeWithTag("cancel_import_button").performClick()
+        composeRule.runOnIdle {
+            assertTrue(started)
+            assertTrue(attached)
+            assertTrue(cancelled)
+        }
+    }
     private fun receipt(verified: Boolean): ReceiptV2 {
         val transcriptionStatus = if (verified) TranscriptionStatus.USER_VERIFIED else TranscriptionStatus.PARSED
         return ReceiptV2(

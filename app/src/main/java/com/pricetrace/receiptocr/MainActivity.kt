@@ -30,6 +30,13 @@ class MainActivity : ComponentActivity() {
             pickImagesForAppend = false
             viewModel.consumeSelectedImages(uris, appendToCurrent)
         }
+
+        val jsonPickerLauncher = registerForActivityResult(
+            ActivityResultContracts.OpenDocument(),
+        ) { uri ->
+            uri?.let(viewModel::importExternalJson)
+        }
+
         setContent {
             ReceiptOcrTheme {
                 ReceiptOcrApp(
@@ -42,6 +49,9 @@ class MainActivity : ComponentActivity() {
                         imagePickerLauncher.launch(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
                         )
+                    },
+                    onLaunchJsonPicker = {
+                        jsonPickerLauncher.launch(arrayOf("application/json", "text/json"))
                     },
                 )
             }

@@ -137,9 +137,13 @@ fun ReceiptOcrContent(
     resolvePageFile: (String) -> File = ::File,
     onScan: () -> Unit = {},
     onPickImages: () -> Unit = {},
+    onPickJson: () -> Unit = {},
     onWorkflowSelected: (OcrWorkflowType) -> Unit = {},
     onAppendScan: () -> Unit = {},
     onAppendPickImages: () -> Unit = {},
+    onStartImportReview: () -> Unit = {},
+    onAttachImportImage: () -> Unit = {},
+    onCancelImport: () -> Unit = {},
     onSelectSession: (String) -> Unit = {},
     onDeleteSession: (String) -> Unit = {},
     onShowApiSettings: () -> Unit = {},
@@ -234,12 +238,21 @@ fun ReceiptOcrContent(
                     isBusy = uiState.isPreparingScanner || uiState.isImportingPages,
                     onScan = onScan,
                     onPickImages = onPickImages,
+                    onPickJson = onPickJson,
                     onWorkflowSelected = onWorkflowSelected,
                     onSelectSession = onSelectSession,
                     onDeleteSession = onDeleteSession,
                     onShowApiSettings = onShowApiSettings,
                     onShowEvaluation = onShowEvaluation,
                 )
+                AppScreen.IMPORT_PREVIEW -> uiState.importPreview?.let { preview ->
+                    ImportPreviewScreen(
+                        result = preview,
+                        onStartReview = onStartImportReview,
+                        onAttachImage = onAttachImportImage,
+                        onCancel = onCancelImport,
+                    )
+                }
                 AppScreen.API_SETTINGS -> ApiSettingsScreen(
                     provider = uiState.correctionProvider,
                     supabaseUrl = uiState.nutritionSupabaseUrl,
@@ -498,6 +511,7 @@ private fun SessionListScreen(
     isBusy: Boolean,
     onScan: () -> Unit,
     onPickImages: () -> Unit,
+    onPickJson: () -> Unit,
     onWorkflowSelected: (OcrWorkflowType) -> Unit,
     onSelectSession: (String) -> Unit,
     onDeleteSession: (String) -> Unit,
@@ -588,6 +602,15 @@ private fun SessionListScreen(
             }
         }
         item {
+            OutlinedButton(
+                onClick = onPickJson,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth().testTag("pick_json_button"),
+            ) {
+                Text("JSON 가져오기")
+            }
+        }
+        item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
                     onClick = onShowApiSettings,
@@ -647,6 +670,80 @@ private fun SessionListScreen(
     }
 }
 
+@Composable
+private fun ImportPreviewScreen(
+    result: com.pricetrace.receiptscanner.importer.ExternalJsonImportResult,
+    onStartReview: () -> Unit,
+    onAttachImage: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().testTag("import_preview"),
+        contentPadding = PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item {
+            ScreenHeader("가져온 데이터 미리보기", "검수 전에 외부 데이터를 확인하세요.", onCancel)
+        }
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("입력 정보", style = MaterialTheme.typography.titleMedium)
+                    Text("Input origin · External JSON")
+                    Text("Schema · ${result.externalSchemaLabel()}")
+                    Text("Workflow · ${result.workflowType.wireValue}")
+                    Text("Upstream document ID · ${result.upstreamDocumentId}")
+                    Text("Fingerprint · ${result.importFingerprint.take(12)}…")
+                    Text("원본 이미지 · 아직 없음", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    when (val draft = result.draft) {
+                        is com.pricetrace.receiptscanner.importer.CanonicalDraft.Receipt -> {
+                            Text("Receipt", style = MaterialTheme.typography.titleMedium)
+                            Text("판매처 · ${draft.value.merchant.name ?: "미확인"}")
+                            Text("날짜 · ${draft.value.document.issuedOn ?: "미확인"}")
+                            Text("합계 · ${draft.value.totals.grandTotalAmountMinor?.let { String.format(Locale.KOREA, "%,d원", it) } ?: "미확인"}")
+                            Text("라인 아이템 · ${draft.value.lineItems.size}개")
+                        }
+                        is com.pricetrace.receiptscanner.importer.CanonicalDraft.Nutrition -> {
+                            Text("Nutrition", style = MaterialTheme.typography.titleMedium)
+                            Text("상품명 · ${draft.value.productName.ifBlank { "미확인" }}")
+                            Text("브랜드 · ${draft.value.brand ?: "미확인"}")
+                            Text("기준량 · ${draft.value.basisAmount?.toString() ?: "미확인"} ${draft.value.basisUnit}")
+                            NutritionField.entries.take(5).forEach { field ->
+                                Text("${field.koreanLabel} · ${formatNutritionNumber(draft.value.value(field)).ifBlank { "미확인" }} ${field.canonicalUnit}")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            Button(onClick = onStartReview, modifier = Modifier.fillMaxWidth().testTag("start_import_review_button")) {
+                Text("검수 시작")
+            }
+        }
+        item {
+            OutlinedButton(onClick = onAttachImage, modifier = Modifier.fillMaxWidth().testTag("attach_import_image_button")) {
+                Text("원본 이미지 첨부")
+            }
+        }
+        item {
+            TextButton(onClick = onCancel, modifier = Modifier.fillMaxWidth().testTag("cancel_import_button")) {
+                Text("취소")
+            }
+        }
+    }
+}
+
+private fun com.pricetrace.receiptscanner.importer.ExternalJsonImportResult.externalSchemaLabel(): String = when (draft) {
+    is com.pricetrace.receiptscanner.importer.CanonicalDraft.Receipt -> ReceiptV2.SCHEMA_VERSION
+    is com.pricetrace.receiptscanner.importer.CanonicalDraft.Nutrition -> "fitness-nutrition-draft.v1"
+}
 @Composable
 private fun WorkflowSelector(
     selectedWorkflow: OcrWorkflowType,
