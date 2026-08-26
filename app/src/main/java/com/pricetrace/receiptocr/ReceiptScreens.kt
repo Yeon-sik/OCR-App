@@ -79,6 +79,7 @@ import com.pricetrace.receiptocr.BuildConfig
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pricetrace.receiptscanner.domain.BoundingBox
+import com.pricetrace.receiptscanner.input.InputOrigin
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionCandidate
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionProvider
 import com.pricetrace.receiptscanner.correction.ReceiptEvidenceAssessment
@@ -230,6 +231,18 @@ fun ReceiptOcrContent(
         Column(Modifier.fillMaxSize().padding(innerPadding)) {
             uiState.message?.let { message ->
                 MessageCard(message, onDismissMessage)
+            }
+            if (
+                uiState.inputOrigin == InputOrigin.EXTERNAL_JSON &&
+                uiState.screen in setOf(
+                    AppScreen.FIELD_REVIEW,
+                    AppScreen.ITEM_REVIEW,
+                    AppScreen.RECONCILIATION,
+                    AppScreen.NUTRITION_REVIEW,
+                ) &&
+                pages.isEmpty()
+            ) {
+                ExternalSourceImageRequiredBanner(onAttach = onAppendPickImages)
             }
             when (uiState.screen) {
                 AppScreen.SESSION_LIST -> SessionListScreen(
@@ -477,6 +490,26 @@ fun ReceiptOcrContent(
                     onShareAccuracy = onShareAccuracy,
                     onBack = onBack,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExternalSourceImageRequiredBanner(onAttach: () -> Unit) {
+    MaterialCard(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+            .testTag("external_source_image_required"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("원본 이미지가 필요합니다.", fontWeight = FontWeight.SemiBold)
+            Text("External JSON 데이터는 원본 이미지를 첨부하고 확인한 뒤에만 확정·저장할 수 있습니다.")
+            MaterialOutlinedButton(
+                onClick = onAttach,
+                modifier = Modifier.fillMaxWidth().testTag("attach_external_source_image_button"),
+            ) {
+                Text("원본 이미지 첨부")
             }
         }
     }

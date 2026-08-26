@@ -44,6 +44,7 @@ import com.pricetrace.receiptscanner.domain.withPurchaseLocalTime
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.importer.CanonicalDraft
 import com.pricetrace.receiptscanner.importer.ExternalJsonImportResult
+import com.pricetrace.receiptscanner.input.InputOrigin
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
@@ -211,6 +212,31 @@ class ReceiptUiInstrumentedTest {
         }
         composeRule.onNodeWithTag("confirm_publish_nutrition").assertIsEnabled().performClick()
         composeRule.runOnIdle { assertEquals(1, published) }
+    }
+
+    @Test
+    fun externalNutritionReviewWithoutPagesShowsSourceImageRequirement() {
+        var attached = false
+        val draft = NutritionLabelDraft(documentId = "external-ui", productName = "가져온 상품")
+        var state by mutableStateOf(
+            ReceiptAppUiState(
+                screen = AppScreen.NUTRITION_REVIEW,
+                selectedWorkflow = OcrWorkflowType.FITNESS_NUTRITION,
+                inputOrigin = InputOrigin.EXTERNAL_JSON,
+                nutritionDraft = draft,
+            ),
+        )
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onAppendPickImages = { attached = true },
+                )
+            }
+        }
+        composeRule.onNodeWithTag("external_source_image_required").assertIsDisplayed()
+        composeRule.onNodeWithTag("attach_external_source_image_button").performClick()
+        composeRule.runOnIdle { assertTrue(attached) }
     }
 
     @Test

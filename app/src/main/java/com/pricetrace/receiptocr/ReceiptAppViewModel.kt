@@ -83,6 +83,9 @@ import com.pricetrace.receiptscanner.storage.PriceObservationQueueStatus
 import com.pricetrace.receiptscanner.storage.ReceiptSession
 import com.pricetrace.receiptscanner.storage.SessionInputMetadata
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
+import com.pricetrace.receiptscanner.verification.VerifiedDraftGate
+import com.pricetrace.receiptscanner.verification.VerifiedDraftGateFailure
+import com.pricetrace.receiptscanner.verification.VerifiedDraftGateResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -105,6 +108,8 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.LocalDate
 import java.time.OffsetDateTime
+
+private class VerifiedDraftGateBlockedException(message: String) : IllegalStateException(message)
 
 private fun Long.toIntExact(label: String): Int = Math.toIntExact(this).also {
     require(it >= 0) { "$label must be non-negative" }
@@ -130,6 +135,7 @@ enum class AppScreen {
 data class ReceiptAppUiState(
     val screen: AppScreen = AppScreen.SESSION_LIST,
     val selectedWorkflow: OcrWorkflowType = OcrWorkflowType.PRICE_TRACE_RECEIPT,
+    val inputOrigin: InputOrigin = InputOrigin.ANDROID_OCR,
     val isPreparingScanner: Boolean = false,
     val isImportingPages: Boolean = false,
     val isProcessingOcr: Boolean = false,
@@ -336,11 +342,12 @@ class ReceiptAppViewModel(
             )
             when (val outcome = captureProvider.handleActivityResult(documentId, resultCode, data)) {
                 is CaptureOutcome.Success -> {
-                    val workflow = repository.getSession(documentId)?.workflowType
-                        ?: mutableUiState.value.selectedWorkflow
+                    val session = repository.getSession(documentId)
+                    val workflow = session?.workflowType ?: mutableUiState.value.selectedWorkflow
                     selectedDocumentId.value = documentId
                     mutableUiState.value = homeState(
                         workflow = workflow,
+                        inputOrigin = session?.inputOrigin ?: mutableUiState.value.inputOrigin,
                         screen = AppScreen.IMAGE_CONFIRM,
                         currentDocumentId = documentId,
                         message = "${outcome.pages.size}개 페이지를 앱 전용 저장소에 보존했습니다.",
@@ -388,11 +395,12 @@ class ReceiptAppViewModel(
                 documentId = resolvedDocumentId
                 when (val outcome = captureProvider.importImageUris(resolvedDocumentId, uris)) {
                     is CaptureOutcome.Success -> {
-                        val workflow = repository.getSession(resolvedDocumentId)?.workflowType
-                            ?: state.selectedWorkflow
+                        val session = repository.getSession(resolvedDocumentId)
+                        val workflow = session?.workflowType ?: state.selectedWorkflow
                         selectedDocumentId.value = resolvedDocumentId
                         mutableUiState.value = homeState(
                             workflow = workflow,
+                            inputOrigin = session?.inputOrigin ?: state.inputOrigin,
                             screen = AppScreen.IMAGE_CONFIRM,
                             currentDocumentId = resolvedDocumentId,
                             message = "${outcome.pages.size}개 기존 이미지를 앱 전용 저장소에 보존했습니다.",
@@ -528,6 +536,7 @@ class ReceiptAppViewModel(
             mutableUiState.value = previousState.copy(
                 screen = AppScreen.IMPORT_PREVIEW,
                 selectedWorkflow = result.workflowType,
+                inputOrigin = InputOrigin.EXTERNAL_JSON,
                 currentDocumentId = result.localDocumentId,
                 importPreview = result,
                 message = if (upstreamConflict) {
@@ -591,6 +600,7 @@ class ReceiptAppViewModel(
             }
             mutableUiState.value = homeState(
                 workflow = session.workflowType,
+                inputOrigin = session.inputOrigin,
                 screen = AppScreen.IMAGE_CONFIRM,
                 currentDocumentId = documentId,
                 message = "저장된 검수 세션을 불러오는 중입니다.",
@@ -1006,6 +1016,25 @@ class ReceiptAppViewModel(
         }
     }
 
+    private suspend fun currentVerificationGate(documentId: String): VerifiedDraftGateResult {
+        val session = repository.getSession(documentId)
+            ?: return VerifiedDraftGateResult(false, VerifiedDraftGateFailure.SOURCE_IMAGE_REQUIRED)
+        val pages = repository.getPages(documentId)
+        val allFilesReadable = pages.isNotEmpty() && pages.all { page ->
+            runCatching { fileStore.readBytes(page.storageKey).isNotEmpty() }.getOrDefault(false)
+        }
+        return VerifiedDraftGate.evaluate(
+            inputOrigin = session.inputOrigin,
+            localPageCount = pages.size,
+            allLocalPageFilesReadable = allFilesReadable,
+        )
+    }
+
+    private fun verifiedDraftGateMessage(result: VerifiedDraftGateResult): String = when (result.failure) {
+        VerifiedDraftGateFailure.SOURCE_IMAGE_REQUIRED -> "원본 이미지를 첨부한 뒤 확정하세요."
+        VerifiedDraftGateFailure.SOURCE_IMAGE_UNREADABLE -> "원본 이미지를 읽을 수 없습니다. 다시 첨부한 뒤 확정하세요."
+        null -> ""
+    }
     fun confirmAndPublishNutrition() {
         val state = mutableUiState.value
         val currentDraft = state.nutritionDraft ?: return
@@ -1020,8 +1049,25 @@ class ReceiptAppViewModel(
         }
         nutritionPersistenceJob?.cancel()
         viewModelScope.launch {
-            val verifiedAt = currentDraft.confirmedAt ?: OffsetDateTime.now().toString()
-            val verified = currentDraft.asUserVerified(verifiedAt)
+            val gate = currentVerificationGate(currentDraft.documentId)
+            if (!gate.isAllowed) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    nutritionValidationErrors = validation.errors,
+                    message = verifiedDraftGateMessage(gate),
+                )
+                return@launch
+            }
+            val latestDraft = mutableUiState.value.nutritionDraft ?: currentDraft
+            val latestValidation = NutritionLabelValidator.validate(latestDraft)
+            if (!latestValidation.isReadyForUpload) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    nutritionValidationErrors = latestValidation.errors,
+                    message = "필수 상품·영양성분 값을 원본과 대조해 먼저 확정하세요.",
+                )
+                return@launch
+            }
+            val verifiedAt = latestDraft.confirmedAt ?: OffsetDateTime.now().toString()
+            val verified = latestDraft.asUserVerified(verifiedAt)
             mutableUiState.value = nutritionState(
                 draft = verified,
                 ocrDocument = state.ocrDocument,
@@ -1029,6 +1075,16 @@ class ReceiptAppViewModel(
             ).copy(isNutritionPublishing = true)
             try {
                 persistNutritionDraftNow(verified, uploadStatus = "pending")
+                val finalGate = currentVerificationGate(latestDraft.documentId)
+                if (!finalGate.isAllowed) {
+                    runCatching { persistNutritionDraftNow(latestDraft, uploadStatus = "local_only") }
+                    mutableUiState.value = nutritionState(
+                        draft = latestDraft,
+                        ocrDocument = state.ocrDocument,
+                        message = verifiedDraftGateMessage(finalGate),
+                    )
+                    return@launch
+                }
                 when (val outcome = nutritionGateway.publish(verified)) {
                     is NutritionPublishOutcome.Success -> {
                         updateNutritionSessionPublication(
@@ -1636,6 +1692,13 @@ class ReceiptAppViewModel(
         }
         val localDocumentId = receipt.document.id
         viewModelScope.launch {
+            val gate = currentVerificationGate(localDocumentId)
+            if (!gate.isAllowed) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = verifiedDraftGateMessage(gate),
+                )
+                return@launch
+            }
             mutableUiState.value = mutableUiState.value.copy(isSubmittingPriceObservation = true, message = null)
             try {
                 val currentEntry = mutableUiState.value.priceObservationQueueId
@@ -1670,6 +1733,14 @@ class ReceiptAppViewModel(
                         localDocumentId = localDocumentId,
                         localLineItemId = lineItemId,
                     )
+                    val finalGate = currentVerificationGate(localDocumentId)
+                    if (!finalGate.isAllowed) {
+                        mutableUiState.value = mutableUiState.value.copy(
+                            isSubmittingPriceObservation = false,
+                            message = verifiedDraftGateMessage(finalGate),
+                        )
+                        return@launch
+                    }
                     val result = priceObservationProcessor.submit(entry.queueId)
                     mutableUiState.value = mutableUiState.value.copy(
                         isSubmittingPriceObservation = false,
@@ -1715,11 +1786,26 @@ class ReceiptAppViewModel(
             return
         }
         viewModelScope.launch {
+            val gate = currentVerificationGate(receipt.document.id)
+            if (!gate.isAllowed) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = verifiedDraftGateMessage(gate),
+                )
+                return@launch
+            }
             mutableUiState.value = mutableUiState.value.copy(
                 isSubmittingRestaurantReceipt = true,
                 restaurantReceiptLastError = null,
                 message = null,
             )
+            val finalGate = currentVerificationGate(receipt.document.id)
+            if (!finalGate.isAllowed) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    isSubmittingRestaurantReceipt = false,
+                    message = verifiedDraftGateMessage(finalGate),
+                )
+                return@launch
+            }
             when (val result = priceObservationGateway.submit(payload)) {
                 is RestaurantReceiptSubmitResult.Success -> mutableUiState.value = mutableUiState.value.copy(
                     isSubmittingRestaurantReceipt = false,
@@ -1877,27 +1963,53 @@ class ReceiptAppViewModel(
 
     fun confirmUserVerified() {
         val controller = reviewController ?: return
-        controller.markUserVerified()
-            .onSuccess {
-                val verifiedAt = OffsetDateTime.now().toString()
-                mutableUiState.value = stateFromReview(
-                    screen = AppScreen.JSON_PREVIEW,
-                    ocrDocument = mutableUiState.value.ocrDocument,
-                    message = "필수 검증을 통과했습니다. user_verified JSON을 내보낼 수 있습니다.",
-                    reviewedAt = verifiedAt,
-                )
-                persistDraft()
-            }
-            .onFailure {
+        val currentState = mutableUiState.value
+        val currentReceipt = controller.state.value.receipt
+        viewModelScope.launch {
+            val validation = ReceiptValidator.validateForUserVerification(
+                currentReceipt,
+                controller.state.value.reconciliationReason,
+            )
+            if (!validation.canMarkUserVerified) {
                 mutableUiState.value = stateFromReview(
                     screen = AppScreen.RECONCILIATION,
-                    ocrDocument = mutableUiState.value.ocrDocument,
+                    ocrDocument = currentState.ocrDocument,
                     message = "필수 검증 항목을 먼저 해결하세요.",
-                    reviewedAt = mutableUiState.value.reviewedAt,
+                    reviewedAt = currentState.reviewedAt,
                 )
+                return@launch
             }
+            val gate = currentVerificationGate(currentReceipt.document.id)
+            if (!gate.isAllowed) {
+                mutableUiState.value = stateFromReview(
+                    screen = currentState.screen,
+                    ocrDocument = currentState.ocrDocument,
+                    message = verifiedDraftGateMessage(gate),
+                    reviewedAt = currentState.reviewedAt,
+                )
+                return@launch
+            }
+            controller.markUserVerified()
+                .onSuccess {
+                    val verifiedAt = OffsetDateTime.now().toString()
+                    mutableUiState.value = stateFromReview(
+                        screen = AppScreen.JSON_PREVIEW,
+                        ocrDocument = mutableUiState.value.ocrDocument,
+                        message = "필수 검증을 통과했습니다. user_verified JSON을 내보낼 수 있습니다.",
+                        reviewedAt = verifiedAt,
+                    )
+                    persistDraft()
+                }
+                .onFailure {
+                    mutableUiState.value = stateFromReview(
+                        screen = AppScreen.RECONCILIATION,
+                        ocrDocument = mutableUiState.value.ocrDocument,
+                        message = "필수 검증 항목을 먼저 해결하세요.",
+                        reviewedAt = mutableUiState.value.reviewedAt,
+                    )
+                }
+        }
     }
-
     fun setIncludeRawTextInShare(include: Boolean) {
         val state = mutableUiState.value
         mutableUiState.value = state.copy(
@@ -2173,6 +2285,7 @@ class ReceiptAppViewModel(
         workflow: OcrWorkflowType,
         screen: AppScreen = AppScreen.SESSION_LIST,
         currentDocumentId: String? = null,
+        inputOrigin: InputOrigin = InputOrigin.ANDROID_OCR,
         message: String? = null,
         possibleDuplicatePageIds: List<String> = emptyList(),
     ): ReceiptAppUiState {
@@ -2181,6 +2294,7 @@ class ReceiptAppViewModel(
         return ReceiptAppUiState(
             screen = screen,
             selectedWorkflow = workflow,
+            inputOrigin = inputOrigin,
             correctionProvider = correctionSuggester.provider,
             currentDocumentId = currentDocumentId,
             message = message,
@@ -2401,6 +2515,14 @@ class ReceiptAppViewModel(
             return
         }
         viewModelScope.launch {
+            val exportGate = currentVerificationGate(receipt.document.id)
+            if (!exportGate.isAllowed) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    isExporting = false,
+                    message = verifiedDraftGateMessage(exportGate),
+                )
+                return@launch
+            }
             mutableUiState.value = mutableUiState.value.copy(isExporting = true, message = null)
             try {
                 val bundle = persistenceMutex.withLock {
@@ -2417,6 +2539,10 @@ class ReceiptAppViewModel(
                         reviewedAt = state.reviewedAt,
                         ocrDocument = state.ocrDocument,
                     )
+                    val finalExportGate = currentVerificationGate(receipt.document.id)
+                    if (!finalExportGate.isAllowed) {
+                        throw VerifiedDraftGateBlockedException(verifiedDraftGateMessage(finalExportGate))
+                    }
                     val publication = publisher.finalizeVerifiedReceipt(
                         receipt.document.id,
                         exportedReceipt,
@@ -2449,6 +2575,11 @@ class ReceiptAppViewModel(
             } catch (cancelled: CancellationException) {
                 mutableUiState.value = mutableUiState.value.copy(isExporting = false, message = null)
                 throw cancelled
+            } catch (error: VerifiedDraftGateBlockedException) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    isExporting = false,
+                    message = error.message,
+                )
             } catch (error: Exception) {
                 try {
                     val session = repository.getSession(receipt.document.id)
