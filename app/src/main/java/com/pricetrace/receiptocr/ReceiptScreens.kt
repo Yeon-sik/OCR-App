@@ -1,6 +1,7 @@
 package com.pricetrace.receiptocr
 
 import android.graphics.BitmapFactory
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -11,12 +12,15 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,27 +29,30 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CardColors
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CardElevation
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
-import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Button as MaterialButton
+import androidx.compose.material3.Card as MaterialCard
+import androidx.compose.material3.OutlinedButton as MaterialOutlinedButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -58,6 +65,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
@@ -69,9 +77,14 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
 import com.pricetrace.receiptocr.BuildConfig
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.pricetrace.receiptscanner.domain.BoundingBox
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionCandidate
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionProvider
+import com.pricetrace.receiptscanner.correction.ReceiptEvidenceAssessment
+import com.pricetrace.receiptscanner.correction.ReceiptEvidenceVerdict
+import com.pricetrace.receiptscanner.correction.ReceiptFieldCheck
+import com.pricetrace.receiptscanner.correction.ReceiptFieldVerdict
 import com.pricetrace.receiptscanner.domain.ConfidenceLevel
 import com.pricetrace.receiptscanner.domain.ReceiptLineType
 import com.pricetrace.receiptscanner.domain.ReceiptEvaluationCalculator
@@ -82,6 +95,7 @@ import com.pricetrace.receiptscanner.domain.ReceiptReviewProgress
 import com.pricetrace.receiptscanner.domain.ReceiptValidationResult
 import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.domain.ReceiptV2LineItem
+import com.pricetrace.receiptscanner.domain.PlaceResolutionStatus
 import com.pricetrace.receiptscanner.domain.ReconciliationDiagnosis
 import com.pricetrace.receiptscanner.domain.ReconciliationHypothesis
 import com.pricetrace.receiptscanner.domain.ReconciliationSuggestion
@@ -92,11 +106,19 @@ import com.pricetrace.receiptscanner.domain.isUserEntered
 import com.pricetrace.receiptscanner.domain.purchaseLocalTime
 import com.pricetrace.receiptscanner.ocr.OcrDocument
 import com.pricetrace.receiptscanner.nutrition.NutritionContract
+import com.pricetrace.receiptscanner.nutrition.NutritionCorrectionCandidate
+import com.pricetrace.receiptscanner.nutrition.NutritionEvidenceAssessment
+import com.pricetrace.receiptscanner.nutrition.NutritionEvidenceVerdict
+import com.pricetrace.receiptscanner.nutrition.NutritionFieldVerdict
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.nutrition.NutritionUnit
 import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
 import com.pricetrace.receiptscanner.publisher.PriceObservationSource
+import com.pricetrace.receiptscanner.preflight.ReceiptAiReviewStatus
+import com.pricetrace.receiptscanner.preflight.ReceiptPreflightDecision
+import com.pricetrace.receiptscanner.preflight.ReceiptPreflightReason
+import com.pricetrace.receiptscanner.preflight.ReceiptPreflightRoute
 import com.pricetrace.receiptscanner.storage.PriceObservationQueueStatus
 import com.pricetrace.receiptscanner.storage.ReceiptSession
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
@@ -114,8 +136,10 @@ fun ReceiptOcrContent(
     pages: List<ReceiptPage> = emptyList(),
     resolvePageFile: (String) -> File = ::File,
     onScan: () -> Unit = {},
+    onPickImages: () -> Unit = {},
     onWorkflowSelected: (OcrWorkflowType) -> Unit = {},
     onAppendScan: () -> Unit = {},
+    onAppendPickImages: () -> Unit = {},
     onSelectSession: (String) -> Unit = {},
     onDeleteSession: (String) -> Unit = {},
     onShowApiSettings: () -> Unit = {},
@@ -129,6 +153,9 @@ fun ReceiptOcrContent(
     onSaveNutritionConnection: (String, String) -> Unit = { _, _ -> },
     onSignInNutrition: (String, String) -> Unit = { _, _ -> },
     onConfirmAndPublishNutrition: () -> Unit = {},
+    onRequestNutritionAiCorrections: () -> Unit = {},
+    onApplyNutritionAiCorrection: (String) -> Unit = {},
+    onDismissNutritionAiCorrection: (String) -> Unit = {},
     onSavePriceTraceConnection: (String, String) -> Unit = { _, _ -> },
     onSignInPriceTrace: (String, String) -> Unit = { _, _ -> },
     onMerchantNameChanged: (String) -> Unit = {},
@@ -163,6 +190,7 @@ fun ReceiptOcrContent(
     onSaveGeminiApiKey: (String) -> Unit = {},
     onClearGeminiApiKey: () -> Unit = {},
     onRequestAiCorrections: () -> Unit = {},
+    onContinueAiPreflight: () -> Unit = {},
     onApplyAiCorrection: (String) -> Unit = {},
     onDismissAiCorrection: (String) -> Unit = {},
     onApplySuggestion: (ReconciliationSuggestion) -> Unit = {},
@@ -182,6 +210,7 @@ fun ReceiptOcrContent(
     onPriceObservationObservedOnChanged: (String) -> Unit = {},
     onPriceObservationUnitPriceChanged: (String) -> Unit = {},
     onSubmitPriceObservation: () -> Unit = {},
+    onSubmitRestaurantReceipt: () -> Unit = {},
     onIncludeRawTextChanged: (Boolean) -> Unit = {},
     onSave: () -> Unit = {},
     onShare: () -> Unit = {},
@@ -190,7 +219,10 @@ fun ReceiptOcrContent(
     onShareAccuracy: () -> Unit = {},
     onDismissMessage: () -> Unit = {},
 ) {
-    Scaffold { innerPadding ->
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground,
+    ) { innerPadding ->
         Column(Modifier.fillMaxSize().padding(innerPadding)) {
             uiState.message?.let { message ->
                 MessageCard(message, onDismissMessage)
@@ -201,6 +233,7 @@ fun ReceiptOcrContent(
                     selectedWorkflow = uiState.selectedWorkflow,
                     isBusy = uiState.isPreparingScanner || uiState.isImportingPages,
                     onScan = onScan,
+                    onPickImages = onPickImages,
                     onWorkflowSelected = onWorkflowSelected,
                     onSelectSession = onSelectSession,
                     onDeleteSession = onDeleteSession,
@@ -233,6 +266,7 @@ fun ReceiptOcrContent(
                     resolvePageFile = resolvePageFile,
                     onBack = onBack,
                     onAppendScan = onAppendScan,
+                    onAppendPickImages = onAppendPickImages,
                     onStartOcr = onStartOcr,
                 )
                 AppScreen.OCR_PROGRESS -> OcrProgressScreen()
@@ -302,13 +336,19 @@ fun ReceiptOcrContent(
                     candidates = uiState.aiCorrectionCandidates,
                     rejectedCount = uiState.rejectedAiCorrectionCount,
                     isLoading = uiState.isRequestingAiCorrections,
+                    isPreflight = uiState.isAiPreflight,
+                    aiStatus = uiState.aiReviewStatus,
+                    assessment = uiState.aiEvidenceAssessment,
+                    decision = uiState.preflightDecision,
                     pages = pages,
                     ocrDocument = uiState.ocrDocument,
                     resolvePageFile = resolvePageFile,
-                    onBack = onShowItems,
+                    onBack = onBack,
                     onSaveApiKey = onSaveGeminiApiKey,
                     onClearApiKey = onClearGeminiApiKey,
                     onRequest = onRequestAiCorrections,
+                    onContinueReview = onContinueAiPreflight,
+                    onRecapture = onScan,
                     onApply = onApplyAiCorrection,
                     onDismiss = onDismissAiCorrection,
                 )
@@ -340,6 +380,7 @@ fun ReceiptOcrContent(
                     onSave = onSave,
                     onShare = onShare,
                     onShowPriceObservationSubmit = onShowPriceObservationSubmit,
+                    isRestaurantReceipt = uiState.selectedWorkflow == OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT,
                 )
                 AppScreen.PRICE_OBSERVATION_SUBMIT -> uiState.receipt?.let { receipt ->
                     PriceObservationSubmitScreen(
@@ -370,6 +411,19 @@ fun ReceiptOcrContent(
                         onSubmit = onSubmitPriceObservation,
                     )
                 }
+                AppScreen.RESTAURANT_RECEIPT_SUBMIT -> uiState.receipt?.let { receipt ->
+                    RestaurantReceiptSubmitScreen(
+                        receipt = receipt,
+                        signedInEmail = uiState.priceTraceSignedInEmail,
+                        isSubmitting = uiState.isSubmittingRestaurantReceipt,
+                        submittedReceiptId = uiState.restaurantReceiptId,
+                        submittedItemCount = uiState.restaurantReceiptItemCount,
+                        replayed = uiState.restaurantReceiptReplayed,
+                        lastError = uiState.restaurantReceiptLastError,
+                        onBack = onBack,
+                        onSubmit = onSubmitRestaurantReceipt,
+                    )
+                }
                 AppScreen.NUTRITION_REVIEW -> uiState.nutritionDraft?.let { draft ->
                     NutritionReviewScreen(
                         draft = draft,
@@ -391,6 +445,16 @@ fun ReceiptOcrContent(
                         onSaveConnection = onSaveNutritionConnection,
                         onSignIn = onSignInNutrition,
                         onConfirmAndPublish = onConfirmAndPublishNutrition,
+                        aiProvider = uiState.nutritionAiProvider,
+                        aiCandidates = uiState.nutritionAiCandidates,
+                        aiRejectedCount = uiState.nutritionAiRejectedCount,
+                        isAiLoading = uiState.isRequestingNutritionAiCorrections,
+                        aiAssessment = uiState.nutritionAiAssessment,
+                        onSaveGeminiApiKey = onSaveGeminiApiKey,
+                        onClearGeminiApiKey = onClearGeminiApiKey,
+                        onRequestAi = onRequestNutritionAiCorrections,
+                        onApplyAi = onApplyNutritionAiCorrection,
+                        onDismissAi = onDismissNutritionAiCorrection,
                     )
                 }
                 AppScreen.EVALUATION -> EvaluationScreen(
@@ -410,13 +474,18 @@ private fun MessageCard(message: String, onDismiss: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
             .testTag("status_message"),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(message, modifier = Modifier.weight(1f).padding(vertical = 12.dp))
+            Text(
+                message,
+                modifier = Modifier.weight(1f).padding(vertical = 12.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+            )
             TextButton(onClick = onDismiss) { Text("닫기") }
         }
     }
@@ -428,6 +497,7 @@ private fun SessionListScreen(
     selectedWorkflow: OcrWorkflowType,
     isBusy: Boolean,
     onScan: () -> Unit,
+    onPickImages: () -> Unit,
     onWorkflowSelected: (OcrWorkflowType) -> Unit,
     onSelectSession: (String) -> Unit,
     onDeleteSession: (String) -> Unit,
@@ -436,74 +506,134 @@ private fun SessionListScreen(
 ) {
     val visibleSessions = sessions.filter { it.workflowType == selectedWorkflow }
     val isFitness = selectedWorkflow == OcrWorkflowType.FITNESS_NUTRITION
+    val isRestaurant = selectedWorkflow == OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("session_list"),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         item {
-            Text("공통 OCR 작업실", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
             Text(
-                if (isFitness) {
-                    "상품 라벨을 촬영해 영양성분을 검수하고 Fitness Nutrition DB에 private 식품으로 저장합니다."
-                } else {
-                    "영수증을 촬영해 PriceTrace receipt.v2 초안을 검수하고 JSON으로 확정합니다."
-                },
+                "PRICETRACE",
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                letterSpacing = 1.4.sp,
+            )
+            Text(
+                "OCR",
+                modifier = Modifier.padding(top = 2.dp),
+                style = MaterialTheme.typography.headlineMedium,
+            )
+            Text(
+                "촬영한 정보를 직접 확인하고 필요한 곳에만 보냅니다.",
+                modifier = Modifier.padding(top = 6.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
             )
         }
         item {
-            PrimaryTabRow(selectedTabIndex = if (isFitness) 1 else 0) {
-                Tab(
-                    selected = !isFitness,
-                    onClick = { onWorkflowSelected(OcrWorkflowType.PRICE_TRACE_RECEIPT) },
-                    text = { Text("PriceTrace") },
-                    modifier = Modifier.testTag("workflow_pricetrace"),
-                )
-                Tab(
-                    selected = isFitness,
-                    onClick = { onWorkflowSelected(OcrWorkflowType.FITNESS_NUTRITION) },
-                    text = { Text("Fitness App") },
-                    modifier = Modifier.testTag("workflow_fitness"),
-                )
-            }
+            WorkflowSelector(
+                selectedWorkflow = selectedWorkflow,
+                onWorkflowSelected = onWorkflowSelected,
+            )
         }
         item {
-            Button(
-                onClick = onScan,
-                enabled = !isBusy,
-                modifier = Modifier.fillMaxWidth().testTag("scan_button"),
-            ) {
-                if (isBusy) BusyIndicator()
-                Text(if (isFitness) "상품 영양성분 촬영·선택" else "영수증 촬영·선택")
-            }
+            MonochromeHologramHero(
+                eyebrow = when {
+                    isFitness -> "FITNESS NUTRITION"
+                    isRestaurant -> "RESTAURANT PRICE OBSERVATION"
+                    else -> "PRODUCT PRICE OBSERVATION"
+                },
+                title = if (isFitness) {
+                    "영양 라벨을\n정확하게 기록하세요"
+                } else if (isRestaurant) {
+                    "식당 영수증을\n메뉴별 가격으로 기록하세요"
+                } else {
+                    "영수증 가격을\n검증해 기록하세요"
+                },
+                description = if (isFitness) {
+                    "상품 라벨을 인식한 뒤 영양성분을 직접 확인합니다."
+                } else if (isRestaurant) {
+                    "식당 이름·방문 날짜·메뉴와 옵션 추가 가격을 검수한 뒤 서버에 제출합니다."
+                } else {
+                    "영수증을 인식하고 항목·합계를 검수한 뒤 결과를 확정합니다."
+                },
+                footer = "로컬 우선 · 저장된 작업 ${visibleSessions.size}개",
+                modifier = Modifier.testTag("home_hologram_hero"),
+            )
         }
         item {
-            OutlinedButton(
-                onClick = onShowApiSettings,
-                modifier = Modifier.fillMaxWidth().testTag("api_settings_button"),
-            ) {
-                Text("API 설정")
-            }
-        }
-        if (!isFitness) {
-            item {
-                OutlinedButton(
-                    onClick = onShowEvaluation,
-                    modifier = Modifier.fillMaxWidth().testTag("evaluation_button"),
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = onScan,
+                    enabled = !isBusy,
+                    modifier = Modifier.weight(1f).testTag("scan_button"),
                 ) {
-                    Text("실제 기기 정확도 평가")
+                    if (isBusy) BusyIndicator()
+                    Text(
+                        when {
+                            isFitness -> "상품 영양성분 촬영·선택"
+                            isRestaurant -> "식당 영수증 촬영·선택"
+                            else -> "영수증 촬영·선택"
+                        },
+                    )
+                }
+                OutlinedButton(
+                    onClick = onPickImages,
+                    enabled = !isBusy,
+                    modifier = Modifier.weight(1f).testTag("pick_images_button"),
+                ) {
+                    Text("기존 사진 선택")
                 }
             }
         }
-        item { SectionTitle(if (isFitness) "저장된 Fitness 세션" else "저장된 PriceTrace 세션") }
-        if (visibleSessions.isEmpty()) {
-            item {
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = onShowApiSettings,
+                    modifier = Modifier.weight(1f).testTag("api_settings_button"),
+                ) {
+                    Text("연결 설정")
+                }
+                if (!isFitness) {
+                    OutlinedButton(
+                        onClick = onShowEvaluation,
+                        modifier = Modifier.weight(1f).testTag("evaluation_button"),
+                    ) {
+                        Text("정확도 평가")
+                    }
+                }
+            }
+        }
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SectionTitle("최근 작업")
                 Text(
-                    if (isFitness) "아직 저장된 영양성분 세션이 없습니다." else "아직 저장된 영수증이 없습니다.",
+                    "${visibleSessions.size}개",
+                    style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+        if (visibleSessions.isEmpty()) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Text(
+                            if (isFitness) "저장된 영양 라벨이 없습니다." else "저장된 영수증이 없습니다.",
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        Text(
+                            "위 촬영 버튼으로 첫 작업을 시작하세요.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
             }
         } else {
             items(visibleSessions, key = { it.documentId }) { session ->
@@ -513,6 +643,64 @@ private fun SessionListScreen(
                     onDelete = { onDeleteSession(session.documentId) },
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun WorkflowSelector(
+    selectedWorkflow: OcrWorkflowType,
+    onWorkflowSelected: (OcrWorkflowType) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceContainer, CircleShape)
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        WorkflowChoice(
+            label = "가격 영수증",
+            selected = selectedWorkflow == OcrWorkflowType.PRICE_TRACE_RECEIPT,
+            onClick = { onWorkflowSelected(OcrWorkflowType.PRICE_TRACE_RECEIPT) },
+            modifier = Modifier.testTag("workflow_pricetrace"),
+        )
+        WorkflowChoice(
+            label = "식당",
+            selected = selectedWorkflow == OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT,
+            onClick = { onWorkflowSelected(OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT) },
+            modifier = Modifier.testTag("workflow_restaurant"),
+        )
+        WorkflowChoice(
+            label = "영양 라벨",
+            selected = selectedWorkflow == OcrWorkflowType.FITNESS_NUTRITION,
+            onClick = { onWorkflowSelected(OcrWorkflowType.FITNESS_NUTRITION) },
+            modifier = Modifier.testTag("workflow_fitness"),
+        )
+    }
+}
+
+@Composable
+private fun RowScope.WorkflowChoice(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        onClick = onClick,
+        modifier = modifier.weight(1f).heightIn(min = 44.dp),
+        shape = CircleShape,
+        color = if (selected) MaterialTheme.colorScheme.inverseSurface else Color.Transparent,
+        contentColor = if (selected) MaterialTheme.colorScheme.inverseOnSurface else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+        border = if (selected) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Box(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(label, style = MaterialTheme.typography.labelMedium)
         }
     }
 }
@@ -543,8 +731,8 @@ private fun ApiSettingsScreen(
     ) {
         item {
             ScreenHeader(
-                "API 설정",
-                "Gemini 교정과 Fitness Nutrition 저장 연결을 관리합니다.",
+                "연결 설정",
+                "AI 교정과 두 서비스의 로그인 세션을 각각 관리합니다.",
                 onBack,
             )
         }
@@ -748,10 +936,11 @@ private fun PriceTraceConnectionCard(
     var password by remember { mutableStateOf("") }
     Card {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("PriceTrace observation connection", fontWeight = FontWeight.SemiBold)
+            Text("PriceTrace 가격 관측 연결", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Separate from Fitness Nutrition. Only the publishable key and the signed-in user's session are used; service_role/secret keys are rejected.",
+                "Fitness Nutrition과 분리된 연결입니다. publishable key와 로그인한 사용자 세션만 사용하며 service_role/secret key는 거부합니다.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
             )
             OutlinedTextField(
                 value = connectionUrl,
@@ -765,7 +954,9 @@ private fun PriceTraceConnectionCard(
                 value = publishableKey,
                 onValueChange = { publishableKey = it },
                 label = { Text("PriceTrace publishable key") },
-                placeholder = { Text(if (isPublishableKeyConfigured) "Leave unchanged" else "Enter publishable key") },
+                placeholder = {
+                    Text(if (isPublishableKeyConfigured) "저장됨 — 변경할 때만 입력" else "publishable key 입력")
+                },
                 visualTransformation = PasswordVisualTransformation(),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth().testTag("pricetrace_publishable_key"),
@@ -776,12 +967,12 @@ private fun PriceTraceConnectionCard(
                     (publishableKey.isNotBlank() || isPublishableKeyConfigured) &&
                     !isSigningIn,
                 modifier = Modifier.fillMaxWidth().testTag("save_pricetrace_connection"),
-            ) { Text("Save PriceTrace connection") }
+            ) { Text("PriceTrace 연결 정보 저장") }
             if (signedInEmail == null) {
                 OutlinedTextField(
                     value = email,
                     onValueChange = { email = it },
-                    label = { Text("PriceTrace account email") },
+                    label = { Text("PriceTrace 계정 이메일") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
                     modifier = Modifier.fillMaxWidth().testTag("pricetrace_email"),
@@ -789,7 +980,7 @@ private fun PriceTraceConnectionCard(
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text("Password (not saved)") },
+                    label = { Text("비밀번호 (저장하지 않음)") },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("pricetrace_password"),
@@ -800,10 +991,10 @@ private fun PriceTraceConnectionCard(
                     modifier = Modifier.fillMaxWidth().testTag("pricetrace_sign_in"),
                 ) {
                     if (isSigningIn) BusyIndicator()
-                    Text("Sign in to PriceTrace")
+                    Text("PriceTrace 계정 로그인")
                 }
             } else {
-                Text("Signed in: $signedInEmail", fontWeight = FontWeight.SemiBold)
+                Text("로그인됨 · $signedInEmail", fontWeight = FontWeight.SemiBold)
             }
         }
     }
@@ -812,35 +1003,82 @@ private fun PriceTraceConnectionCard(
 @Composable
 private fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: () -> Unit) {
     var showDeleteConfirmation by remember { mutableStateOf(false) }
+    val statusLabel = sessionStatusLabel(session)
+    val needsAttention = session.lastError != null
+    val dateLabel = session.issuedOn ?: session.updatedAt.take(10)
+    val amountLabel = session.grandTotalAmountMinor?.let { amount ->
+        String.format(Locale.KOREA, "%,d원", amount)
+    }
     Card(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
             .testTag("session_${session.documentId}"),
-        shape = RoundedCornerShape(14.dp),
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(
-                session.displayTitle ?: session.merchantName ?: if (
-                    session.workflowType == OcrWorkflowType.FITNESS_NUTRITION
-                ) "미확인 상품" else "미확인 판매처",
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                session.documentId.takeLast(20),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                if (session.workflowType == OcrWorkflowType.FITNESS_NUTRITION) {
-                    "OCR ${session.ocrStatus} · 검수 ${session.reviewStatus} · DB ${session.uploadStatus}"
-                } else {
-                    "OCR ${session.ocrStatus} · 검수 ${session.reviewStatus} · 내보내기 ${session.exportStatus}"
-                },
-            )
-            session.lastError?.let { Text("최근 오류: $it", color = MaterialTheme.colorScheme.error) }
-            TextButton(
-                onClick = { showDeleteConfirmation = true },
-                modifier = Modifier.align(Alignment.End).testTag("delete_${session.documentId}"),
-            ) { Text("삭제") }
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        session.displayTitle ?: session.merchantName ?: if (
+                            session.workflowType == OcrWorkflowType.FITNESS_NUTRITION
+                        ) "미확인 상품" else "미확인 판매처",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        listOfNotNull(
+                            if (session.workflowType == OcrWorkflowType.FITNESS_NUTRITION) "영양 라벨" else "가격 영수증",
+                            dateLabel.takeIf { it.isNotBlank() },
+                            amountLabel,
+                        ).joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Surface(
+                    shape = CircleShape,
+                    color = if (needsAttention) {
+                        MaterialTheme.colorScheme.errorContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainer
+                    },
+                    contentColor = if (needsAttention) {
+                        MaterialTheme.colorScheme.onErrorContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                ) {
+                    Text(
+                        statusLabel,
+                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            }
+            session.lastError?.let {
+                Text(
+                    "확인 필요: $it",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "눌러서 계속하기",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                TextButton(
+                    onClick = { showDeleteConfirmation = true },
+                    modifier = Modifier.testTag("delete_${session.documentId}"),
+                ) { Text("삭제") }
+            }
         }
     }
     if (showDeleteConfirmation) {
@@ -864,6 +1102,16 @@ private fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: 
     }
 }
 
+private fun sessionStatusLabel(session: ReceiptSession): String = when {
+    session.lastError != null -> "확인 필요"
+    session.workflowType == OcrWorkflowType.FITNESS_NUTRITION &&
+        session.uploadStatus in setOf("uploaded", "published", "succeeded") -> "DB 저장 완료"
+    session.reviewStatus in setOf("user_verified", "verified", "completed") -> "검수 완료"
+    session.ocrStatus in setOf("completed", "succeeded", "recognized") -> "검수 대기"
+    session.ocrStatus in setOf("processing", "in_progress", "running") -> "인식 중"
+    else -> "로컬 초안"
+}
+
 @Composable
 private fun ImageConfirmationScreen(
     workflow: OcrWorkflowType,
@@ -873,6 +1121,7 @@ private fun ImageConfirmationScreen(
     resolvePageFile: (String) -> File,
     onBack: () -> Unit,
     onAppendScan: () -> Unit,
+    onAppendPickImages: () -> Unit,
     onStartOcr: () -> Unit,
 ) {
     LazyColumn(
@@ -905,25 +1154,32 @@ private fun ImageConfirmationScreen(
                     onClick = onAppendScan,
                     enabled = !isBusy,
                     modifier = Modifier.weight(1f).testTag("append_scan_button"),
-                ) { Text("구간 추가") }
-                Button(
-                    onClick = onStartOcr,
-                    enabled = pages.isNotEmpty() && !isBusy,
-                    modifier = Modifier.weight(1f).testTag("start_ocr_button"),
-                ) {
-                    Text(
-                        if (workflow == OcrWorkflowType.FITNESS_NUTRITION) {
-                            "영양성분 OCR 시작"
-                        } else {
-                            "영수증 OCR 시작"
-                        },
-                    )
-                }
+                ) { Text("추가 촬영") }
+                OutlinedButton(
+                    onClick = onAppendPickImages,
+                    enabled = !isBusy,
+                    modifier = Modifier.weight(1f).testTag("append_pick_images_button"),
+                ) { Text("기존 사진 추가") }
             }
         }
+        item {
+            Button(
+                onClick = onStartOcr,
+                enabled = pages.isNotEmpty() && !isBusy,
+                modifier = Modifier.fillMaxWidth().testTag("start_ocr_button"),
+            ) {
+                Text(
+                    if (workflow == OcrWorkflowType.FITNESS_NUTRITION) {
+                        "영양성분 OCR 시작"
+                    } else {
+                        "영수증 OCR 시작"
+                    },
+                )
+            }
     }
 }
 
+}
 @Composable
 private fun NutritionReviewScreen(
     draft: NutritionLabelDraft,
@@ -945,11 +1201,21 @@ private fun NutritionReviewScreen(
     onSaveConnection: (String, String) -> Unit,
     onSignIn: (String, String) -> Unit,
     onConfirmAndPublish: () -> Unit,
+    aiProvider: ReceiptCorrectionProvider?,
+    aiCandidates: List<NutritionCorrectionCandidate>,
+    aiRejectedCount: Int,
+    isAiLoading: Boolean,
+    aiAssessment: NutritionEvidenceAssessment?,
+    onSaveGeminiApiKey: (String) -> Unit,
+    onClearGeminiApiKey: () -> Unit,
+    onRequestAi: () -> Unit,
+    onApplyAi: (String) -> Unit,
+    onDismissAi: (String) -> Unit,
 ) {
-    var basisAmount by remember(draft.documentId) {
+    var basisAmount by remember(draft.documentId, draft.basisAmount) {
         mutableStateOf(formatNutritionNumber(draft.basisAmount))
     }
-    val nutrientValues = remember(draft.documentId) {
+    val nutrientValues = remember(draft.documentId, draft.nutrients) {
         NutritionField.entries.associateWith { field ->
             mutableStateOf(formatNutritionNumber(draft.value(field)))
         }
@@ -980,6 +1246,21 @@ private fun NutritionReviewScreen(
                 }
             }
         }
+        item {
+            NutritionAiReviewPanel(
+                provider = aiProvider,
+                candidates = aiCandidates,
+                rejectedCount = aiRejectedCount,
+                isLoading = isAiLoading,
+                assessment = aiAssessment,
+                onSaveApiKey = onSaveGeminiApiKey,
+                onClearApiKey = onClearGeminiApiKey,
+                onRequest = onRequestAi,
+                onApply = onApplyAi,
+                onDismiss = onDismissAi,
+            )
+        }
+
         item { SectionTitle("상품 정보") }
         item {
             Text(
@@ -1098,6 +1379,140 @@ private fun NutritionReviewScreen(
             )
         }
     }
+}
+
+@Composable
+private fun NutritionAiReviewPanel(
+    provider: ReceiptCorrectionProvider?,
+    candidates: List<NutritionCorrectionCandidate>,
+    rejectedCount: Int,
+    isLoading: Boolean,
+    assessment: NutritionEvidenceAssessment?,
+    onSaveApiKey: (String) -> Unit,
+    onClearApiKey: () -> Unit,
+    onRequest: () -> Unit,
+    onApply: (String) -> Unit,
+    onDismiss: (String) -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("AI 성분표 대조", fontWeight = FontWeight.SemiBold)
+            Text(
+                "AI는 현재 초안·연결된 OCR 줄·원본 라벨 crop만 대조합니다. 값은 자동 확정하지 않으며, " +
+                    "적용한 후보도 다시 원본과 확인해야 합니다.",
+            )
+            GeminiApiSettingsCard(
+                provider = provider,
+                isBusy = isLoading,
+                onSaveApiKey = onSaveApiKey,
+                onClearApiKey = onClearApiKey,
+            )
+            Button(
+                onClick = onRequest,
+                enabled = provider?.isAvailable == true && !isLoading,
+                modifier = Modifier.fillMaxWidth().testTag("request_nutrition_ai_corrections_button"),
+            ) {
+                if (isLoading) BusyIndicator()
+                Text(if (isLoading) "성분표 AI 대조 중" else "원본 근거를 확인하고 AI 대조 시작")
+            }
+            assessment?.let { result ->
+                Text(
+                    "AI 판정: ${nutritionAiVerdictLabel(result.verdict)}",
+                    fontWeight = FontWeight.SemiBold,
+                )
+                result.fieldChecks
+                    .filter { it.verdict != NutritionFieldVerdict.MATCHES_EVIDENCE }
+                    .forEach { check ->
+                        Text(
+                            "• ${nutritionCorrectionFieldLabel(check.fieldPath)}: " +
+                                "${nutritionFieldVerdictLabel(check.verdict)} — ${check.reason}",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+            }
+            if (rejectedCount > 0) {
+                Text(
+                    "근거·현재값·형식 검사를 통과하지 못한 AI 제안 ${rejectedCount}건은 자동 폐기했습니다.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            candidates.forEach { candidate ->
+                NutritionAiCandidateCard(
+                    candidate = candidate,
+                    onApply = { onApply(candidate.id) },
+                    onDismiss = { onDismiss(candidate.id) },
+                )
+            }
+            if (!isLoading && assessment != null && candidates.isEmpty()) {
+                Text(
+                    "표시할 성분표 교정 제안이 없습니다. 원본과 필드 판정을 확인하세요.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NutritionAiCandidateCard(
+    candidate: NutritionCorrectionCandidate,
+    onApply: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Card {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(nutritionCorrectionFieldLabel(candidate.fieldPath), fontWeight = FontWeight.SemiBold)
+            Text("현재: ${candidate.oldValue ?: "비어 있음"}")
+            Text("제안: ${candidate.proposedValue}")
+            Text(
+                "신뢰도 ${candidate.confidencePercent}% · 근거 ${candidate.sourceLineIds.joinToString()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(candidate.reason, style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onApply,
+                    modifier = Modifier.weight(1f).testTag("apply_nutrition_ai_candidate_${candidate.id}"),
+                ) {
+                    Text("적용")
+                }
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f).testTag("dismiss_nutrition_ai_candidate_${candidate.id}"),
+                ) {
+                    Text("폐기")
+                }
+            }
+        }
+    }
+}
+
+private fun nutritionCorrectionFieldLabel(fieldPath: String): String = when (fieldPath) {
+    "product_name" -> "상품명"
+    "brand" -> "브랜드"
+    "category" -> "상품 분류"
+    "basis_amount" -> "기준량"
+    "basis_unit" -> "기준 단위"
+    else -> NutritionField.fromWireKey(fieldPath)?.koreanLabel ?: fieldPath
+}
+
+private fun nutritionAiVerdictLabel(verdict: NutritionEvidenceVerdict): String = when (verdict) {
+    NutritionEvidenceVerdict.PLAUSIBLE -> "근거 일치"
+    NutritionEvidenceVerdict.NEEDS_REVIEW -> "검토 필요"
+    NutritionEvidenceVerdict.INSUFFICIENT_EVIDENCE -> "근거 부족"
+}
+
+private fun nutritionFieldVerdictLabel(verdict: NutritionFieldVerdict): String = when (verdict) {
+    NutritionFieldVerdict.MATCHES_EVIDENCE -> "근거 일치"
+    NutritionFieldVerdict.NEEDS_REVIEW -> "검토 필요"
+    NutritionFieldVerdict.WRONG_FIELD_TYPE -> "필드 유형 불일치"
+    NutritionFieldVerdict.INSUFFICIENT_EVIDENCE -> "근거 부족"
 }
 
 @Composable
@@ -1390,7 +1805,7 @@ fun ItemReviewScreen(
                 }
             }
         } else if (visibleItems.isEmpty()) {
-            item { Text("확인이 필요한 행이 없습니다.", color = Color(0xFF1B7F3A)) }
+            item { Text("확인이 필요한 행이 없습니다.", color = ReceiptPositive) }
         }
         items(visibleItems, key = { (_, item) -> item.id }) { (index, item) ->
             LineItemCard(
@@ -1428,6 +1843,10 @@ private fun AiCorrectionScreen(
     candidates: List<ReceiptCorrectionCandidate>,
     rejectedCount: Int,
     isLoading: Boolean,
+    isPreflight: Boolean,
+    aiStatus: ReceiptAiReviewStatus,
+    assessment: ReceiptEvidenceAssessment?,
+    decision: ReceiptPreflightDecision?,
     pages: List<ReceiptPage>,
     ocrDocument: OcrDocument?,
     resolvePageFile: (String) -> File,
@@ -1435,6 +1854,8 @@ private fun AiCorrectionScreen(
     onSaveApiKey: (String) -> Unit,
     onClearApiKey: () -> Unit,
     onRequest: () -> Unit,
+    onContinueReview: () -> Unit,
+    onRecapture: () -> Unit,
     onApply: (String) -> Unit,
     onDismiss: (String) -> Unit,
 ) {
@@ -1443,7 +1864,28 @@ private fun AiCorrectionScreen(
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        item { ScreenHeader("Gemini 교정 제안", "AI는 초안을 직접 확정하지 않습니다.", onBack) }
+        item {
+            ScreenHeader(
+                if (isPreflight) "AI 사전검토" else "Gemini 교정 제안",
+                if (isPreflight) {
+                    "OCR·AI·계산 규칙을 비교한 뒤 재촬영 또는 사용자 검증 경로를 결정합니다."
+                } else {
+                    "AI는 초안을 직접 확정하지 않습니다."
+                },
+                onBack,
+            )
+        }
+        if (isPreflight) {
+            item {
+                AiPreflightDecisionCard(
+                    status = aiStatus,
+                    assessment = assessment,
+                    decision = decision,
+                    onContinueReview = onContinueReview,
+                    onRecapture = onRecapture,
+                )
+            }
+        }
         item {
             GeminiApiSettingsCard(
                 provider = provider,
@@ -1457,9 +1899,9 @@ private fun AiCorrectionScreen(
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("전송 범위", fontWeight = FontWeight.SemiBold)
                     Text(
-                        "버튼을 누르면 기존 상품 행 최대 12개, 해당 OCR 줄, 해당 줄만 잘라낸 이미지가 " +
-                            "Gemini Developer API로 직접 전송됩니다. 전체 영수증 이미지·주소·전화번호·" +
-                            "사업자번호·카드/거래번호는 요청 계약에 포함하지 않습니다.",
+                        "버튼을 누르면 판매처명·지점명·주소·전화번호·사업자번호와 상품 행 최대 7개의 " +
+                            "현재값, 해당 OCR 줄, 해당 줄만 잘라낸 이미지가 Gemini Developer API로 직접 전송됩니다. " +
+                            "전체 영수증 이미지·카드번호·승인번호·거래번호·회원번호는 요청 계약에서 제외합니다.",
                     )
                     Text(
                         "무료 Gemini Developer API 입력은 Google 제품 개선에 사용될 수 있습니다. " +
@@ -1477,10 +1919,18 @@ private fun AiCorrectionScreen(
         item {
             Button(
                 onClick = onRequest,
-                enabled = provider?.isAvailable == true && !isLoading,
+                enabled = provider?.isAvailable == true &&
+                    !isLoading &&
+                    (!isPreflight || decision?.route != ReceiptPreflightRoute.RECAPTURE_RECOMMENDED),
                 modifier = Modifier.fillMaxWidth().testTag("request_ai_corrections_button"),
             ) {
-                Text(if (isLoading) "Gemini 분석 중" else "전송 범위를 확인하고 제안 요청")
+                Text(
+                    when {
+                        isLoading -> "Gemini 분석 중"
+                        isPreflight -> "전송 범위를 확인하고 AI 사전검토 시작"
+                        else -> "전송 범위를 확인하고 제안 요청"
+                    },
+                )
             }
         }
         if (provider?.isAvailable != true) {
@@ -1508,7 +1958,7 @@ private fun AiCorrectionScreen(
                 )
             }
         }
-        if (!isLoading && candidates.isEmpty()) {
+        if (!isLoading && candidates.isEmpty() && (!isPreflight || aiStatus == ReceiptAiReviewStatus.COMPLETED)) {
             item { Text("표시할 교정 제안이 없습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
         items(candidates, key = ReceiptCorrectionCandidate::id) { candidate ->
@@ -1522,6 +1972,139 @@ private fun AiCorrectionScreen(
             )
         }
     }
+}
+
+@Composable
+private fun AiPreflightDecisionCard(
+    status: ReceiptAiReviewStatus,
+    assessment: ReceiptEvidenceAssessment?,
+    decision: ReceiptPreflightDecision?,
+    onContinueReview: () -> Unit,
+    onRecapture: () -> Unit,
+) {
+    val route = decision?.route ?: ReceiptPreflightRoute.REQUEST_AI_REVIEW
+    val containerColor = when (route) {
+        ReceiptPreflightRoute.RECAPTURE_RECOMMENDED -> MaterialTheme.colorScheme.errorContainer
+        ReceiptPreflightRoute.READY_FOR_USER_VERIFICATION -> MaterialTheme.colorScheme.primaryContainer
+        else -> MaterialTheme.colorScheme.secondaryContainer
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth().testTag("ai_preflight_decision"),
+        colors = CardDefaults.cardColors(containerColor = containerColor),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(preflightRouteLabel(route), fontWeight = FontWeight.SemiBold)
+            Text(
+                "AI 상태: ${aiReviewStatusLabel(status)}" +
+                    (assessment?.let { " · 근거 판정: ${it.verdict.wireValue}" } ?: ""),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            assessment?.merchantVerdict?.let { verdict ->
+                Text(
+                    "판매처 근거 판정: ${merchantVerdictLabel(verdict)}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            assessment?.fieldChecks?.forEach { check ->
+                Text(
+                    "• ${aiFieldCheckLabel(check)}: ${fieldVerdictLabel(check.verdict)}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (check.reason.isNotBlank()) {
+                    Text(
+                        "  ${check.reason}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            decision?.reasons.orEmpty().forEach { reason ->
+                Text("• ${preflightReasonLabel(reason)}", style = MaterialTheme.typography.bodySmall)
+            }
+            Text(
+                "카탈로그 검색 결과는 촬영 품질 판정이나 자동 상품 연결의 근거로 사용하지 않습니다.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (route == ReceiptPreflightRoute.RECAPTURE_RECOMMENDED) {
+                Button(
+                    onClick = onRecapture,
+                    modifier = Modifier.fillMaxWidth().testTag("preflight_recapture_button"),
+                ) {
+                    Text("새로 촬영 · 기존 세션 보존")
+                }
+            }
+            OutlinedButton(
+                onClick = onContinueReview,
+                modifier = Modifier.fillMaxWidth().testTag("preflight_continue_button"),
+            ) {
+                Text(
+                    when (route) {
+                        ReceiptPreflightRoute.READY_FOR_USER_VERIFICATION -> "사용자 검증 요청"
+                        ReceiptPreflightRoute.RECAPTURE_RECOMMENDED -> "권장 무시하고 직접 검수"
+                        ReceiptPreflightRoute.REQUEST_AI_REVIEW -> "AI 없이 직접 검수"
+                        ReceiptPreflightRoute.MANUAL_REVIEW_REQUIRED -> "수동 검수로 이동"
+                    },
+                )
+            }
+        }
+    }
+}
+
+private fun preflightRouteLabel(route: ReceiptPreflightRoute): String = when (route) {
+    ReceiptPreflightRoute.REQUEST_AI_REVIEW -> "AI 사전검토 대기"
+    ReceiptPreflightRoute.READY_FOR_USER_VERIFICATION -> "사용자 검증 준비"
+    ReceiptPreflightRoute.MANUAL_REVIEW_REQUIRED -> "수동 검수 필요"
+    ReceiptPreflightRoute.RECAPTURE_RECOMMENDED -> "재촬영 권장"
+}
+
+private fun aiReviewStatusLabel(status: ReceiptAiReviewStatus): String = when (status) {
+    ReceiptAiReviewStatus.NOT_REQUESTED -> "요청 전"
+    ReceiptAiReviewStatus.RUNNING -> "분석 중"
+    ReceiptAiReviewStatus.COMPLETED -> "완료"
+    ReceiptAiReviewStatus.FAILED -> "실패"
+    ReceiptAiReviewStatus.UNAVAILABLE -> "사용 불가"
+}
+private fun merchantVerdictLabel(verdict: ReceiptEvidenceVerdict): String = when (verdict) {
+    ReceiptEvidenceVerdict.PLAUSIBLE -> "영수증 근거상 판매처 형식 확인"
+    ReceiptEvidenceVerdict.NEEDS_REVIEW -> "판매처 근거 추가 확인 필요"
+    ReceiptEvidenceVerdict.INSUFFICIENT_EVIDENCE -> "판매처 근거 부족"
+}
+
+private fun fieldVerdictLabel(verdict: ReceiptFieldVerdict): String = when (verdict) {
+    ReceiptFieldVerdict.MATCHES_EVIDENCE -> "근거 일치"
+    ReceiptFieldVerdict.NEEDS_REVIEW -> "추가 확인 필요"
+    ReceiptFieldVerdict.WRONG_FIELD_TYPE -> "필드 유형 오류"
+    ReceiptFieldVerdict.INSUFFICIENT_EVIDENCE -> "근거 부족"
+}
+
+private fun aiFieldCheckLabel(check: ReceiptFieldCheck): String = when (check.fieldPath) {
+    "merchant.name" -> "판매처명"
+    "merchant.branch_name" -> "지점명"
+    "merchant.business_registration_number" -> "사업자등록번호"
+    "merchant.address" -> "주소"
+    "merchant.phone" -> "전화번호"
+    else -> check.fieldPath
+}
+
+
+private fun preflightReasonLabel(reason: ReceiptPreflightReason): String = when (reason) {
+    ReceiptPreflightReason.AI_REVIEW_NOT_RUN -> "AI가 아직 OCR 상품행 근거를 검토하지 않았습니다."
+    ReceiptPreflightReason.AI_REVIEW_IN_PROGRESS -> "AI가 OCR과 원본 crop을 비교하고 있습니다."
+    ReceiptPreflightReason.AI_REVIEW_FAILED -> "AI 요청 실패는 촬영 실패로 간주하지 않고 수동 검수로 보냅니다."
+    ReceiptPreflightReason.AI_REVIEW_UNAVAILABLE -> "AI가 구성되지 않아 수동 검수가 필요합니다."
+    ReceiptPreflightReason.AI_EVIDENCE_PLAUSIBLE -> "제공된 상품행 근거에서 충돌을 찾지 못했습니다."
+    ReceiptPreflightReason.AI_EVIDENCE_NEEDS_REVIEW -> "AI가 OCR 값과 원본 근거의 충돌을 찾았습니다."
+    ReceiptPreflightReason.AI_FIELD_CHECKS_NEED_REVIEW -> "판매처명·주소·전화번호·사업자번호 중 근거 불일치 또는 필드 유형 오류가 있습니다."
+    ReceiptPreflightReason.AI_EVIDENCE_INSUFFICIENT -> "AI가 제공된 근거만으로 안전하게 판단하지 못했습니다."
+    ReceiptPreflightReason.AI_IMAGE_EVIDENCE_PARTIAL -> "일부 상품행은 원본 crop이 없어 수동 대조가 필요합니다."
+    ReceiptPreflightReason.AI_CORRECTIONS_AVAILABLE -> "원본과 대조해야 할 AI 교정 후보가 있습니다."
+    ReceiptPreflightReason.AI_RESPONSE_CANDIDATES_REJECTED -> "근거 또는 산술 검사를 통과하지 못한 AI 응답이 있습니다."
+    ReceiptPreflightReason.OCR_EVIDENCE_MISSING -> "OCR 문자·행 근거가 거의 없습니다."
+    ReceiptPreflightReason.OCR_EVIDENCE_SPARSE -> "OCR 근거가 희박해 모든 값을 직접 확인해야 합니다."
+    ReceiptPreflightReason.CAPTURE_RESOLUTION_LOW -> "촬영 이미지의 짧은 변 해상도가 기준보다 낮습니다."
+    ReceiptPreflightReason.BLOCKING_VALIDATION_ISSUES -> "필수 필드 또는 행 검증 오류가 남아 있습니다."
+    ReceiptPreflightReason.TOTAL_RECONCILIATION_FAILED -> "행 합계와 최종 합계가 일치하지 않습니다."
 }
 
 @Composable
@@ -1576,6 +2159,11 @@ private fun AiCorrectionCandidateCard(
 }
 
 private fun aiFieldLabel(fieldPath: String): String = when {
+    fieldPath == "merchant.name" -> "판매처명 교정"
+    fieldPath == "merchant.branch_name" -> "지점명 교정"
+    fieldPath == "merchant.business_registration_number" -> "사업자등록번호 교정"
+    fieldPath == "merchant.address" -> "주소 교정"
+    fieldPath == "merchant.phone" -> "전화번호 교정"
     fieldPath.endsWith(".description") -> "상품명 교정"
     fieldPath.endsWith(".quantity") -> "수량 교정"
     fieldPath.endsWith(".unit_price_amount_minor") -> "단가 교정"
@@ -1749,7 +2337,7 @@ private fun ReconciliationScreen(
                     Text("영수증 최종 합계: ${receipt.totals.grandTotalAmountMinor ?: "누락"}")
                     Text(
                         "차이: ${reconciliation?.differenceMinor ?: "계산 불가"}",
-                        color = if (reconciliation?.isBalanced == true) Color(0xFF1B7F3A) else MaterialTheme.colorScheme.error,
+                        color = if (reconciliation?.isBalanced == true) ReceiptPositive else MaterialTheme.colorScheme.error,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
@@ -1783,7 +2371,7 @@ private fun ReconciliationScreen(
                 )
             }
         } else {
-            item { Text("모든 user_verified 필수 조건을 통과했습니다.", color = Color(0xFF1B7F3A)) }
+            item { Text("모든 user_verified 필수 조건을 통과했습니다.", color = ReceiptPositive) }
         }
         item {
             ReviewTextField(
@@ -1818,6 +2406,7 @@ fun JsonPreviewScreen(
     onSave: () -> Unit,
     onShare: () -> Unit,
     onShowPriceObservationSubmit: () -> Unit = {},
+    isRestaurantReceipt: Boolean = false,
 ) {
     val verified = receipt?.document?.source?.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
     LazyColumn(
@@ -1825,14 +2414,24 @@ fun JsonPreviewScreen(
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        item { ScreenHeader("receipt.v2 JSON", "외부 공유 전에 포함 정보를 확인하세요.", onBack) }
+        item { ScreenHeader("검증 결과", "저장하거나 공유하기 전에 포함 정보를 확인하세요.", onBack) }
         item {
-            Text(
-                if (verified) "상태: user_verified" else "상태: draft · 앱 전용 저장만 가능",
-                color = if (verified) Color(0xFF1B7F3A) else MaterialTheme.colorScheme.error,
-                fontWeight = FontWeight.SemiBold,
+            Surface(
                 modifier = Modifier.testTag("json_status"),
-            )
+                shape = CircleShape,
+                color = if (verified) MaterialTheme.colorScheme.inverseSurface else {
+                    MaterialTheme.colorScheme.errorContainer
+                },
+                contentColor = if (verified) MaterialTheme.colorScheme.inverseOnSurface else {
+                    MaterialTheme.colorScheme.onErrorContainer
+                },
+            ) {
+                Text(
+                    if (verified) "검수 완료 · 저장 및 공유 가능" else "검수 전 초안 · 앱 내부에만 저장 가능",
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
         }
         item {
             Row(
@@ -1888,7 +2487,163 @@ fun JsonPreviewScreen(
                 enabled = verified && !isExporting,
                 modifier = Modifier.fillMaxWidth().testTag("price_observation_submit_button"),
             ) {
-                Text("Submit one verified PriceTrace price observation")
+                Text(
+                    if (isRestaurantReceipt) "검수된 식당 영수증을 PriceTrace에 제출"
+                    else "검증된 가격 1건을 PriceTrace에 제출",
+                )
+            }
+        }
+        item {
+            Text(
+                if (isRestaurantReceipt) {
+                    "식당 제출은 식당명·방문일·메뉴 가격만 전송하며 이미지와 OCR 원문은 기기에 남깁니다."
+                } else {
+                    "로컬 저장·공유와 서버 제출은 서로 다른 동작입니다. 위 버튼을 직접 눌러야 제출 화면으로 이동합니다."
+                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+@Suppress("LongParameterList")
+@Composable
+private fun RestaurantReceiptSubmitScreen(
+    receipt: ReceiptV2,
+    signedInEmail: String?,
+    isSubmitting: Boolean,
+    submittedReceiptId: String?,
+    submittedItemCount: Int?,
+    replayed: Boolean?,
+    lastError: String?,
+    onBack: () -> Unit,
+    onSubmit: () -> Unit,
+) {
+    val eligibleItems = receipt.lineItems.filter { item ->
+        item.type !in setOf(
+            ReceiptLineType.DISCOUNT,
+            ReceiptLineType.FEE,
+            ReceiptLineType.TAX,
+            ReceiptLineType.TIP,
+            ReceiptLineType.REFUND,
+            ReceiptLineType.ROUNDING,
+        )
+    }
+    val verified = receipt.document.source.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
+    val canSubmit = verified && signedInEmail != null && eligibleItems.isNotEmpty() && !isSubmitting
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().testTag("restaurant_receipt_submit"),
+        contentPadding = PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item {
+            ScreenHeader(
+                "식당 영수증 제출",
+                "식당명·방문일·메뉴별 가격과 옵션 행을 검수 후 PriceTrace에 저장합니다.",
+                onBack,
+            )
+        }
+        item {
+            Card {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(receipt.merchant.name ?: "식당 이름 미확인", style = MaterialTheme.typography.titleLarge)
+                    Text("방문일: ${receipt.document.issuedOn ?: "미확인"}")
+                    Text("최종 금액: ${receipt.totals.grandTotalAmountMinor ?: "미확인"}원")
+                    Text(
+                        if (signedInEmail == null) "PriceTrace 로그인 필요"
+                        else "로그인: $signedInEmail",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+        item {
+            val placeResolution = receipt.placeResolution
+            val statusLabel = when (placeResolution.status) {
+                PlaceResolutionStatus.USER_CONFIRMED -> "장소 확정"
+                PlaceResolutionStatus.UNRESOLVED,
+                PlaceResolutionStatus.CANDIDATES_READY,
+                PlaceResolutionStatus.MANUAL_REQUIRED,
+                -> "장소 미확정"
+            }
+            val ocrCandidateName = placeResolution.selectedCandidate?.displayName
+                ?: placeResolution.candidates.firstOrNull()?.displayName
+                ?: "미확인"
+            Card(modifier = Modifier.fillMaxWidth().testTag("restaurant_place_resolution")) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(statusLabel, style = MaterialTheme.typography.titleSmall)
+                    Text("OCR 후보명: $ocrCandidateName")
+                    Text(
+                        "OCR 텍스트는 실제 장소 확정이 아닙니다. 외부 확인 전에는 확정 처리하지 마세요.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+        item { SectionTitle("메뉴 및 옵션 ${eligibleItems.size}건") }
+        items(eligibleItems, key = { it.id }) { item ->
+            Card(modifier = Modifier.fillMaxWidth().testTag("restaurant_receipt_item_${item.id}")) {
+                Row(
+                    Modifier.fillMaxWidth().padding(14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(item.description ?: "이름 없는 메뉴", style = MaterialTheme.typography.titleSmall)
+                        Text(item.type.wireValue, style = MaterialTheme.typography.labelSmall)
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text("${item.quantity?.value ?: "?"} × ${item.unitPriceAmountMinor ?: "?"}원")
+                        Text("${item.netAmountMinor ?: item.grossAmountMinor ?: "?"}원")
+                    }
+                }
+            }
+        }
+        item {
+            Card {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        if (canSubmit) "제출 준비 완료" else "제출 조건을 확인하세요",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        if (canSubmit) {
+                            "서버에는 검수된 구조화 정보만 전송됩니다. 이미지와 OCR 원문은 전송하지 않습니다."
+                        } else {
+                            listOfNotNull(
+                                if (!verified) "user_verified 검수 완료" else null,
+                                if (signedInEmail == null) "PriceTrace 로그인" else null,
+                                if (eligibleItems.isEmpty()) "메뉴 가격 행" else null,
+                            ).joinToString(" · ")
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    submittedReceiptId?.let { id ->
+                        Text(
+                            "서버 영수증 ID: $id · ${submittedItemCount ?: eligibleItems.size}건" +
+                                if (replayed == true) " · 재전송 확인" else "",
+                            color = ReceiptPositive,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    lastError?.let { error ->
+                        Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+        item {
+            Button(
+                onClick = onSubmit,
+                enabled = canSubmit,
+                modifier = Modifier.fillMaxWidth().testTag("submit_restaurant_receipt_button"),
+            ) {
+                if (isSubmitting) BusyIndicator()
+                Text("검수된 식당 영수증 서버 제출")
             }
         }
     }
@@ -1934,165 +2689,251 @@ private fun PriceObservationSubmitScreen(
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("price_observation_submit"),
         contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         item {
             ScreenHeader(
-                "PriceTrace price observation",
-                "Submit only after choosing an approved store and one exact catalog_product_id.",
+                "가격 관측 제출",
+                "승인된 판매처와 정확한 상품을 직접 선택해야 합니다.",
                 onBack,
             )
         }
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            MonochromeHologramHero(
+                eyebrow = "EXPLICIT SUBMISSION",
+                title = "선택한 가격 1건만\nPriceTrace로 보냅니다",
+                description = "판매처·관측일·정확한 상품 ID·단가와 임의 키만 전송합니다.",
+                footer = if (isSignedIn) {
+                    "PriceTrace 로그인 준비됨 · 원본 자료는 기기에 유지"
+                } else {
+                    "연결 설정에서 PriceTrace 로그인이 필요합니다"
+                },
+                modifier = Modifier.testTag("price_observation_hologram_hero"),
+            )
+        }
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SubmissionStepHeading(
+                    number = "01",
+                    title = "영수증 상품 행",
+                    description = "제출할 가격이 적힌 행을 직접 고르세요.",
+                )
+                Box {
+                    OutlinedButton(
+                        onClick = { lineMenuExpanded = true },
+                        modifier = Modifier.fillMaxWidth().testTag("price_observation_line_selector"),
+                    ) {
+                        Text(selectedLine?.description ?: "영수증 상품 행 선택")
+                    }
+                    DropdownMenu(
+                        expanded = lineMenuExpanded,
+                        onDismissRequest = { lineMenuExpanded = false },
+                    ) {
+                        receipt.lineItems.forEach { line ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "${line.description ?: "이름 없는 행"} · " +
+                                            "${line.unitPriceAmountMinor ?: line.netAmountMinor ?: "가격 없음"}",
+                                    )
+                                },
+                                onClick = {
+                                    lineMenuExpanded = false
+                                    onLineItemSelected(line.id)
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SubmissionStepHeading(
+                    number = "02",
+                    title = "승인된 판매처",
+                    description = "OCR 상호명으로 추정하지 않고 서버가 제공한 목록에서만 선택합니다.",
+                )
+                Box {
+                    OutlinedButton(
+                        onClick = { storeMenuExpanded = true },
+                        enabled = sources.isNotEmpty() && !isLoadingSources,
+                        modifier = Modifier.fillMaxWidth().testTag("price_observation_store_selector"),
+                    ) {
+                        Text(
+                            selectedStore?.let { source ->
+                                listOfNotNull(source.displayName, source.locationLabel).joinToString(" · ")
+                            } ?: if (isLoadingSources) "승인 판매처 불러오는 중…" else "승인 판매처 선택",
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = storeMenuExpanded,
+                        onDismissRequest = { storeMenuExpanded = false },
+                    ) {
+                        sources.forEach { source ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(listOfNotNull(source.displayName, source.locationLabel).joinToString(" · "))
+                                },
+                                onClick = {
+                                    storeMenuExpanded = false
+                                    onStoreSelected(source.storeId)
+                                },
+                            )
+                        }
+                    }
+                }
+                if (!isLoadingSources && sources.isEmpty()) {
                     Text(
-                        "The RPC receives only idempotency_key, store_id, observed_on, catalog_product_id, and unit_price_krw.",
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        "receipt.v2, receipt/document/item IDs, images, OCR raw text, and payment data stay local.",
+                        "선택 가능한 승인 판매처가 없습니다. OCR 상호명으로 자동 생성하거나 추정하지 않습니다.",
+                        color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    Text(
-                        if (isSignedIn) "Authenticated PriceTrace session ready." else "Sign in to PriceTrace in API settings before submitting.",
-                        color = if (isSignedIn) Color(0xFF1B7F3A) else MaterialTheme.colorScheme.error,
-                    )
                 }
             }
         }
         item {
-            Text("1. Select the receipt line", fontWeight = FontWeight.SemiBold)
-            Box {
-                OutlinedButton(
-                    onClick = { lineMenuExpanded = true },
-                    modifier = Modifier.fillMaxWidth().testTag("price_observation_line_selector"),
-                ) {
-                    Text(selectedLine?.description ?: "Choose a receipt product line")
-                }
-                DropdownMenu(
-                    expanded = lineMenuExpanded,
-                    onDismissRequest = { lineMenuExpanded = false },
-                ) {
-                    receipt.lineItems.forEach { line ->
-                        DropdownMenuItem(
-                            text = {
-                                Text("${line.description ?: "Unnamed line"} · ${line.unitPriceAmountMinor ?: line.netAmountMinor ?: "price missing"}")
-                            },
-                            onClick = {
-                                lineMenuExpanded = false
-                                onLineItemSelected(line.id)
-                            },
-                        )
-                    }
-                }
-            }
-        }
-        item {
-            Text("2. Select an approved store", fontWeight = FontWeight.SemiBold)
-            Box {
-                OutlinedButton(
-                    onClick = { storeMenuExpanded = true },
-                    enabled = sources.isNotEmpty() && !isLoadingSources,
-                    modifier = Modifier.fillMaxWidth().testTag("price_observation_store_selector"),
-                ) {
-                    Text(selectedStore?.let { source ->
-                        listOfNotNull(source.displayName, source.locationLabel).joinToString(" · ")
-                    } ?: if (isLoadingSources) "Loading approved stores…" else "Choose an approved store")
-                }
-                DropdownMenu(
-                    expanded = storeMenuExpanded,
-                    onDismissRequest = { storeMenuExpanded = false },
-                ) {
-                    sources.forEach { source ->
-                        DropdownMenuItem(
-                            text = {
-                                Text(listOfNotNull(source.displayName, source.locationLabel).joinToString(" · "))
-                            },
-                            onClick = {
-                                storeMenuExpanded = false
-                                onStoreSelected(source.storeId)
-                            },
-                        )
-                    }
-                }
-            }
-            if (!isLoadingSources && sources.isEmpty()) {
-                Text("No approved store was returned. Nothing is inferred from the OCR merchant name.", color = MaterialTheme.colorScheme.error)
-            }
-        }
-        item {
-            Text("3. Search and select the exact catalog product", fontWeight = FontWeight.SemiBold)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = onQueryChanged,
-                    label = { Text("Product search") },
-                    modifier = Modifier.weight(1f).testTag("price_observation_product_query"),
-                    singleLine = true,
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SubmissionStepHeading(
+                    number = "03",
+                    title = "정확한 카탈로그 상품",
+                    description = "상품명을 검색한 뒤 catalog_product_id가 표시된 결과를 직접 선택하세요.",
                 )
-                Button(
-                    onClick = onSearchProducts,
-                    enabled = query.isNotBlank() && !isLoadingProducts,
-                    modifier = Modifier.align(Alignment.CenterVertically).testTag("price_observation_product_search"),
-                ) { Text(if (isLoadingProducts) "…" else "Search") }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = onQueryChanged,
+                        label = { Text("상품 검색") },
+                        modifier = Modifier.weight(1f).testTag("price_observation_product_query"),
+                        singleLine = true,
+                    )
+                    Button(
+                        onClick = onSearchProducts,
+                        enabled = query.isNotBlank() && !isLoadingProducts,
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                            .testTag("price_observation_product_search"),
+                    ) { Text(if (isLoadingProducts) "…" else "검색") }
+                }
             }
         }
         if (products.isNotEmpty()) {
             items(products, key = { it.catalogProductId }) { product ->
+                val selected = product.catalogProductId == selectedCatalogProductId
                 Card(
                     modifier = Modifier.fillMaxWidth()
                         .clickable { onProductSelected(product.catalogProductId) }
                         .testTag("price_observation_product_${product.catalogProductId}"),
                     colors = CardDefaults.cardColors(
-                        containerColor = if (product.catalogProductId == selectedCatalogProductId) {
-                            MaterialTheme.colorScheme.primaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant
+                        containerColor = if (selected) MaterialTheme.colorScheme.inverseSurface else {
+                            MaterialTheme.colorScheme.surface
+                        },
+                        contentColor = if (selected) MaterialTheme.colorScheme.inverseOnSurface else {
+                            MaterialTheme.colorScheme.onSurface
                         },
                     ),
                 ) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(product.exactSelectionLabel, fontWeight = FontWeight.SemiBold)
-                        Text("catalog_product_id: ${product.catalogProductId}", style = MaterialTheme.typography.bodySmall)
-                        Text("standard_product_id: ${product.standardProductId}", style = MaterialTheme.typography.bodySmall)
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Text(
+                            if (selected) "선택됨" else "선택",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (selected) {
+                                MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.68f)
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                        Text(product.exactSelectionLabel, style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "catalog_product_id · ${product.catalogProductId}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (selected) {
+                                MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.68f)
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
                     }
                 }
             }
         }
         item {
-            Text("4. Confirm date and unit price", fontWeight = FontWeight.SemiBold)
-            OutlinedTextField(
-                value = observedOn,
-                onValueChange = onObservedOnChanged,
-                label = { Text("Observed on (YYYY-MM-DD)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().testTag("price_observation_observed_on"),
-            )
-            OutlinedTextField(
-                value = unitPriceKrw,
-                onValueChange = onUnitPriceChanged,
-                label = { Text("Unit price (KRW)") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth().testTag("price_observation_unit_price"),
-            )
-        }
-        item {
-            queueStatus?.let { status ->
-                Text(
-                    "Queue status: ${status.wireValue}" +
-                        (appliedAction?.let { " · result: $it" } ?: ""),
-                    color = if (status == PriceObservationQueueStatus.SUCCEEDED) {
-                        Color(0xFF1B7F3A)
-                    } else {
-                        MaterialTheme.colorScheme.error
-                    },
-                    modifier = Modifier.testTag("price_observation_queue_status"),
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SubmissionStepHeading(
+                    number = "04",
+                    title = "관측일과 단가",
+                    description = "영수증 원본과 대조한 날짜와 원화 단가를 확인하세요.",
+                )
+                OutlinedTextField(
+                    value = observedOn,
+                    onValueChange = onObservedOnChanged,
+                    label = { Text("관측일 (YYYY-MM-DD)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("price_observation_observed_on"),
+                )
+                OutlinedTextField(
+                    value = unitPriceKrw,
+                    onValueChange = onUnitPriceChanged,
+                    label = { Text("단가 (원)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth().testTag("price_observation_unit_price"),
                 )
             }
-            lastError?.let { error ->
-                Text("Last error: $error", color = MaterialTheme.colorScheme.error)
+        }
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (canSubmit) MaterialTheme.colorScheme.surface else {
+                        MaterialTheme.colorScheme.surfaceContainer
+                    },
+                ),
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        if (canSubmit) "제출 준비 완료" else "제출 전 선택을 완료하세요",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        listOfNotNull(
+                            if (!isSignedIn) "PriceTrace 로그인" else null,
+                            if (selectedLine == null) "영수증 상품 행" else null,
+                            if (selectedStore == null) "승인 판매처" else null,
+                            if (selectedProduct == null) "정확한 상품" else null,
+                            if (observedOn.isBlank()) "관측일" else null,
+                            if (unitPriceKrw.isBlank()) "단가" else null,
+                        ).let { missing ->
+                            if (missing.isEmpty()) {
+                                "아래 버튼을 누르면 가격 관측 1건만 명시적으로 제출합니다."
+                            } else {
+                                "남은 항목 · ${missing.joinToString(" · ")}"
+                            }
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    queueStatus?.let { status ->
+                        Text(
+                            "로컬 큐 · ${priceObservationStatusLabel(status)}" +
+                                (appliedAction?.let { " · ${priceObservationActionLabel(it)}" } ?: ""),
+                            color = when (status) {
+                                PriceObservationQueueStatus.SUCCEEDED -> ReceiptPositive
+                                PriceObservationQueueStatus.RETRYABLE_FAILURE -> ReceiptWarning
+                                PriceObservationQueueStatus.NEEDS_REVIEW -> MaterialTheme.colorScheme.error
+                                PriceObservationQueueStatus.PENDING -> MaterialTheme.colorScheme.onSurface
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.testTag("price_observation_queue_status"),
+                        )
+                    }
+                    lastError?.let { error ->
+                        Text(
+                            "최근 오류 · $error",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
             }
         }
         item {
@@ -2102,10 +2943,56 @@ private fun PriceObservationSubmitScreen(
                 modifier = Modifier.fillMaxWidth().testTag("submit_price_observation_button"),
             ) {
                 if (isSubmitting) BusyIndicator()
-                Text("Submit explicitly to PriceTrace")
+                Text("선택한 가격 관측 제출")
             }
         }
+        item {
+            Text(
+                "receipt.v2 전체, 이미지, OCR 원문, 영수증·문서·항목 ID와 결제정보는 서버로 보내지 않습니다.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
     }
+}
+
+@Composable
+private fun SubmissionStepHeading(number: String, title: String, description: String) {
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+        Surface(
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.inverseSurface,
+            contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+        ) {
+            Text(
+                number,
+                modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(
+                description,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+private fun priceObservationStatusLabel(status: PriceObservationQueueStatus): String = when (status) {
+    PriceObservationQueueStatus.PENDING -> "제출 대기"
+    PriceObservationQueueStatus.RETRYABLE_FAILURE -> "네트워크 재시도 가능"
+    PriceObservationQueueStatus.NEEDS_REVIEW -> "직접 확인 필요"
+    PriceObservationQueueStatus.SUCCEEDED -> "제출 완료"
+}
+
+private fun priceObservationActionLabel(action: String): String = when (action) {
+    "created" -> "새 관측 생성"
+    "deduplicated" -> "중복 제거"
+    "replayed" -> "동일 요청 재처리"
+    else -> action
 }
 
 @Composable
@@ -2582,19 +3469,25 @@ private fun HypothesisCard(
 
 @Composable
 private fun ScreenHeader(title: String, subtitle: String, onBack: () -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-        TextButton(onClick = onBack, modifier = Modifier.width(58.dp)) { Text("이전") }
-        Spacer(Modifier.width(6.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        TextButton(
+            onClick = onBack,
+            modifier = Modifier.heightIn(min = 48.dp),
+        ) { Text("← 이전") }
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, style = MaterialTheme.typography.headlineSmall)
+            Text(
+                subtitle,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+            )
         }
     }
 }
 
 @Composable
 private fun SectionTitle(value: String) {
-    Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    Text(value, style = MaterialTheme.typography.titleLarge)
 }
 
 @Composable
@@ -2602,9 +3495,77 @@ private fun BusyIndicator() {
     CircularProgressIndicator(
         modifier = Modifier.size(18.dp),
         strokeWidth = 2.dp,
-        color = MaterialTheme.colorScheme.onPrimary,
+        color = LocalContentColor.current,
     )
     Spacer(Modifier.width(8.dp))
+}
+
+@Composable
+private fun Button(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable RowScope.() -> Unit,
+) {
+    MaterialButton(
+        onClick = onClick,
+        modifier = modifier.heightIn(min = 52.dp),
+        enabled = enabled,
+        shape = CircleShape,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.inverseSurface,
+            contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+            disabledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+            disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        ),
+        contentPadding = PaddingValues(horizontal = 22.dp, vertical = 12.dp),
+        content = content,
+    )
+}
+
+@Composable
+private fun OutlinedButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable RowScope.() -> Unit,
+) {
+    MaterialOutlinedButton(
+        onClick = onClick,
+        modifier = modifier.heightIn(min = 48.dp),
+        enabled = enabled,
+        shape = CircleShape,
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            disabledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+            disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        ),
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (enabled) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.outlineVariant,
+        ),
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
+        content = content,
+    )
+}
+
+@Composable
+private fun Card(
+    modifier: Modifier = Modifier,
+    shape: Shape = MaterialTheme.shapes.medium,
+    colors: CardColors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    elevation: CardElevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    MaterialCard(
+        modifier = modifier,
+        shape = shape,
+        colors = colors,
+        elevation = elevation,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        content = content,
+    )
 }
 
 private fun ReceiptValidationResult?.hasIssue(pathPrefix: String): Boolean =

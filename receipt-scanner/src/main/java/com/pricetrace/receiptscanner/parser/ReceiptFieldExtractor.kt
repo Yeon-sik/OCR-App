@@ -34,12 +34,13 @@ internal class ReceiptFieldExtractor(
     fun extract(sections: ReceiptSections): ExtractedReceiptFields {
         val rows = sections.allRows
         val merchantRows = sections.headerRows.ifEmpty { rows.take(METADATA_FALLBACK_ROW_COUNT) }
+        val bottomMerchantRows = findBottomMerchantRows(sections)
         val summaryRows = sections.summaryRows.ifEmpty { rows.takeLast(SUMMARY_FALLBACK_ROW_COUNT) }
         val paymentRows = sections.paymentRows.ifEmpty { rows }
         val transactionRows = (merchantRows + summaryRows)
             .distinctBy { row -> row.pageIndex to row.minRecognitionOrder }
         val branch = findBranch(merchantRows)
-        val merchant = findMerchant(merchantRows, branch?.value)
+        val merchant = findMerchant(merchantRows, bottomMerchantRows, branch?.value)
         val businessNumber = findBusinessNumber(merchantRows)
         val address = findAddress(merchantRows)
         val sectionDateTime = findDateTime(transactionRows)
@@ -116,10 +117,46 @@ internal class ReceiptFieldExtractor(
         )
     }
 
-    private fun findMerchant(rows: List<SpatialRow>, branchName: String?): Candidate<String>? {
+    private fun findBottomMerchantRows(sections: ReceiptSections): List<SpatialRow> {
+        val itemRowKeys = sections.itemRows
+            .map { row -> row.pageIndex to row.minRecognitionOrder }
+            .toSet()
+        return sections.allRows
+            .groupBy(SpatialRow::pageIndex)
+            .values
+            .flatMap { pageRows -> pageRows.takeLast(MERCHANT_FOOTER_SEARCH_ROW_COUNT) }
+            .filterNot { row -> (row.pageIndex to row.minRecognitionOrder) in itemRowKeys }
+    }
+
+    private fun findMerchant(
+        headerRows: List<SpatialRow>,
+        bottomRows: List<SpatialRow>,
+        branchName: String?,
+    ): Candidate<String>? {
+        return listOfNotNull(
+            findMerchantInRows(
+                rows = headerRows.take(MERCHANT_SEARCH_ROW_COUNT),
+                branchName = branchName,
+            ),
+            findMerchantInRows(
+                rows = bottomRows.takeLast(MERCHANT_FOOTER_SEARCH_ROW_COUNT),
+                branchName = branchName,
+                scoreBias = FOOTER_MERCHANT_SCORE_BONUS,
+            ),
+        ).maxWithOrNull(
+            compareBy<Candidate<String>> { candidate -> candidate.score }
+                .thenBy { candidate -> if (candidate.rule == "merchant.explicit_label") 1 else 0 },
+        )
+    }
+
+    private fun findMerchantInRows(
+        rows: List<SpatialRow>,
+        branchName: String?,
+        scoreBias: Int = 0,
+    ): Candidate<String>? {
         val unlabeledRows = merchantNameBlock(rows)
         val candidates = buildList {
-            rows.take(16).forEachIndexed { rowIndex, row ->
+            rows.forEachIndexed { rowIndex, row ->
                 val isNoticeRow = MERCHANT_NOTICE_CONTEXT.containsMatchIn(row.text) &&
                     !MERCHANT_LABEL.containsMatchIn(row.text)
                 if (isNoticeRow) return@forEachIndexed
@@ -133,7 +170,7 @@ internal class ReceiptFieldExtractor(
                                 sources = row.evidenceFor(value),
                                 rule = "merchant.explicit_label",
                                 confidence = 0.9f,
-                                score = 300 - rowIndex,
+                                score = 300 - rowIndex + scoreBias,
                             ),
                         )
                     }
@@ -154,7 +191,7 @@ internal class ReceiptFieldExtractor(
                                 sources = valueSources,
                                 rule = "merchant.dominant_size_run",
                                 confidence = 0.86f,
-                                score = merchantScore(value, row, rowIndex, unlabeledRows, elementLevel = false) + 70,
+                                score = merchantScore(value, row, rowIndex, unlabeledRows, elementLevel = false) + 70 + scoreBias,
                             ),
                         )
                     }
@@ -168,7 +205,7 @@ internal class ReceiptFieldExtractor(
                                 sources = listOf(evidence),
                                 rule = "merchant.element_isolated",
                                 confidence = 0.66f,
-                                score = merchantScore(value, row, rowIndex, unlabeledRows, elementLevel = true),
+                                score = merchantScore(value, row, rowIndex, unlabeledRows, elementLevel = true) + scoreBias,
                             ),
                         )
                     }
@@ -181,7 +218,7 @@ internal class ReceiptFieldExtractor(
                             sources = row.evidenceFor(value),
                             rule = "merchant.header_isolated",
                             confidence = 0.76f,
-                            score = merchantScore(value, row, rowIndex, unlabeledRows, elementLevel = false),
+                            score = merchantScore(value, row, rowIndex, unlabeledRows, elementLevel = false) + scoreBias,
                         ),
                     )
                 }
@@ -241,11 +278,10 @@ internal class ReceiptFieldExtractor(
     }
 
     private fun merchantNameBlock(rows: List<SpatialRow>): List<SpatialRow> {
-        val headerRows = rows.take(MERCHANT_SEARCH_ROW_COUNT)
         // OCR block order can place a small address/business row before the actual logo/name.
         // Do not stop the merchant search at the first metadata row; exclude metadata itself
         // while keeping nearby unlabeled brand rows eligible.
-        return headerRows
+        return rows
             .take(MAX_UNLABELED_MERCHANT_ROWS)
             .filter { row ->
                 !HEADER_METADATA_BOUNDARY.containsMatchIn(row.text) ||
@@ -861,6 +897,8 @@ internal class ReceiptFieldExtractor(
         private const val MIN_DOMINANT_MERCHANT_HEIGHT_PERCENT = 68
         private const val MAX_MERCHANT_ELEMENT_GAP_HEIGHTS = 2
         private const val MERCHANT_SEARCH_ROW_COUNT = 16
+        private const val MERCHANT_FOOTER_SEARCH_ROW_COUNT = 12
+        private const val FOOTER_MERCHANT_SCORE_BONUS = 8
         private const val MAX_ADDRESS_CONTINUATION_ROWS = 2
         private val MERCHANT_LABEL = Regex(
             """(?:상\s*호\s*명?|가\s*맹\s*점\s*명|판\s*매\s*처\s*명?|점\s*포\s*명)\s*[:：-]?\s*""",

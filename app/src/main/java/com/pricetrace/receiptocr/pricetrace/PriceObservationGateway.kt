@@ -1,5 +1,6 @@
 package com.pricetrace.receiptocr.pricetrace
 
+import com.pricetrace.receiptscanner.domain.RestaurantPlaceCandidate
 import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
 import com.pricetrace.receiptscanner.publisher.PriceObservationJson
 import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
@@ -7,6 +8,11 @@ import com.pricetrace.receiptscanner.publisher.PriceObservationSource
 import com.pricetrace.receiptscanner.publisher.PriceObservationSubmitPayload
 import com.pricetrace.receiptscanner.publisher.PriceObservationSubmitResult
 import com.pricetrace.receiptscanner.publisher.PriceObservationSubmitter
+import com.pricetrace.receiptscanner.publisher.RestaurantPlaceJson
+import com.pricetrace.receiptscanner.publisher.RestaurantReceiptJson
+import com.pricetrace.receiptscanner.publisher.RestaurantReceiptSubmitPayload
+import com.pricetrace.receiptscanner.publisher.RestaurantReceiptSubmitResult
+import com.pricetrace.receiptscanner.publisher.RestaurantReceiptSubmitter
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -32,7 +38,7 @@ sealed interface PriceObservationReadOutcome<out T> {
 internal class PriceObservationGateway(
     private val store: PriceTraceSupabaseStore,
     private val transport: PriceObservationHttpTransport = HttpsPriceObservationHttpTransport(),
-) : PriceObservationSubmitter {
+) : PriceObservationSubmitter, RestaurantReceiptSubmitter {
     suspend fun signIn(email: String, password: String): PriceTraceAuthOutcome {
         val config = store.read()
         if (!config.isConnectionConfigured || email.isBlank() || password.isBlank()) {
@@ -81,12 +87,56 @@ internal class PriceObservationGateway(
             decode = { body -> PriceObservationJson.decodeProductRead(body).products },
         )
 
+    suspend fun searchRestaurantPlaces(
+        query: String,
+        limit: Int = 5,
+    ): PriceObservationReadOutcome<List<RestaurantPlaceCandidate>> =
+        readAuthenticated(
+            body = RestaurantPlaceJson.encodeDirectoryRequest(query, limit),
+            path = "/rest/v1/rpc/get_restaurant_directory_v1",
+            decode = RestaurantPlaceJson::decodeDirectoryResponse,
+        )
+
     override suspend fun submit(payload: PriceObservationSubmitPayload): PriceObservationSubmitResult {
         val initial = store.read()
         if (!initial.isSignedIn) {
             return PriceObservationSubmitResult.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
         }
         return submitOnce(payload, initial)
+    }
+
+    override suspend fun submit(
+        payload: RestaurantReceiptSubmitPayload,
+    ): RestaurantReceiptSubmitResult {
+        val initial = store.read()
+        if (!initial.isSignedIn) {
+            return RestaurantReceiptSubmitResult.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
+        }
+        return try {
+            val response = transport.execute(
+                request(
+                    config = initial,
+                    method = "POST",
+                    path = "/rest/v1/rpc/submit_restaurant_receipt_v1",
+                    body = payload.toRpcJson(),
+                ),
+            )
+            if (response.statusCode !in 200..299) {
+                return RestaurantReceiptSubmitResult.Failure(
+                    kind = classifyFailure(response),
+                    message = response.body.takeIf(String::isNotBlank),
+                )
+            }
+            RestaurantReceiptSubmitResult.Success(RestaurantReceiptJson.decodeSubmitResponse(response.body))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: SocketTimeoutException) {
+            RestaurantReceiptSubmitResult.Failure(PriceObservationFailureKind.NETWORK_TIMEOUT)
+        } catch (_: IOException) {
+            RestaurantReceiptSubmitResult.Failure(PriceObservationFailureKind.NETWORK)
+        } catch (_: Exception) {
+            RestaurantReceiptSubmitResult.Failure(PriceObservationFailureKind.CONTRACT)
+        }
     }
 
     private suspend fun <T> readAuthenticated(

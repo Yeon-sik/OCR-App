@@ -18,6 +18,7 @@ import androidx.core.content.FileProvider
 fun ReceiptOcrApp(
     viewModel: ReceiptAppViewModel,
     onLaunchScanner: (IntentSender) -> Unit,
+    onLaunchImagePicker: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -68,10 +69,12 @@ fun ReceiptOcrApp(
         onScan = {
             activity?.let { viewModel.prepareScanner(it, onLaunchScanner) }
         },
+        onPickImages = { onLaunchImagePicker(false) },
         onWorkflowSelected = viewModel::selectWorkflow,
         onAppendScan = {
             activity?.let { viewModel.prepareScanner(it, onLaunchScanner, appendToCurrent = true) }
         },
+        onAppendPickImages = { onLaunchImagePicker(true) },
         onSelectSession = viewModel::selectSession,
         onDeleteSession = viewModel::deleteSession,
         onShowApiSettings = viewModel::showApiSettings,
@@ -85,6 +88,9 @@ fun ReceiptOcrApp(
         onSaveNutritionConnection = viewModel::saveNutritionConnection,
         onSignInNutrition = viewModel::signInNutrition,
         onConfirmAndPublishNutrition = viewModel::confirmAndPublishNutrition,
+        onRequestNutritionAiCorrections = viewModel::requestNutritionAiCorrections,
+        onApplyNutritionAiCorrection = viewModel::applyNutritionAiCorrection,
+        onDismissNutritionAiCorrection = viewModel::dismissNutritionAiCorrection,
         onSavePriceTraceConnection = viewModel::savePriceTraceConnection,
         onSignInPriceTrace = viewModel::signInPriceTrace,
         onMerchantNameChanged = viewModel::updateMerchantName,
@@ -119,6 +125,7 @@ fun ReceiptOcrApp(
         onSaveGeminiApiKey = viewModel::saveGeminiApiKey,
         onClearGeminiApiKey = viewModel::clearGeminiApiKey,
         onRequestAiCorrections = viewModel::requestAiCorrections,
+        onContinueAiPreflight = viewModel::continueFromAiPreflight,
         onApplyAiCorrection = viewModel::applyAiCorrection,
         onDismissAiCorrection = viewModel::dismissAiCorrection,
         onApplySuggestion = viewModel::applyReconciliationSuggestion,
@@ -137,7 +144,8 @@ fun ReceiptOcrApp(
         onPriceObservationLineItemSelected = viewModel::selectPriceObservationLineItem,
         onPriceObservationObservedOnChanged = viewModel::updatePriceObservationObservedOn,
         onPriceObservationUnitPriceChanged = viewModel::updatePriceObservationUnitPrice,
-        onSubmitPriceObservation = viewModel::submitPriceObservation,
+         onSubmitPriceObservation = viewModel::submitPriceObservation,
+         onSubmitRestaurantReceipt = viewModel::submitRestaurantReceipt,
         onIncludeRawTextChanged = viewModel::setIncludeRawTextInShare,
         onSave = viewModel::saveVerifiedJson,
         onShare = viewModel::shareVerifiedJson,

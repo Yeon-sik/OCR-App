@@ -1,8 +1,10 @@
 package com.pricetrace.receiptocr.pricetrace
 
+import com.pricetrace.receiptscanner.domain.PlaceCandidateSource
 import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
 import com.pricetrace.receiptscanner.publisher.PriceObservationSubmitPayload
 import com.pricetrace.receiptscanner.publisher.PriceObservationSubmitResult
+import com.pricetrace.receiptscanner.publisher.RestaurantPlaceJson
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.intOrNull
@@ -101,6 +103,71 @@ class PriceObservationGatewayTest {
     }
 
     @Test
+    fun restaurantDirectorySearchUsesTheExactRpcPathHeadersAndFiveFieldPayload() = runTest {
+        val store = FakeStore(signedIn())
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(200, restaurantDirectoryJson()),
+        )
+        val gateway = PriceObservationGateway(store, transport)
+
+        val result = gateway.searchRestaurantPlaces("  가상마트  ")
+
+        val candidates = (result as PriceObservationReadOutcome.Success).value
+        assertEquals(2, candidates.size)
+        assertEquals(PlaceCandidateSource.VERIFIED_DIRECTORY, candidates[0].source)
+        assertEquals("pricetrace:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222221", candidates[0].id)
+        assertEquals("가상마트", candidates[0].displayName)
+        assertEquals("naver", candidates[0].sourceNamespace)
+        assertEquals("강남점", candidates[0].branchName)
+        assertEquals("GM-001", candidates[0].sourceLocationCode)
+        assertEquals("11111111-1111-4111-8111-111111111111", candidates[0].restaurantId)
+        assertEquals("22222222-2222-4222-8222-222222222221", candidates[0].restaurantLocationId)
+        assertEquals("https://pricetrace.example.com/store/gm-001", candidates[0].detailUrl)
+
+        val request = transport.requests.single()
+        assertEquals("POST", request.method)
+        assertEquals(
+            "https://pricetrace.example.com/rest/v1/rpc/get_restaurant_directory_v1",
+            request.url,
+        )
+        assertEquals("price-trace-publishable-key", request.headers["apikey"])
+        assertEquals("Bearer access-token", request.headers["Authorization"])
+        assertEquals("application/json; charset=utf-8", request.headers["Content-Type"])
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        assertEquals(setOf("p_query", "p_limit"), body.keys)
+        assertEquals("가상마트", body["p_query"]?.jsonPrimitive?.content)
+        assertEquals(5, body["p_limit"]?.jsonPrimitive?.intOrNull)
+    }
+
+    @Test
+    fun restaurantDirectoryDecoderRejectsMissingNestedRestaurantOrLocationIdentity() {
+        val missingRestaurantId = """
+            [{"schemaVersion":"restaurant-directory.v2","restaurant":{"brand":"가상마트","legalName":"가상마트 주식회사"},"locations":[{"id":"22222222-2222-4222-8222-222222222221","sourceLabel":"naver","sourceRestaurantCode":"GM-001","locationLabel":"강남점","sourceUrl":"https://pricetrace.example.com/store/gm-001"}],"menuCount":12,"latestObservedAt":"2026-08-24T00:00:00Z","revision":"rev-1"}]
+        """.trimIndent()
+        val missingLocationId = """
+            [{"schemaVersion":"restaurant-directory.v2","restaurant":{"id":"11111111-1111-4111-8111-111111111111","brand":"가상마트","legalName":"가상마트 주식회사"},"locations":[{"sourceLabel":"naver","sourceRestaurantCode":"GM-001","locationLabel":"강남점","sourceUrl":"https://pricetrace.example.com/store/gm-001"}],"menuCount":12,"latestObservedAt":"2026-08-24T00:00:00Z","revision":"rev-1"}]
+        """.trimIndent()
+
+        assertTrue(runCatching { RestaurantPlaceJson.decodeDirectoryResponse(missingRestaurantId) }.isFailure)
+        assertTrue(runCatching { RestaurantPlaceJson.decodeDirectoryResponse(missingLocationId) }.isFailure)
+    }
+
+    @Test
+    fun restaurantDirectoryDecoderFlattensOneRestaurantWithTwoLocations() {
+        val candidates = RestaurantPlaceJson.decodeDirectoryResponse(restaurantDirectoryJson())
+
+        assertEquals(2, candidates.size)
+        assertEquals(PlaceCandidateSource.VERIFIED_DIRECTORY, candidates[1].source)
+        assertEquals("pricetrace:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222", candidates[1].id)
+        assertEquals("가상마트", candidates[1].displayName)
+        assertEquals("naver", candidates[1].sourceNamespace)
+        assertEquals("홍대점", candidates[1].branchName)
+        assertEquals("GM-002", candidates[1].sourceLocationCode)
+        assertEquals("11111111-1111-4111-8111-111111111111", candidates[1].restaurantId)
+        assertEquals("22222222-2222-4222-8222-222222222222", candidates[1].restaurantLocationId)
+    }
+
+    @Test
     fun authenticationFailureIsNotRetried() = runTest {
         val transport = QueueTransport(PriceObservationHttpResponse(401, """{"message":"JWT expired"}"""))
         val gateway = PriceObservationGateway(FakeStore(signedIn()), transport)
@@ -183,6 +250,39 @@ class PriceObservationGatewayTest {
 
     private fun productReadJson() =
         """{"schemaVersion":"product-read.v1","namespace":"pricetrace","revision":"revision-1","products":[{"standardProduct":{"id":"$STANDARD_PRODUCT_ID","name":"Coffee","brand":null,"updatedAt":"2026-08-01T00:00:00Z"},"catalogProduct":{"id":"$CATALOG_PRODUCT_ID","name":"Coffee 500g","specificationText":"500g","contentAmount":500,"contentUnit":"g","packageCount":1,"referenceUnit":"g","listingReferenceUrl":null,"updatedAt":"2026-08-01T00:00:00Z"},"sellerProducts":[],"observations":[]}]}"""
+
+    private fun restaurantDirectoryJson() =
+        """
+        [
+          {
+            "schemaVersion": "restaurant-directory.v2",
+            "restaurant": {
+              "id": "11111111-1111-4111-8111-111111111111",
+              "brand": "가상마트",
+              "legalName": "가상마트 주식회사"
+            },
+            "locations": [
+              {
+                "id": "22222222-2222-4222-8222-222222222221",
+                "sourceLabel": "naver",
+                "sourceRestaurantCode": "GM-001",
+                "locationLabel": "강남점",
+                "sourceUrl": "https://pricetrace.example.com/store/gm-001"
+              },
+              {
+                "id": "22222222-2222-4222-8222-222222222222",
+                "sourceLabel": "naver",
+                "sourceRestaurantCode": "GM-002",
+                "locationLabel": "홍대점",
+                "sourceUrl": "https://pricetrace.example.com/store/gm-002"
+              }
+            ],
+            "menuCount": 12,
+            "latestObservedAt": "2026-08-24T00:00:00Z",
+            "revision": "rev-1"
+          }
+        ]
+        """.trimIndent()
 
     private fun signedIn() = PriceTraceSupabaseConfig(
         url = "https://pricetrace.example.com",

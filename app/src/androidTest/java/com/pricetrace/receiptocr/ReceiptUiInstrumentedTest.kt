@@ -20,6 +20,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionCandidate
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionPrompt
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionProvider
+import com.pricetrace.receiptscanner.correction.ReceiptEvidenceAssessment
+import com.pricetrace.receiptscanner.correction.ReceiptEvidenceVerdict
 import com.pricetrace.receiptscanner.domain.BusinessKind
 import com.pricetrace.receiptscanner.domain.ConfidenceLevel
 import com.pricetrace.receiptscanner.domain.QuantityUnit
@@ -38,11 +40,16 @@ import com.pricetrace.receiptscanner.domain.ReconciliationDiagnostics
 import com.pricetrace.receiptscanner.domain.ReconciliationSuggestion
 import com.pricetrace.receiptscanner.domain.RetailChannel
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
+import com.pricetrace.receiptscanner.domain.withPurchaseLocalTime
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
 import com.pricetrace.receiptscanner.publisher.PriceObservationSource
+import com.pricetrace.receiptscanner.preflight.ReceiptAiReviewStatus
+import com.pricetrace.receiptscanner.preflight.ReceiptPreflightDecision
+import com.pricetrace.receiptscanner.preflight.ReceiptPreflightReason
+import com.pricetrace.receiptscanner.preflight.ReceiptPreflightRoute
 import com.pricetrace.receiptscanner.storage.ReceiptFileStore
 import com.pricetrace.receiptscanner.storage.RoomReceiptSessionRepository
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
@@ -96,6 +103,40 @@ class ReceiptUiInstrumentedTest {
     }
 
     @Test
+    fun homeSeparatesRestaurantReceiptWorkflow() {
+        var selected: OcrWorkflowType? = null
+        var state by mutableStateOf(ReceiptAppUiState())
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onWorkflowSelected = {
+                        selected = it
+                        state = state.copy(selectedWorkflow = it)
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("workflow_restaurant").performClick()
+        composeRule.onNodeWithText("식당 영수증 촬영·선택").assertIsDisplayed()
+        composeRule.runOnIdle { assertEquals(OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT, selected) }
+    }
+
+    @Test
+    fun homeUsesOneMonochromeHologramJudgmentSurface() {
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(uiState = ReceiptAppUiState())
+            }
+        }
+
+        composeRule.onNodeWithTag("home_hologram_hero").assertIsDisplayed()
+        composeRule.onNodeWithText("영수증 가격을\n검증해 기록하세요").assertIsDisplayed()
+        composeRule.onNodeWithTag("scan_button").assertIsEnabled()
+    }
+
+    @Test
     fun homeOpensApiSettingsForGeminiAndFitnessConnections() {
         var opened = false
         var state by mutableStateOf(ReceiptAppUiState())
@@ -137,7 +178,7 @@ class ReceiptUiInstrumentedTest {
                 NutritionField.SUGARS_GRAMS to 5.0,
             ),
         )
-        val state = ReceiptAppUiState(
+        var state by mutableStateOf(ReceiptAppUiState(
             screen = AppScreen.NUTRITION_REVIEW,
             selectedWorkflow = OcrWorkflowType.FITNESS_NUTRITION,
             nutritionDraft = draft,
@@ -145,12 +186,15 @@ class ReceiptUiInstrumentedTest {
             nutritionSupabaseUrl = "https://nutrition.example.com",
             isNutritionPublishableKeyConfigured = true,
             nutritionSignedInEmail = "fit@example.com",
-        )
+        ))
         composeRule.setContent {
             ReceiptOcrTheme {
                 ReceiptOcrContent(
                     uiState = state,
-                    onNutritionProductNameChanged = { productName = it },
+                    onNutritionProductNameChanged = { value ->
+                        productName = value
+                        state = state.copy(nutritionDraft = state.nutritionDraft?.copy(productName = value))
+                    },
                     onConfirmAndPublishNutrition = { published += 1 },
                 )
             }
@@ -188,6 +232,7 @@ class ReceiptUiInstrumentedTest {
             }
         }
 
+        composeRule.onNodeWithTag("json_preview").performScrollToNode(hasTestTag("save_json_button"))
         composeRule.onNodeWithTag("save_json_button").assertIsEnabled().performClick()
         composeRule.onNodeWithTag("share_json_button").assertIsEnabled().performClick()
         composeRule.runOnIdle {
@@ -249,7 +294,10 @@ class ReceiptUiInstrumentedTest {
         }
 
         composeRule.onNodeWithTag("price_observation_submit").assertIsDisplayed()
+        composeRule.onNodeWithTag("price_observation_hologram_hero").assertIsDisplayed()
         composeRule.onNodeWithTag("price_observation_product_$CATALOG_PRODUCT_ID").assertIsDisplayed()
+        composeRule.onNodeWithTag("price_observation_submit")
+            .performScrollToNode(hasTestTag("submit_price_observation_button"))
         composeRule.onNodeWithTag("submit_price_observation_button").assertIsEnabled()
         composeRule.runOnIdle { assertEquals(0, submitClicks) }
         composeRule.onNodeWithTag("submit_price_observation_button").performClick()
@@ -278,8 +326,26 @@ class ReceiptUiInstrumentedTest {
             ReceiptOcrTheme {
                 ReceiptOcrContent(
                     uiState = state,
-                    onMerchantNameChanged = { merchantEdit = it },
-                    onIssuedLocalTimeChanged = { localTimeEdit = it },
+                    onMerchantNameChanged = { value ->
+                        merchantEdit = value
+                        state = state.copy(
+                            receipt = state.receipt?.let { current ->
+                                current.copy(merchant = current.merchant.copy(name = value))
+                            },
+                        )
+                    },
+                    onIssuedLocalTimeChanged = { value ->
+                        localTimeEdit = value
+                        state = state.copy(
+                            receipt = state.receipt?.let { current ->
+                                current.copy(
+                                    document = current.document.copy(
+                                        source = current.document.source.withPurchaseLocalTime(value),
+                                    ),
+                                )
+                            },
+                        )
+                    },
                     onShare = { shareClicks += 1 },
                 )
             }
@@ -299,6 +365,7 @@ class ReceiptUiInstrumentedTest {
                 jsonPreview = ReceiptV2Json.encodePretty(receipt(true)),
             )
         }
+        composeRule.onNodeWithTag("json_preview").performScrollToNode(hasTestTag("share_json_button"))
         composeRule.onNodeWithTag("share_json_button").assertIsEnabled().performClick()
         composeRule.runOnIdle { assertEquals(1, shareClicks) }
     }
@@ -433,6 +500,43 @@ class ReceiptUiInstrumentedTest {
         composeRule.runOnIdle {
             assertEquals(1, requestClicks)
             assertEquals("candidate-1", appliedCandidateId)
+        }
+    }
+
+    @Test
+    fun aiPreflightRecaptureKeepsManualReviewAvailable() {
+        var recaptureClicks = 0
+        var continueClicks = 0
+        val state = ReceiptAppUiState(
+            screen = AppScreen.AI_CORRECTION,
+            receipt = receipt(false),
+            isAiPreflight = true,
+            aiReviewStatus = ReceiptAiReviewStatus.COMPLETED,
+            aiEvidenceAssessment = ReceiptEvidenceAssessment(ReceiptEvidenceVerdict.INSUFFICIENT_EVIDENCE),
+            preflightDecision = ReceiptPreflightDecision(
+                route = ReceiptPreflightRoute.RECAPTURE_RECOMMENDED,
+                reasons = listOf(
+                    ReceiptPreflightReason.AI_EVIDENCE_INSUFFICIENT,
+                    ReceiptPreflightReason.OCR_EVIDENCE_SPARSE,
+                ),
+            ),
+        )
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onScan = { recaptureClicks += 1 },
+                    onContinueAiPreflight = { continueClicks += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("ai_preflight_decision").assertIsDisplayed()
+        composeRule.onNodeWithTag("preflight_recapture_button").assertIsEnabled().performClick()
+        composeRule.onNodeWithTag("preflight_continue_button").assertIsEnabled().performClick()
+        composeRule.runOnIdle {
+            assertEquals(1, recaptureClicks)
+            assertEquals(1, continueClicks)
         }
     }
 

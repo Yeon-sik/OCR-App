@@ -1,32 +1,22 @@
 package com.pricetrace.receiptocr.gemini
 
-import com.pricetrace.receiptscanner.correction.ReceiptCorrectionPrompt
-import com.pricetrace.receiptscanner.correction.ReceiptCorrectionRequest
-import com.pricetrace.receiptscanner.correction.ReceiptEvidenceVerdict
-import com.pricetrace.receiptscanner.correction.ReceiptFieldVerdict
-import kotlinx.serialization.json.Json
+import com.pricetrace.receiptscanner.nutrition.NutritionCorrectionPrompt
+import com.pricetrace.receiptscanner.nutrition.NutritionCorrectionRequest
+import com.pricetrace.receiptscanner.nutrition.NutritionEvidenceVerdict
+import com.pricetrace.receiptscanner.nutrition.NutritionFieldVerdict
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.Base64
 
-internal object GeminiInteractionsProtocol {
-    const val ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
-    const val DEFAULT_MODEL = "gemini-3.5-flash-lite"
+internal object NutritionGeminiInteractionsProtocol {
     private const val MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024
 
-    private val json = Json { ignoreUnknownKeys = true }
-
     fun createRequestBody(
-        request: ReceiptCorrectionRequest,
+        request: NutritionCorrectionRequest,
         modelName: String,
     ): String {
         var attachedBytes = 0
@@ -34,7 +24,7 @@ internal object GeminiInteractionsProtocol {
             add(
                 buildJsonObject {
                     put("type", "text")
-                    put("text", ReceiptCorrectionPrompt.build(request))
+                    put("text", NutritionCorrectionPrompt.build(request))
                 },
             )
             request.evidenceImages.forEach { evidence ->
@@ -47,7 +37,7 @@ internal object GeminiInteractionsProtocol {
                         put("type", "text")
                         put(
                             "text",
-                            "Cropped evidence ${evidence.id} supports sourceLineIds=" +
+                            "Cropped nutrition evidence ${evidence.id} supports sourceLineIds=" +
                                 evidence.sourceLineIds.joinToString(prefix = "[", postfix = "]"),
                         )
                     },
@@ -61,7 +51,6 @@ internal object GeminiInteractionsProtocol {
                 )
             }
         }
-
         return buildJsonObject {
             put("model", modelName)
             put("input", input)
@@ -70,7 +59,7 @@ internal object GeminiInteractionsProtocol {
                 buildJsonObject {
                     put("type", "text")
                     put("mime_type", "application/json")
-                    put("schema", correctionResponseSchema())
+                    put("schema", responseSchema())
                 },
             )
             put("store", false)
@@ -86,24 +75,7 @@ internal object GeminiInteractionsProtocol {
         }.toString()
     }
 
-    fun extractOutputText(responseBody: String): String? = runCatching {
-        val root = json.parseToJsonElement(responseBody).jsonObject
-        if (root["status"]?.jsonPrimitive?.contentOrNull != "completed") return@runCatching null
-        root["steps"]
-            ?.jsonArray
-            ?.asSequence()
-            ?.map(JsonElement::jsonObject)
-            ?.filter { it["type"]?.jsonPrimitive?.contentOrNull == "model_output" }
-            ?.flatMap { step -> step["content"]?.jsonArray?.asSequence().orEmpty() }
-            ?.map(JsonElement::jsonObject)
-            ?.filter { it["type"]?.jsonPrimitive?.contentOrNull == "text" }
-            ?.mapNotNull { it["text"]?.jsonPrimitive?.contentOrNull }
-            ?.joinToString(separator = "\n")
-            ?.trim()
-            ?.takeIf(String::isNotEmpty)
-    }.getOrNull()
-
-    private fun correctionResponseSchema(): JsonObject = buildJsonObject {
+    private fun responseSchema(): JsonObject = buildJsonObject {
         put("type", "object")
         put(
             "properties",
@@ -112,14 +84,7 @@ internal object GeminiInteractionsProtocol {
                     "evidenceVerdict",
                     buildJsonObject {
                         put("type", "string")
-                        put("enum", JsonArray(ReceiptEvidenceVerdict.entries.map { JsonPrimitive(it.wireValue) }))
-                    },
-                )
-                put(
-                    "merchantVerdict",
-                    buildJsonObject {
-                        put("type", "string")
-                        put("enum", JsonArray(ReceiptEvidenceVerdict.entries.map { JsonPrimitive(it.wireValue) }))
+                        put("enum", JsonArray(NutritionEvidenceVerdict.entries.map { JsonPrimitive(it.wireValue) }))
                     },
                 )
                 put(
@@ -138,7 +103,7 @@ internal object GeminiInteractionsProtocol {
                                             "verdict",
                                             buildJsonObject {
                                                 put("type", "string")
-                                                put("enum", JsonArray(ReceiptFieldVerdict.entries.map { JsonPrimitive(it.wireValue) }))
+                                                put("enum", JsonArray(NutritionFieldVerdict.entries.map { JsonPrimitive(it.wireValue) }))
                                             },
                                         )
                                         put(
@@ -153,9 +118,7 @@ internal object GeminiInteractionsProtocol {
                                 )
                                 put(
                                     "required",
-                                    JsonArray(
-                                        listOf("fieldPath", "verdict", "sourceLineIds", "reason").map(::JsonPrimitive),
-                                    ),
+                                    JsonArray(listOf("fieldPath", "verdict", "sourceLineIds", "reason").map(::JsonPrimitive)),
                                 )
                             },
                         )
@@ -205,10 +168,7 @@ internal object GeminiInteractionsProtocol {
                 )
             },
         )
-        put(
-            "required",
-            JsonArray(listOf("evidenceVerdict", "merchantVerdict", "fieldChecks", "candidates").map(::JsonPrimitive)),
-        )
+        put("required", JsonArray(listOf("evidenceVerdict", "fieldChecks", "candidates").map(::JsonPrimitive)))
     }
 
     private fun stringSchema(): JsonObject = buildJsonObject { put("type", "string") }

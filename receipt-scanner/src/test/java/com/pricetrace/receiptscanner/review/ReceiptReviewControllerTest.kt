@@ -41,6 +41,34 @@ class ReceiptReviewControllerTest {
     }
 
     @Test
+    fun `line description preserves spaces while typing`() {
+        val controller = ReceiptReviewController(SyntheticFixtures.verifiedCandidate())
+
+        assertTrue(controller.updateLineDescription("line_fixture_001", "수정된 "))
+        assertEquals("수정된 ", controller.state.value.receipt.lineItems.single().description)
+
+        assertTrue(controller.updateLineDescription("line_fixture_001", "수정된 합성 상품"))
+        assertEquals("수정된 합성 상품", controller.state.value.receipt.lineItems.single().description)
+    }
+
+    @Test
+    fun merchantTextFieldsPreserveSpacesWhileTyping() {
+        val controller = ReceiptReviewController(SyntheticFixtures.verifiedCandidate())
+
+        assertTrue(controller.updateMerchantName("가상마트 "))
+        assertEquals("가상마트 ", controller.state.value.receipt.merchant.name)
+
+        assertTrue(controller.updateBranchName("서울점 "))
+        assertEquals("서울점 ", controller.state.value.receipt.merchant.branchName)
+
+        assertTrue(controller.updateAddress("서울특별시 강남구 "))
+        assertEquals("서울특별시 강남구 ", controller.state.value.receipt.merchant.address)
+
+        assertTrue(controller.updatePhone("010- "))
+        assertEquals("010- ", controller.state.value.receipt.merchant.phone)
+    }
+
+    @Test
     fun `valid JSON replacement is atomic`() {
         val controller = ReceiptReviewController(SyntheticFixtures.verifiedCandidate())
         val replacement = SyntheticFixtures.verifiedCandidate().copy(

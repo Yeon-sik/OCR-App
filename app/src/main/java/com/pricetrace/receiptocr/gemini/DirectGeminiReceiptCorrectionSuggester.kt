@@ -8,6 +8,12 @@ import com.pricetrace.receiptscanner.correction.ReceiptCorrectionPrompt
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionProvider
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionRequest
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionSuggester
+import com.pricetrace.receiptscanner.correction.ReceiptCorrectionTarget
+import com.pricetrace.receiptscanner.correction.ReceiptMerchantFieldSemantics
+import com.pricetrace.receiptscanner.correction.ReceiptEvidenceAssessment
+import com.pricetrace.receiptscanner.correction.ReceiptEvidenceVerdict
+import com.pricetrace.receiptscanner.correction.ReceiptFieldCheck
+import com.pricetrace.receiptscanner.correction.ReceiptFieldVerdict
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -77,17 +83,68 @@ internal class DirectGeminiReceiptCorrectionSuggester(
     ): ReceiptCorrectionOutcome {
         val outputText = GeminiInteractionsProtocol.extractOutputText(responseBody)
             ?: return ReceiptCorrectionOutcome.Failure(ReceiptCorrectionFailureReason.INVALID_RESPONSE)
+        val assessment = decodeAssessment(outputText, request)
+            ?: return ReceiptCorrectionOutcome.Failure(ReceiptCorrectionFailureReason.INVALID_RESPONSE)
         val candidates = decodeCandidates(outputText, request)
             ?: return ReceiptCorrectionOutcome.Failure(ReceiptCorrectionFailureReason.INVALID_RESPONSE)
+        if (assessment.verdict == ReceiptEvidenceVerdict.PLAUSIBLE && candidates.isNotEmpty()) {
+            return ReceiptCorrectionOutcome.Failure(ReceiptCorrectionFailureReason.INVALID_RESPONSE)
+        }
         return ReceiptCorrectionOutcome.Success(
             ReceiptCorrectionBatch(
                 candidates = candidates,
+                assessment = assessment,
                 providerId = PROVIDER_ID,
                 model = modelName,
                 promptVersion = ReceiptCorrectionPrompt.VERSION,
             ),
         )
     }
+
+    private fun decodeAssessment(
+        outputText: String,
+        request: ReceiptCorrectionRequest,
+    ): ReceiptEvidenceAssessment? = runCatching {
+        val root = json.parseToJsonElement(outputText).jsonObject
+        val verdict = ReceiptEvidenceVerdict.fromWireValue(
+            root.getValue("evidenceVerdict").jsonPrimitive.content.trim(),
+        ) ?: return@runCatching null
+        val merchantVerdict = root["merchantVerdict"]?.jsonPrimitive?.contentOrNull
+            ?.trim()
+            ?.let(ReceiptEvidenceVerdict::fromWireValue)
+        val fieldChecks = root["fieldChecks"]?.jsonArray?.map { element ->
+            val raw = element.jsonObject
+            ReceiptFieldCheck(
+                fieldPath = requireNotNull(raw["fieldPath"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)),
+                verdict = requireNotNull(
+                    raw["verdict"]?.jsonPrimitive?.contentOrNull
+                        ?.trim()
+                        ?.let(ReceiptFieldVerdict::fromWireValue),
+                ),
+                sourceLineIds = raw["sourceLineIds"]?.jsonArray
+                    ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                    ?.distinct()
+                    ?: emptyList(),
+                reason = raw["reason"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty(),
+            )
+        }.orEmpty()
+        val expectedMerchantPaths = request.targets
+            .map(ReceiptCorrectionTarget::fieldPath)
+            .filter(ReceiptMerchantFieldSemantics::isMerchantFieldPath)
+            .toSet()
+        if (expectedMerchantPaths.isNotEmpty() &&
+            (merchantVerdict == null ||
+                fieldChecks.size != expectedMerchantPaths.size ||
+                fieldChecks.map(ReceiptFieldCheck::fieldPath).toSet() != expectedMerchantPaths)
+        ) {
+            return@runCatching null
+        }
+        ReceiptEvidenceAssessment(
+            verdict = verdict,
+            merchantVerdict = merchantVerdict,
+            fieldChecks = fieldChecks,
+        )
+    }.getOrNull()
 
     private fun decodeCandidates(
         outputText: String,

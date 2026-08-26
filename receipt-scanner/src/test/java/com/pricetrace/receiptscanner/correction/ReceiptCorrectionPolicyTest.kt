@@ -20,8 +20,18 @@ class ReceiptCorrectionPolicyTest {
             ocrDocument,
         )
 
-        assertEquals(listOf("line_fixture_001"), request.targets.map { it.lineItemId })
-        assertEquals(listOf("ocr_line_4"), request.evidenceLines.map { it.id })
+        assertEquals(
+            listOf(
+                "merchant.name",
+                "merchant.branch_name",
+                "merchant.business_registration_number",
+                "merchant.address",
+                "merchant.phone",
+                "line_items[line_fixture_001]",
+            ),
+            request.targets.map { it.fieldPath },
+        )
+        assertEquals(listOf("ocr_line_0", "ocr_line_1", "ocr_line_4"), request.evidenceLines.map { it.id })
         assertFalse(request.evidenceLines.any { it.text == ocrDocument.rawText })
     }
 
@@ -36,9 +46,10 @@ class ReceiptCorrectionPolicyTest {
         )
         val verifiedRequest = ReceiptCorrectionRequestFactory.create(verifiedReceipt, ocrDocument)
 
-        assertTrue(sensitiveRequest.targets.isEmpty())
-        assertTrue(sensitiveRequest.evidenceLines.isEmpty())
-        assertTrue(verifiedRequest.targets.isEmpty())
+        assertTrue(sensitiveRequest.targets.none { it.fieldPath == "line_items[line_fixture_001]" })
+        assertEquals(listOf("ocr_line_0", "ocr_line_1"), sensitiveRequest.evidenceLines.map { it.id })
+        assertTrue(verifiedRequest.targets.none { it.fieldPath == "line_items[line_fixture_001]" })
+        assertTrue(verifiedRequest.targets.any { it.fieldPath == "merchant.address" })
     }
 
     @Test

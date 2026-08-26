@@ -2,6 +2,7 @@ package com.pricetrace.receiptocr
 
 import android.app.Application
 import com.pricetrace.receiptocr.gemini.DirectGeminiReceiptCorrectionSuggester
+import com.pricetrace.receiptocr.gemini.DirectGeminiNutritionCorrectionSuggester
 import com.pricetrace.receiptocr.gemini.EncryptedGeminiApiKeyStore
 import com.pricetrace.receiptocr.gemini.GeminiApiKeyStore
 import com.pricetrace.receiptocr.fitness.AndroidNutritionSupabaseStore
@@ -12,6 +13,7 @@ import com.pricetrace.receiptscanner.capture.MlKitDocumentCaptureProvider
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionSuggester
 import com.pricetrace.receiptscanner.export.ReceiptExportService
 import com.pricetrace.receiptscanner.ocr.MlKitDocumentOcrEngine
+import com.pricetrace.receiptscanner.nutrition.NutritionCorrectionSuggester
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelParser
 import com.pricetrace.receiptscanner.parser.GenericReceiptParser
 import com.pricetrace.receiptscanner.publisher.LocalOnlyReceiptPublisher
@@ -45,10 +47,19 @@ class AppContainer(application: Application) {
             apiKeyProvider = geminiApiKeyStore::read,
             modelName = BuildConfig.DEFAULT_GEMINI_MODEL,
         )
+    val nutritionCorrectionSuggester: NutritionCorrectionSuggester =
+        DirectGeminiNutritionCorrectionSuggester(
+            apiKeyProvider = geminiApiKeyStore::read,
+            modelName = BuildConfig.DEFAULT_GEMINI_MODEL,
+        )
     internal val nutritionSupabaseStore = AndroidNutritionSupabaseStore(application)
     internal val nutritionGateway = NutritionSupabaseGateway(nutritionSupabaseStore)
     internal val priceTraceSupabaseStore = AndroidPriceTraceSupabaseStore(application)
     internal val priceObservationGateway = PriceObservationGateway(priceTraceSupabaseStore)
+    /** CashOS is a separate authenticated target; credentials are intentionally not shared with PriceTrace. */
+    internal val cashOsReceiptGateway = com.pricetrace.receiptocr.pricetrace.CashOsReceiptGateway(
+        configProvider = { com.pricetrace.receiptocr.pricetrace.CashOsSupabaseConfig() },
+    )
     internal val priceObservationProcessor = PriceObservationQueueProcessor(
         queue = priceObservationQueue,
         submitter = priceObservationGateway,
