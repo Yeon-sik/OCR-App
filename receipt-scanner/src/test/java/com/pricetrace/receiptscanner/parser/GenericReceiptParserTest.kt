@@ -1535,6 +1535,43 @@ class GenericReceiptParserTest {
     }
 
     @Test
+    fun bottomMerchantLineIsPreferredOverItemTextInReceiptFooter() {
+        val lines = buildList {
+            add(line(0, "영수증", top = 20))
+            add(line(1, "주소 서울특별시 강남구 테헤란로 123", top = 55))
+            addAll(
+                rowCells(
+                    startIndex = 2,
+                    top = 90,
+                    "상품명" to (100..450),
+                    "단가" to (500..620),
+                    "수량" to (650..730),
+                    "금액" to (800..950),
+                ),
+            )
+            addAll(
+                rowCells(
+                    startIndex = 6,
+                    top = 130,
+                    "육회비빔밥" to (100..450),
+                    "8,000" to (500..620),
+                    "1" to (650..730),
+                    "8,000" to (800..950),
+                ),
+            )
+            add(line(10, "합계 8,000원", top = 180))
+            add(line(11, "카드 승인 8,000원", top = 215))
+            add(line(12, "육회식당", elements = listOf("육회식당"), left = 180, right = 820, top = 260))
+        }
+
+        val parsed = parser.parse(documentOf(*lines.toTypedArray()))
+
+        assertEquals("육회식당", parsed.merchantName.value)
+        assertEquals("line_12", parsed.merchantName.provenance.single().ocrLineId)
+        assertEquals("육회비빔밥", parsed.lineItems.single().description.value)
+    }
+
+    @Test
     fun `fragmented total context still infers krw without an explicit won marker`() {
         val parsed = parser.parse(
             documentOf(

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ocr_window_background">#ECEEF1</color>
+    <color name="ocr_icon_background">#111114</color>
+    <color name="ocr_icon_foreground">#FFFFFF</color>
+    <color name="ocr_icon_detail">#696B71</color>
+</resources>

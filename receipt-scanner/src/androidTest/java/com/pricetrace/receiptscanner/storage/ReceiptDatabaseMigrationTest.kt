@@ -7,6 +7,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -124,11 +125,12 @@ class ReceiptDatabaseMigrationTest {
 
         val migrated = migrationHelper.runMigrationsAndValidate(
             TEST_DB,
-            4,
+            5,
             true,
             ReceiptDatabase.MIGRATION_1_2,
             ReceiptDatabase.MIGRATION_2_3,
             ReceiptDatabase.MIGRATION_3_4,
+            ReceiptDatabase.MIGRATION_4_5,
         )
 
         migrated.query(
@@ -149,6 +151,13 @@ class ReceiptDatabaseMigrationTest {
             assertEquals("pricetrace_receipt", cursor.getString(5))
             assertNull(cursor.getString(6))
             assertNull(cursor.getString(7))
+        }
+
+        migrated.query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'price_observation_queue'",
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("price_observation_queue", cursor.getString(0))
         }
     }
 

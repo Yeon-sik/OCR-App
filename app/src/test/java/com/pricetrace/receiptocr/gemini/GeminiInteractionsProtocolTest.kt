@@ -35,6 +35,15 @@ class GeminiInteractionsProtocolTest {
                 .getValue("schema").jsonObject
                 .getValue("type").jsonPrimitive.content,
         )
+        assertEquals(
+            listOf("plausible", "needs_review", "insufficient_evidence"),
+            root.getValue("response_format").jsonObject
+                .getValue("schema").jsonObject
+                .getValue("properties").jsonObject
+                .getValue("evidenceVerdict").jsonObject
+                .getValue("enum").jsonArray
+                .map { it.jsonPrimitive.content },
+        )
         val image = root.getValue("input").jsonArray
             .map { it.jsonObject }
             .firstOrNull { it["type"]?.jsonPrimitive?.contentOrNull == "image" }
@@ -52,14 +61,17 @@ class GeminiInteractionsProtocolTest {
                 {
                   "type": "model_output",
                   "content": [
-                    {"type": "text", "text": "{\"candidates\":[]}"}
+                    {"type": "text", "text": "{\"evidenceVerdict\":\"plausible\",\"candidates\":[]}"}
                   ]
                 }
               ]
             }
         """.trimIndent()
 
-        assertEquals("{\"candidates\":[]}", GeminiInteractionsProtocol.extractOutputText(response))
+        assertEquals(
+            "{\"evidenceVerdict\":\"plausible\",\"candidates\":[]}",
+            GeminiInteractionsProtocol.extractOutputText(response),
+        )
     }
 
     @Test

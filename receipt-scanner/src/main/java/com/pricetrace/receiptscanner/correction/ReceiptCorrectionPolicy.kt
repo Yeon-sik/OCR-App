@@ -29,6 +29,9 @@ data class ValidatedReceiptCorrections(
 )
 
 object ReceiptCorrectionPolicy {
+    private val merchantFieldPath = Regex(
+        """^merchant\.(name|branch_name|business_registration_number|address|phone)$""",
+    )
     private val lineFieldPath = Regex(
         """^line_items\[([^]]+)]\.(description|quantity|unit_price_amount_minor|net_amount_minor)$""",
     )
@@ -57,6 +60,9 @@ object ReceiptCorrectionPolicy {
         ocrDocument: OcrDocument,
         candidate: ReceiptCorrectionCandidate,
     ): ReceiptCorrectionRejectionReason? {
+        if (merchantFieldPath.matches(candidate.fieldPath)) {
+            return merchantRejectionReason(receipt, ocrDocument, candidate)
+        }
         val match = lineFieldPath.matchEntire(candidate.fieldPath)
             ?: return ReceiptCorrectionRejectionReason.UNSUPPORTED_FIELD
         val lineItem = receipt.lineItems.firstOrNull { it.id == match.groupValues[1] }
@@ -87,7 +93,46 @@ object ReceiptCorrectionPolicy {
         return null
     }
 
+    private fun merchantRejectionReason(
+        receipt: ReceiptV2,
+        ocrDocument: OcrDocument,
+        candidate: ReceiptCorrectionCandidate,
+    ): ReceiptCorrectionRejectionReason? {
+        val current = ReceiptMerchantFieldSemantics.currentValue(receipt, candidate.fieldPath)
+        if (candidate.oldValue.normalized() != current.normalized()) {
+            return ReceiptCorrectionRejectionReason.STALE_OLD_VALUE
+        }
+        if (candidate.sourceLineIds.isEmpty()) {
+            return ReceiptCorrectionRejectionReason.MISSING_SOURCE_EVIDENCE
+        }
+        val linesById = ocrDocument.lines.associateBy { it.id }
+        if (candidate.sourceLineIds.any { it !in linesById }) {
+            return ReceiptCorrectionRejectionReason.UNKNOWN_SOURCE_EVIDENCE
+        }
+        if (candidate.sourceLineIds.any { sourceId ->
+                !ReceiptMerchantFieldSemantics.isRelevantSourceLine(
+                    fieldPath = candidate.fieldPath,
+                    text = requireNotNull(linesById[sourceId]).text,
+                    currentValue = current,
+                    proposedValue = candidate.proposedValue,
+                )
+            }
+        ) {
+            return ReceiptCorrectionRejectionReason.UNRELATED_SOURCE_EVIDENCE
+        }
+        if (candidate.confidencePercent !in 0..100 || !candidate.proposedValue.isSafeCandidateValue()) {
+            return ReceiptCorrectionRejectionReason.INVALID_VALUE
+        }
+        if (!ReceiptMerchantFieldSemantics.isValidProposedValue(candidate.fieldPath, candidate.proposedValue)) {
+            return ReceiptCorrectionRejectionReason.INVALID_VALUE
+        }
+        return null
+    }
+
     fun currentValue(receipt: ReceiptV2, fieldPath: String): String? {
+        if (merchantFieldPath.matches(fieldPath)) {
+            return ReceiptMerchantFieldSemantics.currentValue(receipt, fieldPath)
+        }
         val match = lineFieldPath.matchEntire(fieldPath) ?: return null
         return receipt.lineItems.firstOrNull { it.id == match.groupValues[1] }
             ?.valueForCorrection(match.groupValues[2])
@@ -95,6 +140,9 @@ object ReceiptCorrectionPolicy {
 
     fun parseLineFieldPath(fieldPath: String): Pair<String, String>? = lineFieldPath.matchEntire(fieldPath)
         ?.let { match -> match.groupValues[1] to match.groupValues[2] }
+
+    fun parseMerchantFieldPath(fieldPath: String): String? = merchantFieldPath.matchEntire(fieldPath)
+        ?.groupValues?.get(1)
 
     private fun ReceiptV2LineItem.valueForCorrection(field: String): String? = when (field) {
         "description" -> description

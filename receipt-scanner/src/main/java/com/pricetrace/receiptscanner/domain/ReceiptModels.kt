@@ -151,4 +151,7 @@ data class ParsedReceipt(
     val lineItems: List<ParsedLineItem> = emptyList(),
     val totals: ParsedTotals = ParsedTotals(),
     val payments: List<ParsedPayment> = emptyList(),
+    val placeResolution: RestaurantPlaceResolution = RestaurantPlaceResolution(
+        status = PlaceResolutionStatus.UNRESOLVED,
+    ),
 )

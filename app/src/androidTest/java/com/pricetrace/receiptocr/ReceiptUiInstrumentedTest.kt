@@ -20,6 +20,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionCandidate
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionPrompt
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionProvider
+import com.pricetrace.receiptscanner.correction.ReceiptEvidenceAssessment
+import com.pricetrace.receiptscanner.correction.ReceiptEvidenceVerdict
 import com.pricetrace.receiptscanner.domain.BusinessKind
 import com.pricetrace.receiptscanner.domain.ConfidenceLevel
 import com.pricetrace.receiptscanner.domain.QuantityUnit
@@ -38,9 +40,16 @@ import com.pricetrace.receiptscanner.domain.ReconciliationDiagnostics
 import com.pricetrace.receiptscanner.domain.ReconciliationSuggestion
 import com.pricetrace.receiptscanner.domain.RetailChannel
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
+import com.pricetrace.receiptscanner.domain.withPurchaseLocalTime
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
+import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
+import com.pricetrace.receiptscanner.publisher.PriceObservationSource
+import com.pricetrace.receiptscanner.preflight.ReceiptAiReviewStatus
+import com.pricetrace.receiptscanner.preflight.ReceiptPreflightDecision
+import com.pricetrace.receiptscanner.preflight.ReceiptPreflightReason
+import com.pricetrace.receiptscanner.preflight.ReceiptPreflightRoute
 import com.pricetrace.receiptscanner.storage.ReceiptFileStore
 import com.pricetrace.receiptscanner.storage.RoomReceiptSessionRepository
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
@@ -94,6 +103,40 @@ class ReceiptUiInstrumentedTest {
     }
 
     @Test
+    fun homeSeparatesRestaurantReceiptWorkflow() {
+        var selected: OcrWorkflowType? = null
+        var state by mutableStateOf(ReceiptAppUiState())
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onWorkflowSelected = {
+                        selected = it
+                        state = state.copy(selectedWorkflow = it)
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("workflow_restaurant").performClick()
+        composeRule.onNodeWithText("식당 영수증 촬영·선택").assertIsDisplayed()
+        composeRule.runOnIdle { assertEquals(OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT, selected) }
+    }
+
+    @Test
+    fun homeUsesOneMonochromeHologramJudgmentSurface() {
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(uiState = ReceiptAppUiState())
+            }
+        }
+
+        composeRule.onNodeWithTag("home_hologram_hero").assertIsDisplayed()
+        composeRule.onNodeWithText("영수증 가격을\n검증해 기록하세요").assertIsDisplayed()
+        composeRule.onNodeWithTag("scan_button").assertIsEnabled()
+    }
+
+    @Test
     fun homeOpensApiSettingsForGeminiAndFitnessConnections() {
         var opened = false
         var state by mutableStateOf(ReceiptAppUiState())
@@ -135,7 +178,7 @@ class ReceiptUiInstrumentedTest {
                 NutritionField.SUGARS_GRAMS to 5.0,
             ),
         )
-        val state = ReceiptAppUiState(
+        var state by mutableStateOf(ReceiptAppUiState(
             screen = AppScreen.NUTRITION_REVIEW,
             selectedWorkflow = OcrWorkflowType.FITNESS_NUTRITION,
             nutritionDraft = draft,
@@ -143,12 +186,15 @@ class ReceiptUiInstrumentedTest {
             nutritionSupabaseUrl = "https://nutrition.example.com",
             isNutritionPublishableKeyConfigured = true,
             nutritionSignedInEmail = "fit@example.com",
-        )
+        ))
         composeRule.setContent {
             ReceiptOcrTheme {
                 ReceiptOcrContent(
                     uiState = state,
-                    onNutritionProductNameChanged = { productName = it },
+                    onNutritionProductNameChanged = { value ->
+                        productName = value
+                        state = state.copy(nutritionDraft = state.nutritionDraft?.copy(productName = value))
+                    },
                     onConfirmAndPublishNutrition = { published += 1 },
                 )
             }
@@ -163,6 +209,99 @@ class ReceiptUiInstrumentedTest {
         }
         composeRule.onNodeWithTag("confirm_publish_nutrition").assertIsEnabled().performClick()
         composeRule.runOnIdle { assertEquals(1, published) }
+    }
+
+    @Test
+    fun verifiedReceiptSaveAndShareDoNotSubmitPriceObservation() {
+        var saveClicks = 0
+        var shareClicks = 0
+        var observationSubmits = 0
+        val state = ReceiptAppUiState(
+            screen = AppScreen.JSON_PREVIEW,
+            receipt = receipt(true),
+            jsonPreview = ReceiptV2Json.encodePretty(receipt(true)),
+        )
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onSave = { saveClicks += 1 },
+                    onShare = { shareClicks += 1 },
+                    onShowPriceObservationSubmit = { observationSubmits += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("json_preview").performScrollToNode(hasTestTag("save_json_button"))
+        composeRule.onNodeWithTag("save_json_button").assertIsEnabled().performClick()
+        composeRule.onNodeWithTag("share_json_button").assertIsEnabled().performClick()
+        composeRule.runOnIdle {
+            assertEquals(1, saveClicks)
+            assertEquals(1, shareClicks)
+            assertEquals(0, observationSubmits)
+        }
+        composeRule.onNodeWithTag("price_observation_submit_button").assertIsEnabled().performClick()
+        composeRule.runOnIdle { assertEquals(1, observationSubmits) }
+    }
+
+    @Test
+    fun priceObservationScreenRequiresSelectionsAndOnlySubmitsOnExplicitClick() {
+        var submitClicks = 0
+        val product = PriceObservationProduct(
+            standardProductId = STANDARD_PRODUCT_ID,
+            standardProductName = "Coffee",
+            standardBrand = "Example brand",
+            standardUpdatedAt = "2026-08-01T00:00:00Z",
+            catalogProductId = CATALOG_PRODUCT_ID,
+            catalogProductName = "Coffee 500g",
+            specificationText = "500g",
+            contentAmount = 500.0,
+            contentUnit = "g",
+            packageCount = 1,
+            referenceUnit = "g",
+            listingReferenceUrl = null,
+            catalogUpdatedAt = "2026-08-01T00:00:00Z",
+            sellerProducts = emptyList(),
+            observations = emptyList(),
+        )
+        val state = ReceiptAppUiState(
+            screen = AppScreen.PRICE_OBSERVATION_SUBMIT,
+            receipt = receipt(true),
+            priceObservationSources = listOf(
+                PriceObservationSource(
+                    storeId = STORE_ID,
+                    sourceNamespace = "retail",
+                    sourceStoreCode = "store-1",
+                    displayName = "Approved store",
+                    locationLabel = "Seoul",
+                ),
+            ),
+            priceObservationProducts = listOf(product),
+            priceObservationSelectedStoreId = STORE_ID,
+            priceObservationSelectedCatalogProductId = CATALOG_PRODUCT_ID,
+            priceObservationSelectedLineItemId = "line-1",
+            priceObservationObservedOn = "2026-08-13",
+            priceObservationUnitPriceKrw = "1590",
+            priceTraceSignedInEmail = "user@example.com",
+        )
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onSubmitPriceObservation = { submitClicks += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("price_observation_submit").assertIsDisplayed()
+        composeRule.onNodeWithTag("price_observation_hologram_hero").assertIsDisplayed()
+        composeRule.onNodeWithTag("price_observation_product_$CATALOG_PRODUCT_ID").assertIsDisplayed()
+        composeRule.onNodeWithTag("price_observation_submit")
+            .performScrollToNode(hasTestTag("submit_price_observation_button"))
+        composeRule.onNodeWithTag("submit_price_observation_button").assertIsEnabled()
+        composeRule.runOnIdle { assertEquals(0, submitClicks) }
+        composeRule.onNodeWithTag("submit_price_observation_button").performClick()
+        composeRule.runOnIdle { assertEquals(1, submitClicks) }
     }
 
     @Test
@@ -187,8 +326,26 @@ class ReceiptUiInstrumentedTest {
             ReceiptOcrTheme {
                 ReceiptOcrContent(
                     uiState = state,
-                    onMerchantNameChanged = { merchantEdit = it },
-                    onIssuedLocalTimeChanged = { localTimeEdit = it },
+                    onMerchantNameChanged = { value ->
+                        merchantEdit = value
+                        state = state.copy(
+                            receipt = state.receipt?.let { current ->
+                                current.copy(merchant = current.merchant.copy(name = value))
+                            },
+                        )
+                    },
+                    onIssuedLocalTimeChanged = { value ->
+                        localTimeEdit = value
+                        state = state.copy(
+                            receipt = state.receipt?.let { current ->
+                                current.copy(
+                                    document = current.document.copy(
+                                        source = current.document.source.withPurchaseLocalTime(value),
+                                    ),
+                                )
+                            },
+                        )
+                    },
                     onShare = { shareClicks += 1 },
                 )
             }
@@ -208,6 +365,7 @@ class ReceiptUiInstrumentedTest {
                 jsonPreview = ReceiptV2Json.encodePretty(receipt(true)),
             )
         }
+        composeRule.onNodeWithTag("json_preview").performScrollToNode(hasTestTag("share_json_button"))
         composeRule.onNodeWithTag("share_json_button").assertIsEnabled().performClick()
         composeRule.runOnIdle { assertEquals(1, shareClicks) }
     }
@@ -342,6 +500,43 @@ class ReceiptUiInstrumentedTest {
         composeRule.runOnIdle {
             assertEquals(1, requestClicks)
             assertEquals("candidate-1", appliedCandidateId)
+        }
+    }
+
+    @Test
+    fun aiPreflightRecaptureKeepsManualReviewAvailable() {
+        var recaptureClicks = 0
+        var continueClicks = 0
+        val state = ReceiptAppUiState(
+            screen = AppScreen.AI_CORRECTION,
+            receipt = receipt(false),
+            isAiPreflight = true,
+            aiReviewStatus = ReceiptAiReviewStatus.COMPLETED,
+            aiEvidenceAssessment = ReceiptEvidenceAssessment(ReceiptEvidenceVerdict.INSUFFICIENT_EVIDENCE),
+            preflightDecision = ReceiptPreflightDecision(
+                route = ReceiptPreflightRoute.RECAPTURE_RECOMMENDED,
+                reasons = listOf(
+                    ReceiptPreflightReason.AI_EVIDENCE_INSUFFICIENT,
+                    ReceiptPreflightReason.OCR_EVIDENCE_SPARSE,
+                ),
+            ),
+        )
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onScan = { recaptureClicks += 1 },
+                    onContinueAiPreflight = { continueClicks += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("ai_preflight_decision").assertIsDisplayed()
+        composeRule.onNodeWithTag("preflight_recapture_button").assertIsEnabled().performClick()
+        composeRule.onNodeWithTag("preflight_continue_button").assertIsEnabled().performClick()
+        composeRule.runOnIdle {
+            assertEquals(1, recaptureClicks)
+            assertEquals(1, continueClicks)
         }
     }
 
@@ -482,5 +677,11 @@ class ReceiptUiInstrumentedTest {
             ),
             payments = emptyList(),
         )
+    }
+
+    private companion object {
+        const val STORE_ID = "11111111-1111-4111-8111-111111111111"
+        const val CATALOG_PRODUCT_ID = "22222222-2222-4222-8222-222222222222"
+        const val STANDARD_PRODUCT_ID = "44444444-4444-4444-8444-444444444444"
     }
 }

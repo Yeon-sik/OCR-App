@@ -2,6 +2,7 @@ package com.pricetrace.receiptocr
 
 import android.app.Activity
 import android.app.Application
+import android.net.Uri
 import android.content.Intent
 import android.content.IntentSender
 import androidx.lifecycle.AndroidViewModel
@@ -11,6 +12,9 @@ import com.pricetrace.receiptocr.fitness.NutritionAuthOutcome
 import com.pricetrace.receiptocr.fitness.NutritionGatewayFailure
 import com.pricetrace.receiptocr.fitness.NutritionPublishOutcome
 import com.pricetrace.receiptocr.gemini.ReceiptCorrectionEvidenceCropper
+import com.pricetrace.receiptocr.gemini.NutritionCorrectionEvidenceCropper
+import com.pricetrace.receiptocr.pricetrace.PriceObservationReadOutcome
+import com.pricetrace.receiptocr.pricetrace.PriceTraceAuthOutcome
 import com.pricetrace.receiptscanner.capture.CaptureOutcome
 import com.pricetrace.receiptscanner.capture.ScannerLaunchPreparation
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionCandidate
@@ -19,6 +23,7 @@ import com.pricetrace.receiptscanner.correction.ReceiptCorrectionOutcome
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionPolicy
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionProvider
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionRequestFactory
+import com.pricetrace.receiptscanner.correction.ReceiptEvidenceAssessment
 import com.pricetrace.receiptscanner.domain.ReceiptLineType
 import com.pricetrace.receiptscanner.domain.ReceiptPage
 import com.pricetrace.receiptscanner.domain.ReceiptReviewProgress
@@ -44,13 +49,32 @@ import com.pricetrace.receiptscanner.ocr.OcrDocument
 import com.pricetrace.receiptscanner.ocr.OcrInputPage
 import com.pricetrace.receiptscanner.ocr.OcrOutcome
 import com.pricetrace.receiptscanner.nutrition.NutritionDraftStatus
+import com.pricetrace.receiptscanner.nutrition.NutritionCorrectionCandidate
+import com.pricetrace.receiptscanner.nutrition.NutritionCorrectionFailureReason
+import com.pricetrace.receiptscanner.nutrition.NutritionCorrectionOutcome
+import com.pricetrace.receiptscanner.nutrition.NutritionCorrectionPolicy
+import com.pricetrace.receiptscanner.nutrition.NutritionCorrectionRequestFactory
+import com.pricetrace.receiptscanner.nutrition.NutritionEvidenceAssessment
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelJson
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelValidator
 import com.pricetrace.receiptscanner.nutrition.NutritionUnit
+import com.pricetrace.receiptscanner.publisher.PriceObservationAppliedAction
+import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
+import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
+import com.pricetrace.receiptscanner.publisher.PriceObservationSource
+import com.pricetrace.receiptscanner.publisher.RestaurantReceiptSubmitItem
+import com.pricetrace.receiptscanner.publisher.RestaurantReceiptSubmitPayload
+import com.pricetrace.receiptscanner.publisher.RestaurantReceiptSubmitResult
+import com.pricetrace.receiptscanner.preflight.ReceiptAiReviewStatus
+import com.pricetrace.receiptscanner.preflight.ReceiptPreflightDecision
+import com.pricetrace.receiptscanner.preflight.ReceiptPreflightEvaluator
+import com.pricetrace.receiptscanner.preflight.ReceiptPreflightRoute
 import com.pricetrace.receiptscanner.review.ReceiptReviewController
 import com.pricetrace.receiptscanner.review.toFieldCorrection
+import com.pricetrace.receiptscanner.storage.PriceObservationQueueEntry
+import com.pricetrace.receiptscanner.storage.PriceObservationQueueStatus
 import com.pricetrace.receiptscanner.storage.ReceiptSession
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
 import kotlinx.coroutines.CancellationException
@@ -71,7 +95,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.math.BigDecimal
+import java.math.RoundingMode
+import java.time.LocalDate
 import java.time.OffsetDateTime
+
+private fun Long.toIntExact(label: String): Int = Math.toIntExact(this).also {
+    require(it >= 0) { "$label must be non-negative" }
+}
 
 enum class AppScreen {
     SESSION_LIST,
@@ -83,6 +114,8 @@ enum class AppScreen {
     AI_CORRECTION,
     RECONCILIATION,
     JSON_PREVIEW,
+    PRICE_OBSERVATION_SUBMIT,
+    RESTAURANT_RECEIPT_SUBMIT,
     NUTRITION_REVIEW,
     EVALUATION,
 }
@@ -97,6 +130,7 @@ data class ReceiptAppUiState(
     val isExporting: Boolean = false,
     val isNutritionSigningIn: Boolean = false,
     val isNutritionPublishing: Boolean = false,
+    val isPriceTraceSigningIn: Boolean = false,
     val message: String? = null,
     val possibleDuplicatePageIds: List<String> = emptyList(),
     val currentDocumentId: String? = null,
@@ -108,6 +142,11 @@ data class ReceiptAppUiState(
     val correctionProvider: ReceiptCorrectionProvider? = null,
     val aiCorrectionCandidates: List<ReceiptCorrectionCandidate> = emptyList(),
     val rejectedAiCorrectionCount: Int = 0,
+    val isAiPreflight: Boolean = false,
+    val aiReviewStatus: ReceiptAiReviewStatus = ReceiptAiReviewStatus.NOT_REQUESTED,
+    val aiEvidenceAssessment: ReceiptEvidenceAssessment? = null,
+    val aiImageEvidenceCoverageComplete: Boolean = false,
+    val preflightDecision: ReceiptPreflightDecision? = null,
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
     val showOnlyAttentionItems: Boolean = false,
@@ -123,10 +162,38 @@ data class ReceiptAppUiState(
     val accuracySummary: ReviewAccuracySummary? = null,
     val isBuildingAccuracyReport: Boolean = false,
     val nutritionDraft: NutritionLabelDraft? = null,
+    val nutritionAiProvider: ReceiptCorrectionProvider? = null,
+    val nutritionAiCandidates: List<NutritionCorrectionCandidate> = emptyList(),
+    val nutritionAiRejectedCount: Int = 0,
+    val isRequestingNutritionAiCorrections: Boolean = false,
+    val nutritionAiAssessment: NutritionEvidenceAssessment? = null,
     val nutritionValidationErrors: List<String> = emptyList(),
     val nutritionSupabaseUrl: String = "",
     val isNutritionPublishableKeyConfigured: Boolean = false,
     val nutritionSignedInEmail: String? = null,
+    val priceTraceSupabaseUrl: String = "",
+    val isPriceTracePublishableKeyConfigured: Boolean = false,
+    val priceTraceSignedInEmail: String? = null,
+    val priceObservationSources: List<PriceObservationSource> = emptyList(),
+    val priceObservationProducts: List<PriceObservationProduct> = emptyList(),
+    val priceObservationQuery: String = "",
+    val priceObservationSelectedStoreId: String? = null,
+    val priceObservationSelectedCatalogProductId: String? = null,
+    val priceObservationSelectedLineItemId: String? = null,
+    val priceObservationObservedOn: String = "",
+    val priceObservationUnitPriceKrw: String = "",
+    val priceObservationQueueId: String? = null,
+    val priceObservationQueueStatus: PriceObservationQueueStatus? = null,
+    val priceObservationAppliedAction: PriceObservationAppliedAction? = null,
+    val priceObservationLastError: String? = null,
+    val isLoadingPriceObservationSources: Boolean = false,
+    val isLoadingPriceObservationProducts: Boolean = false,
+    val isSubmittingPriceObservation: Boolean = false,
+    val isSubmittingRestaurantReceipt: Boolean = false,
+    val restaurantReceiptId: String? = null,
+    val restaurantReceiptReplayed: Boolean? = null,
+    val restaurantReceiptItemCount: Int? = null,
+    val restaurantReceiptLastError: String? = null,
 )
 
 sealed interface ReceiptUiEvent {
@@ -148,8 +215,12 @@ class ReceiptAppViewModel(
     private val nutritionParser = container.nutritionParser
     private val exportService = container.exportService
     private val publisher = container.publisher
+    private val priceObservationQueue = container.priceObservationQueue
+    private val priceObservationGateway = container.priceObservationGateway
+    private val priceObservationProcessor = container.priceObservationProcessor
     private val geminiApiKeyStore = container.geminiApiKeyStore
     private val correctionSuggester = container.correctionSuggester
+    private val nutritionCorrectionSuggester = container.nutritionCorrectionSuggester
     private val nutritionSupabaseStore = container.nutritionSupabaseStore
     private val nutritionGateway = container.nutritionGateway
 
@@ -174,6 +245,7 @@ class ReceiptAppViewModel(
     private val persistenceMutex = Mutex()
     private val persistedEditIds = mutableSetOf<String>()
     private var reviewController: ReceiptReviewController? = null
+    private var preflightPages: List<ReceiptPage> = emptyList()
     private var nutritionPersistenceJob: Job? = null
     private var pendingDocumentId: String?
         get() = savedStateHandle[PENDING_DOCUMENT_ID]
@@ -184,6 +256,7 @@ class ReceiptAppViewModel(
 
     init {
         refreshNutritionConnectionState()
+        refreshPriceTraceConnectionState()
         autoSignInFromBuildEnvironment()
     }
 
@@ -285,12 +358,84 @@ class ReceiptAppViewModel(
         }
     }
 
+    fun consumeSelectedImages(
+        uris: List<Uri>,
+        appendToCurrent: Boolean = false,
+    ) {
+        if (uris.isEmpty()) return
+        val state = mutableUiState.value
+        if (state.isPreparingScanner || state.isImportingPages || state.isProcessingOcr) return
+        viewModelScope.launch {
+            mutableUiState.value = state.copy(
+                isImportingPages = true,
+                message = null,
+            )
+            val existingDocumentId = state.currentDocumentId.takeIf { appendToCurrent }
+            var documentId: String? = existingDocumentId
+            try {
+                val resolvedDocumentId = existingDocumentId ?: StableIds.newOcrDocumentId().also { newId ->
+                    repository.createSession(newId, state.selectedWorkflow)
+                }
+                documentId = resolvedDocumentId
+                when (val outcome = captureProvider.importImageUris(resolvedDocumentId, uris)) {
+                    is CaptureOutcome.Success -> {
+                        val workflow = repository.getSession(resolvedDocumentId)?.workflowType
+                            ?: state.selectedWorkflow
+                        selectedDocumentId.value = resolvedDocumentId
+                        mutableUiState.value = homeState(
+                            workflow = workflow,
+                            screen = AppScreen.IMAGE_CONFIRM,
+                            currentDocumentId = resolvedDocumentId,
+                            message = "${outcome.pages.size}개 기존 이미지를 앱 전용 저장소에 보존했습니다.",
+                            possibleDuplicatePageIds = outcome.possibleDuplicatePageIds,
+                        )
+                    }
+                    is CaptureOutcome.Failure -> {
+                        if (existingDocumentId == null) {
+                            repository.deleteSession(resolvedDocumentId)
+                            selectedDocumentId.value = null
+                            mutableUiState.value = homeState(
+                                workflow = state.selectedWorkflow,
+                                message = captureFailureMessage(outcome.reason.wireValue, outcome.detail),
+                            )
+                        } else {
+                            mutableUiState.value = mutableUiState.value.copy(
+                                screen = AppScreen.IMAGE_CONFIRM,
+                                isImportingPages = false,
+                                message = captureFailureMessage(outcome.reason.wireValue, outcome.detail),
+                            )
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (existingDocumentId == null && documentId != null) {
+                    runCatching { repository.deleteSession(documentId) }
+                    selectedDocumentId.value = null
+                }
+                mutableUiState.value = if (existingDocumentId == null) {
+                    homeState(
+                        workflow = state.selectedWorkflow,
+                        message = "선택한 이미지 저장에 실패했습니다. 다시 시도하세요.",
+                    )
+                } else {
+                    mutableUiState.value.copy(
+                        screen = AppScreen.IMAGE_CONFIRM,
+                        isImportingPages = false,
+                        message = "선택한 이미지 저장에 실패했습니다. 기존 세션은 보존했습니다.",
+                    )
+                }
+            }
+        }
+    }
     fun selectSession(documentId: String) {
         nutritionPersistenceJob?.cancel()
         viewModelScope.launch {
             selectedDocumentId.value = documentId
             val session = repository.getSession(documentId)
             val pages = repository.getPages(documentId)
+            preflightPages = pages
             if (session == null || pages.isEmpty()) {
                 mutableUiState.value = homeState(
                     workflow = session?.workflowType ?: mutableUiState.value.selectedWorkflow,
@@ -362,14 +507,34 @@ class ReceiptAppViewModel(
                 "이 세션은 ${storedParserVersion ?: "기록되지 않은 이전 파서"} 결과입니다. " +
                     "기존 검수값은 보존했습니다. 새 규칙을 적용하려면 이미지 확인에서 OCR을 다시 시작하세요."
             }
-            mutableUiState.value = stateFromReview(
-                screen = AppScreen.FIELD_REVIEW,
+            val shouldRunPreflight = restoredOcr != null &&
+                edits.isEmpty() &&
+                receipt.document.source.transcriptionStatus != TranscriptionStatus.USER_VERIFIED
+            val aiStatus = if (correctionSuggester.provider.isAvailable) {
+                ReceiptAiReviewStatus.NOT_REQUESTED
+            } else {
+                ReceiptAiReviewStatus.UNAVAILABLE
+            }
+            val restoredState = stateFromReview(
+                screen = if (shouldRunPreflight) AppScreen.AI_CORRECTION else AppScreen.FIELD_REVIEW,
                 ocrDocument = restoredOcr,
                 message = restoreMessage,
                 reviewedAt = session.reviewedAt.takeIf {
                     receipt.document.source.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
                 },
             )
+            mutableUiState.value = if (shouldRunPreflight) {
+                restoredState.copy(
+                    isAiPreflight = true,
+                    aiReviewStatus = aiStatus,
+                    aiEvidenceAssessment = null,
+                    aiImageEvidenceCoverageComplete = false,
+                    preflightDecision = evaluatePreflight(receipt, requireNotNull(restoredOcr), aiStatus),
+                    message = "$restoreMessage 필드 검수 전에 AI 사전검토를 진행할 수 있습니다.",
+                )
+            } else {
+                restoredState.copy(isAiPreflight = false)
+            }
         }
     }
 
@@ -379,7 +544,10 @@ class ReceiptAppViewModel(
             val workflow = repository.getSession(documentId)?.workflowType
                 ?: mutableUiState.value.selectedWorkflow
             val result = repository.deleteSession(documentId)
-            if (selectedDocumentId.value == documentId) selectedDocumentId.value = null
+            if (selectedDocumentId.value == documentId) {
+                selectedDocumentId.value = null
+                preflightPages = emptyList()
+            }
             mutableUiState.value = homeState(
                 workflow = workflow,
                 message = if (result.isComplete) {
@@ -401,6 +569,7 @@ class ReceiptAppViewModel(
                 message = null,
             )
             val pages = repository.getPages(documentId)
+            preflightPages = pages
             val inputs = try {
                 pages.map { page -> OcrInputPage(page, fileStore.readBytes(page.storageKey)) }
             } catch (cancelled: CancellationException) {
@@ -441,6 +610,7 @@ class ReceiptAppViewModel(
         val state = mutableUiState.value
         if (state.isPreparingScanner || state.isImportingPages || state.isProcessingOcr) return
         selectedDocumentId.value = null
+        preflightPages = emptyList()
         nutritionPersistenceJob?.cancel()
         reviewController = null
         persistedEditIds.clear()
@@ -452,7 +622,7 @@ class ReceiptAppViewModel(
     }
 
     fun updateNutritionBrand(value: String) = updateNutritionDraft {
-        copy(brand = value.trim().takeIf(String::isNotEmpty), status = NutritionDraftStatus.PARSED, confirmedAt = null)
+        copy(brand = value.takeIf(String::isNotBlank), status = NutritionDraftStatus.PARSED, confirmedAt = null)
     }
 
     fun updateNutritionCategory(value: String) = updateNutritionDraft {
@@ -493,6 +663,137 @@ class ReceiptAppViewModel(
         updateNutritionDraft { withNutrient(field, amount) }
     }
 
+    fun requestNutritionAiCorrections() {
+        val state = mutableUiState.value
+        val draft = state.nutritionDraft ?: return
+        val ocrDocument = state.ocrDocument ?: run {
+            mutableUiState.value = state.copy(message = "보존된 성분표 OCR 근거가 있어야 AI 검토를 요청할 수 있습니다.")
+            return
+        }
+        if (state.isRequestingNutritionAiCorrections) return
+        val provider = nutritionCorrectionSuggester.provider
+        if (!provider.isAvailable) {
+            mutableUiState.value = state.copy(
+                nutritionAiProvider = provider,
+                message = provider.unavailableReason ?: "Gemini API 키를 먼저 저장하세요.",
+            )
+            return
+        }
+        val request = NutritionCorrectionRequestFactory.create(draft, ocrDocument)
+        if (request.targets.isEmpty() || request.evidenceLines.isEmpty()) {
+            mutableUiState.value = state.copy(
+                nutritionAiProvider = provider,
+                message = "AI에 보낼 수 있는 성분표 OCR 근거가 없습니다. 원본을 다시 촬영하세요.",
+            )
+            return
+        }
+        val requestedDocumentId = draft.documentId
+        viewModelScope.launch {
+            mutableUiState.value = mutableUiState.value.copy(
+                isRequestingNutritionAiCorrections = true,
+                nutritionAiProvider = provider,
+                nutritionAiCandidates = emptyList(),
+                nutritionAiRejectedCount = 0,
+                nutritionAiAssessment = null,
+                message = null,
+            )
+            val outcome = try {
+                val pages = repository.getPages(requestedDocumentId)
+                val requestWithImages = try {
+                    NutritionCorrectionEvidenceCropper.attachEvidenceImages(
+                        request = request,
+                        pages = pages,
+                        ocrDocument = ocrDocument,
+                        fileStore = fileStore,
+                    )
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    request
+                }
+                nutritionCorrectionSuggester.suggest(requestWithImages)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                NutritionCorrectionOutcome.Failure(NutritionCorrectionFailureReason.PROVIDER)
+            }
+            val latestState = mutableUiState.value
+            if (latestState.nutritionDraft?.documentId != requestedDocumentId ||
+                latestState.ocrDocument !== ocrDocument
+            ) {
+                return@launch
+            }
+            when (outcome) {
+                is NutritionCorrectionOutcome.Success -> {
+                    val currentDraft = requireNotNull(mutableUiState.value.nutritionDraft)
+                    val validated = NutritionCorrectionPolicy.validateBatch(
+                        draft = currentDraft,
+                        request = request,
+                        candidates = outcome.batch.candidates,
+                    )
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isRequestingNutritionAiCorrections = false,
+                        nutritionAiProvider = provider,
+                        nutritionAiCandidates = validated.accepted,
+                        nutritionAiRejectedCount = validated.rejected.size,
+                        nutritionAiAssessment = outcome.batch.assessment,
+                        message = if (validated.accepted.isEmpty()) {
+                            "성분표 AI 대조가 끝났습니다. 판정과 원본 근거를 확인하세요."
+                        } else {
+                            "성분표 AI 제안 ${validated.accepted.size}건을 받았습니다. 원본과 대조한 뒤 개별 적용하세요."
+                        },
+                    )
+                }
+                is NutritionCorrectionOutcome.Failure -> {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isRequestingNutritionAiCorrections = false,
+                        nutritionAiProvider = provider,
+                        message = nutritionAiCorrectionFailureMessage(outcome.reason),
+                    )
+                }
+            }
+        }
+    }
+
+    fun applyNutritionAiCorrection(candidateId: String) {
+        val state = mutableUiState.value
+        val draft = state.nutritionDraft ?: return
+        val ocrDocument = state.ocrDocument ?: return
+        val candidate = state.nutritionAiCandidates.firstOrNull { it.id == candidateId } ?: return
+        val request = NutritionCorrectionRequestFactory.create(draft, ocrDocument)
+        val rejection = NutritionCorrectionPolicy.rejectionReason(draft, request, candidate)
+        if (rejection != null) {
+            mutableUiState.value = state.copy(
+                nutritionAiCandidates = state.nutritionAiCandidates.filterNot { it.id == candidateId },
+                message = "초안이 바뀌어 이 성분표 AI 제안은 더 이상 적용할 수 없습니다.",
+            )
+            return
+        }
+        val updated = NutritionCorrectionPolicy.apply(draft, candidate)
+        if (updated == null) {
+            mutableUiState.value = state.copy(message = "성분표 AI 제안을 적용하지 못했습니다.")
+            return
+        }
+        mutableUiState.value = nutritionState(
+            draft = updated,
+            ocrDocument = ocrDocument,
+            message = "성분표 AI 제안을 초안에 적용했습니다. 원본 라벨을 직접 확인하세요.",
+        ).copy(
+            nutritionAiProvider = state.nutritionAiProvider,
+            nutritionAiCandidates = state.nutritionAiCandidates.filterNot { it.id == candidateId },
+            nutritionAiRejectedCount = state.nutritionAiRejectedCount,
+            nutritionAiAssessment = state.nutritionAiAssessment,
+        )
+        persistNutritionDraft(updated)
+    }
+
+    fun dismissNutritionAiCorrection(candidateId: String) {
+        val state = mutableUiState.value
+        mutableUiState.value = state.copy(
+            nutritionAiCandidates = state.nutritionAiCandidates.filterNot { it.id == candidateId },
+        )
+    }
+
     fun saveNutritionConnection(url: String, publishableKey: String) {
         val existing = nutritionSupabaseStore.read()
         val effectiveKey = publishableKey.trim().ifEmpty { existing.publishableKey }
@@ -521,6 +822,39 @@ class ReceiptAppViewModel(
                 is NutritionAuthOutcome.Failure -> mutableUiState.value = mutableUiState.value.copy(
                     isNutritionSigningIn = false,
                     message = nutritionFailureMessage(outcome.reason),
+                )
+            }
+        }
+    }
+
+    fun savePriceTraceConnection(url: String, publishableKey: String) {
+        val existing = container.priceTraceSupabaseStore.read()
+        val effectiveKey = publishableKey.trim().ifEmpty { existing.publishableKey }
+        container.priceTraceSupabaseStore.saveConnection(url, effectiveKey)
+            .onSuccess {
+                refreshPriceTraceConnectionState(
+                    message = "PriceTrace connection saved. Nutrition Supabase settings and session remain separate.",
+                )
+            }
+            .onFailure { error ->
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = error.message ?: "PriceTrace connection could not be saved.",
+                )
+            }
+    }
+
+    fun signInPriceTrace(email: String, password: String) {
+        val state = mutableUiState.value
+        if (state.isPriceTraceSigningIn || state.isSubmittingPriceObservation) return
+        viewModelScope.launch {
+            mutableUiState.value = mutableUiState.value.copy(isPriceTraceSigningIn = true, message = null)
+            when (val outcome = priceObservationGateway.signIn(email, password)) {
+                is PriceTraceAuthOutcome.Success -> refreshPriceTraceConnectionState(
+                    message = "${outcome.email} is signed in to PriceTrace.",
+                )
+                is PriceTraceAuthOutcome.Failure -> mutableUiState.value = mutableUiState.value.copy(
+                    isPriceTraceSigningIn = false,
+                    message = priceObservationFailureMessage(outcome.kind),
                 )
             }
         }
@@ -662,14 +996,51 @@ class ReceiptAppViewModel(
         mutableUiState.value = state.copy(
             screen = AppScreen.AI_CORRECTION,
             correctionProvider = correctionSuggester.provider,
+            isAiPreflight = false,
             message = null,
+        )
+    }
+
+    fun continueFromAiPreflight() {
+        val state = mutableUiState.value
+        if (!state.isAiPreflight || state.receipt == null) return
+        mutableUiState.value = state.copy(
+            screen = AppScreen.FIELD_REVIEW,
+            isAiPreflight = false,
+            message = when (state.preflightDecision?.route) {
+                ReceiptPreflightRoute.READY_FOR_USER_VERIFICATION ->
+                    "AI 사전검토와 계산 검사를 통과했습니다. 원본과 대조해 최종 검증하세요."
+                ReceiptPreflightRoute.RECAPTURE_RECOMMENDED ->
+                    "재촬영 권장 상태를 건너뛰었습니다. OCR 근거가 약하므로 모든 필드를 직접 확인하세요."
+                else -> "AI 사전검토 결과를 반영했습니다. 원본과 대조해 수동 검수를 계속하세요."
+            },
         )
     }
 
     fun saveGeminiApiKey(rawApiKey: String) {
         val saved = geminiApiKeyStore.save(rawApiKey) && geminiApiKeyStore.isConfigured()
-        mutableUiState.value = mutableUiState.value.copy(
-            correctionProvider = correctionSuggester.provider,
+        val state = mutableUiState.value
+        val provider = correctionSuggester.provider
+        val aiStatus = if (provider.isAvailable) {
+            ReceiptAiReviewStatus.NOT_REQUESTED
+        } else {
+            ReceiptAiReviewStatus.UNAVAILABLE
+        }
+        mutableUiState.value = state.copy(
+            correctionProvider = provider,
+            nutritionAiProvider = nutritionCorrectionSuggester.provider,
+            aiReviewStatus = if (state.isAiPreflight) aiStatus else state.aiReviewStatus,
+            aiEvidenceAssessment = if (state.isAiPreflight) null else state.aiEvidenceAssessment,
+            aiImageEvidenceCoverageComplete = if (state.isAiPreflight) {
+                false
+            } else {
+                state.aiImageEvidenceCoverageComplete
+            },
+            preflightDecision = if (state.receipt != null && state.ocrDocument != null) {
+                state.preflightDecisionIfNeeded(state.receipt, state.ocrDocument, aiStatus)
+            } else {
+                state.preflightDecision
+            },
             message = if (saved) {
                 "Gemini API 키를 이 기기에 암호화 저장했습니다."
             } else {
@@ -680,10 +1051,36 @@ class ReceiptAppViewModel(
 
     fun clearGeminiApiKey() {
         val cleared = geminiApiKeyStore.clear()
-        mutableUiState.value = mutableUiState.value.copy(
-            correctionProvider = correctionSuggester.provider,
+        val state = mutableUiState.value
+        val provider = correctionSuggester.provider
+        mutableUiState.value = state.copy(
+            correctionProvider = provider,
+            nutritionAiProvider = nutritionCorrectionSuggester.provider,
             aiCorrectionCandidates = emptyList(),
+            nutritionAiCandidates = emptyList(),
+            nutritionAiRejectedCount = 0,
+            nutritionAiAssessment = null,
             rejectedAiCorrectionCount = 0,
+            aiReviewStatus = if (state.isAiPreflight) {
+                ReceiptAiReviewStatus.UNAVAILABLE
+            } else {
+                state.aiReviewStatus
+            },
+            aiEvidenceAssessment = if (state.isAiPreflight) null else state.aiEvidenceAssessment,
+            aiImageEvidenceCoverageComplete = if (state.isAiPreflight) {
+                false
+            } else {
+                state.aiImageEvidenceCoverageComplete
+            },
+            preflightDecision = if (state.receipt != null && state.ocrDocument != null) {
+                state.preflightDecisionIfNeeded(
+                    state.receipt,
+                    state.ocrDocument,
+                    ReceiptAiReviewStatus.UNAVAILABLE,
+                )
+            } else {
+                state.preflightDecision
+            },
             message = if (cleared) {
                 "암호화 저장된 Gemini API 키를 삭제했습니다. 빌드 기본 키가 있으면 계속 사용합니다."
             } else {
@@ -699,6 +1096,12 @@ class ReceiptAppViewModel(
         if (state.isRequestingAiCorrections) return
         if (!correctionSuggester.provider.isAvailable) {
             mutableUiState.value = state.copy(
+                aiReviewStatus = ReceiptAiReviewStatus.UNAVAILABLE,
+                preflightDecision = state.preflightDecisionIfNeeded(
+                    receipt = receipt,
+                    ocrDocument = ocrDocument,
+                    aiStatus = ReceiptAiReviewStatus.UNAVAILABLE,
+                ),
                 message = correctionSuggester.provider.unavailableReason
                     ?: "Gemini 교정 제안기가 구성되지 않았습니다.",
             )
@@ -711,16 +1114,32 @@ class ReceiptAppViewModel(
                 isRequestingAiCorrections = true,
                 aiCorrectionCandidates = emptyList(),
                 rejectedAiCorrectionCount = 0,
+                aiReviewStatus = ReceiptAiReviewStatus.RUNNING,
+                aiEvidenceAssessment = null,
+                aiImageEvidenceCoverageComplete = false,
+                preflightDecision = state.preflightDecisionIfNeeded(
+                    receipt = receipt,
+                    ocrDocument = ocrDocument,
+                    aiStatus = ReceiptAiReviewStatus.RUNNING,
+                ),
                 message = null,
             )
             val baseRequest = ReceiptCorrectionRequestFactory.create(receipt, ocrDocument)
             if (baseRequest.targets.isEmpty()) {
-                mutableUiState.value = mutableUiState.value.copy(
+                val current = mutableUiState.value
+                mutableUiState.value = current.copy(
                     isRequestingAiCorrections = false,
-                    message = "Gemini에 보낼 수 있는 기존 OCR 상품 행이 없습니다.",
+                    aiReviewStatus = ReceiptAiReviewStatus.FAILED,
+                    preflightDecision = current.preflightDecisionIfNeeded(
+                        receipt = receipt,
+                        ocrDocument = ocrDocument,
+                        aiStatus = ReceiptAiReviewStatus.FAILED,
+                    ),
+                    message = "Gemini에 보낼 수 있는 OCR 상품행 또는 판매처 근거가 없습니다.",
                 )
                 return@launch
             }
+            var imageEvidenceCoverageComplete = false
             val outcome = try {
                 val pages = repository.getPages(requestedDocumentId)
                 val request = try {
@@ -735,6 +1154,14 @@ class ReceiptAppViewModel(
                 } catch (_: Exception) {
                     baseRequest
                 }
+                val expectedSourceLineIds = request.targets
+                    .flatMap { target -> target.sourceLineIds }
+                    .toSet()
+                val attachedSourceLineIds = request.evidenceImages
+                    .flatMap { image -> image.sourceLineIds }
+                    .toSet()
+                imageEvidenceCoverageComplete = expectedSourceLineIds.isNotEmpty() &&
+                    attachedSourceLineIds.containsAll(expectedSourceLineIds)
                 correctionSuggester.suggest(request)
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -756,20 +1183,45 @@ class ReceiptAppViewModel(
                         ocrDocument,
                         outcome.batch.candidates,
                     )
-                    mutableUiState.value = mutableUiState.value.copy(
+                    val current = mutableUiState.value
+                    mutableUiState.value = current.copy(
                         isRequestingAiCorrections = false,
                         aiCorrectionCandidates = validated.accepted,
                         rejectedAiCorrectionCount = validated.rejected.size,
+                        aiReviewStatus = ReceiptAiReviewStatus.COMPLETED,
+                        aiEvidenceAssessment = outcome.batch.assessment,
+                        aiImageEvidenceCoverageComplete = imageEvidenceCoverageComplete,
+                        preflightDecision = current.preflightDecisionIfNeeded(
+                            receipt = currentReceipt,
+                            ocrDocument = ocrDocument,
+                            aiStatus = ReceiptAiReviewStatus.COMPLETED,
+                            assessment = outcome.batch.assessment,
+                            aiImageEvidenceCoverageComplete = imageEvidenceCoverageComplete,
+                            acceptedCandidateCount = validated.accepted.size,
+                            rejectedCandidateCount = validated.rejected.size,
+                        ),
                         message = if (validated.accepted.isEmpty()) {
-                            "근거·산술 검사를 통과한 Gemini 교정 제안이 없습니다."
+                            "AI 사전검토가 끝났습니다. 아래 판정과 원본 근거를 확인하세요."
                         } else {
                             "Gemini 제안 ${validated.accepted.size}건을 받았습니다. 원본과 대조한 뒤 개별 적용하세요."
                         },
                     )
                 }
                 is ReceiptCorrectionOutcome.Failure -> {
-                    mutableUiState.value = mutableUiState.value.copy(
+                    val current = mutableUiState.value
+                    val aiStatus = if (outcome.reason == ReceiptCorrectionFailureReason.NOT_CONFIGURED) {
+                        ReceiptAiReviewStatus.UNAVAILABLE
+                    } else {
+                        ReceiptAiReviewStatus.FAILED
+                    }
+                    mutableUiState.value = current.copy(
                         isRequestingAiCorrections = false,
+                        aiReviewStatus = aiStatus,
+                        preflightDecision = current.preflightDecisionIfNeeded(
+                            receipt = reviewController?.state?.value?.receipt ?: receipt,
+                            ocrDocument = ocrDocument,
+                            aiStatus = aiStatus,
+                        ),
                         message = aiCorrectionFailureMessage(outcome.reason),
                     )
                 }
@@ -798,12 +1250,14 @@ class ReceiptAppViewModel(
             aiCorrectionCandidates = state.aiCorrectionCandidates.filterNot { it.id == candidateId },
         )
         refreshAfterEdit("Gemini 제안을 초안에 적용했습니다. 원본 이미지를 직접 확인하세요.")
+        refreshPreflightDecision()
     }
 
     fun dismissAiCorrection(candidateId: String) {
         mutableUiState.value = mutableUiState.value.copy(
             aiCorrectionCandidates = mutableUiState.value.aiCorrectionCandidates.filterNot { it.id == candidateId },
         )
+        refreshPreflightDecision()
     }
 
     /** Adds a row the reviewer read on the paper receipt but OCR never produced. */
@@ -870,6 +1324,326 @@ class ReceiptAppViewModel(
     fun showAiCorrectionReview() = showAiCorrection()
     fun showReconciliation() = navigate(AppScreen.RECONCILIATION)
     fun showJsonPreview() = navigate(AppScreen.JSON_PREVIEW)
+    fun showPriceObservationSubmit() {
+        val state = mutableUiState.value
+        val receipt = state.receipt
+        if (receipt?.document?.source?.transcriptionStatus != TranscriptionStatus.USER_VERIFIED) {
+            mutableUiState.value = state.copy(
+                message = "Confirm the receipt as user_verified before submitting a PriceTrace observation.",
+            )
+            return
+        }
+        mutableUiState.value = state.copy(
+            screen = if (state.selectedWorkflow == OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT) {
+                AppScreen.RESTAURANT_RECEIPT_SUBMIT
+            } else {
+                AppScreen.PRICE_OBSERVATION_SUBMIT
+            },
+            priceObservationSources = emptyList(),
+            priceObservationProducts = emptyList(),
+            priceObservationQuery = "",
+            priceObservationSelectedStoreId = null,
+            priceObservationSelectedCatalogProductId = null,
+            priceObservationSelectedLineItemId = null,
+            priceObservationObservedOn = receipt.document.issuedOn.orEmpty(),
+            priceObservationUnitPriceKrw = "",
+            priceObservationQueueId = null,
+            priceObservationQueueStatus = null,
+            priceObservationAppliedAction = null,
+            priceObservationLastError = null,
+            isSubmittingRestaurantReceipt = false,
+            restaurantReceiptId = null,
+            restaurantReceiptReplayed = null,
+            restaurantReceiptItemCount = null,
+            restaurantReceiptLastError = null,
+            message = null,
+        )
+        if (state.selectedWorkflow != OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT) {
+            viewModelScope.launch { loadPriceObservationSources() }
+        }
+    }
+
+    fun updatePriceObservationQuery(value: String) {
+        mutableUiState.value = mutableUiState.value.copy(priceObservationQuery = value)
+    }
+
+    fun selectPriceObservationStore(storeId: String) {
+        if (mutableUiState.value.priceObservationSources.none { it.storeId == storeId }) return
+        mutableUiState.value = mutableUiState.value.copy(
+            priceObservationSelectedStoreId = storeId,
+            priceObservationQueueId = null,
+            priceObservationQueueStatus = null,
+            priceObservationLastError = null,
+        )
+    }
+
+    fun selectPriceObservationProduct(catalogProductId: String) {
+        if (mutableUiState.value.priceObservationProducts.none { it.catalogProductId == catalogProductId }) return
+        mutableUiState.value = mutableUiState.value.copy(
+            priceObservationSelectedCatalogProductId = catalogProductId,
+            priceObservationQueueId = null,
+            priceObservationQueueStatus = null,
+            priceObservationLastError = null,
+        )
+    }
+
+    fun selectPriceObservationLineItem(lineItemId: String) {
+        val item = mutableUiState.value.receipt?.lineItems?.firstOrNull { it.id == lineItemId } ?: return
+        mutableUiState.value = mutableUiState.value.copy(
+            priceObservationSelectedLineItemId = lineItemId,
+            priceObservationUnitPriceKrw = (item.unitPriceAmountMinor ?: item.netAmountMinor)?.toString().orEmpty(),
+            priceObservationQueueId = null,
+            priceObservationQueueStatus = null,
+            priceObservationLastError = null,
+        )
+    }
+
+    fun updatePriceObservationObservedOn(value: String) {
+        mutableUiState.value = mutableUiState.value.copy(
+            priceObservationObservedOn = value,
+            priceObservationQueueId = null,
+            priceObservationQueueStatus = null,
+        )
+    }
+
+    fun updatePriceObservationUnitPrice(value: String) {
+        mutableUiState.value = mutableUiState.value.copy(
+            priceObservationUnitPriceKrw = value,
+            priceObservationQueueId = null,
+            priceObservationQueueStatus = null,
+        )
+    }
+
+    fun searchPriceObservationProducts() {
+        if (mutableUiState.value.isLoadingPriceObservationProducts) return
+        viewModelScope.launch { loadPriceObservationProducts() }
+    }
+
+    private suspend fun loadPriceObservationSources() {
+        mutableUiState.value = mutableUiState.value.copy(isLoadingPriceObservationSources = true, message = null)
+        when (val outcome = priceObservationGateway.fetchSources()) {
+            is PriceObservationReadOutcome.Success -> mutableUiState.value = mutableUiState.value.copy(
+                isLoadingPriceObservationSources = false,
+                priceObservationSources = outcome.value,
+            )
+            is PriceObservationReadOutcome.Failure -> mutableUiState.value = mutableUiState.value.copy(
+                isLoadingPriceObservationSources = false,
+                message = priceObservationFailureMessage(outcome.kind),
+            )
+        }
+    }
+
+    private suspend fun loadPriceObservationProducts() {
+        val query = mutableUiState.value.priceObservationQuery.trim()
+        if (query.isBlank()) {
+            mutableUiState.value = mutableUiState.value.copy(
+                priceObservationProducts = emptyList(),
+                message = "Search for a product, then select one exact catalog product.",
+            )
+            return
+        }
+        mutableUiState.value = mutableUiState.value.copy(
+            isLoadingPriceObservationProducts = true,
+            priceObservationProducts = emptyList(),
+            message = null,
+        )
+        when (val outcome = priceObservationGateway.searchProducts(query)) {
+            is PriceObservationReadOutcome.Success -> mutableUiState.value = mutableUiState.value.copy(
+                isLoadingPriceObservationProducts = false,
+                priceObservationProducts = outcome.value,
+            )
+            is PriceObservationReadOutcome.Failure -> mutableUiState.value = mutableUiState.value.copy(
+                isLoadingPriceObservationProducts = false,
+                message = priceObservationFailureMessage(outcome.kind),
+            )
+        }
+    }
+
+    fun submitPriceObservation() {
+        val state = mutableUiState.value
+        val receipt = state.receipt
+        if (state.isSubmittingPriceObservation) return
+        if (receipt?.document?.source?.transcriptionStatus != TranscriptionStatus.USER_VERIFIED) {
+            mutableUiState.value = state.copy(message = "Only a user_verified receipt can submit an observation.")
+            return
+        }
+        if (state.priceTraceSignedInEmail == null) {
+            mutableUiState.value = state.copy(message = "Sign in to the separate PriceTrace Supabase session first.")
+            return
+        }
+        val storeId = state.priceObservationSelectedStoreId
+        val catalogProductId = state.priceObservationSelectedCatalogProductId
+        val lineItemId = state.priceObservationSelectedLineItemId
+        val observedOn = runCatching { LocalDate.parse(state.priceObservationObservedOn.trim()).toString() }.getOrNull()
+        val unitPrice = state.priceObservationUnitPriceKrw.trim().replace(",", "").toIntOrNull()
+        val hasApprovedStore = storeId != null && state.priceObservationSources.any { it.storeId == storeId }
+        val hasExactCatalogProduct = catalogProductId != null &&
+            state.priceObservationProducts.any { it.catalogProductId == catalogProductId }
+        val hasReceiptLine = lineItemId != null && receipt.lineItems.any { it.id == lineItemId }
+        if (!hasApprovedStore || !hasExactCatalogProduct || !hasReceiptLine || observedOn == null ||
+            unitPrice == null || unitPrice < 0
+        ) {
+            mutableUiState.value = state.copy(
+                message = "Select an approved store, an exact catalog product, a receipt line, a valid date, and a non-negative KRW price.",
+            )
+            return
+        }
+        val localDocumentId = receipt.document.id
+        viewModelScope.launch {
+            mutableUiState.value = mutableUiState.value.copy(isSubmittingPriceObservation = true, message = null)
+            try {
+                val currentEntry = mutableUiState.value.priceObservationQueueId
+                    ?.let { queueId -> priceObservationQueue.get(queueId) }
+                val persistedEntry = priceObservationQueue.latestForLine(localDocumentId, lineItemId)
+                val matchingEntry = listOfNotNull(currentEntry, persistedEntry)
+                    .distinctBy { it.queueId }
+                    .firstOrNull { entry ->
+                        entry.payload.storeId == storeId &&
+                            entry.payload.observedOn == observedOn &&
+                            entry.payload.catalogProductId == catalogProductId &&
+                            entry.payload.unitPriceKrw == unitPrice
+                    }
+                if (matchingEntry?.status == PriceObservationQueueStatus.SUCCEEDED) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isSubmittingPriceObservation = false,
+                        priceObservationQueueId = matchingEntry.queueId,
+                        priceObservationQueueStatus = matchingEntry.status,
+                        priceObservationAppliedAction = matchingEntry.appliedAction,
+                        priceObservationLastError = matchingEntry.lastError,
+                        message = priceObservationQueueMessage(matchingEntry),
+                    )
+                } else {
+                    val entry = matchingEntry?.takeIf { candidate ->
+                        candidate.status == PriceObservationQueueStatus.PENDING ||
+                            candidate.status == PriceObservationQueueStatus.RETRYABLE_FAILURE
+                    } ?: priceObservationQueue.enqueue(
+                        storeId = storeId,
+                        observedOn = observedOn,
+                        catalogProductId = catalogProductId,
+                        unitPriceKrw = unitPrice,
+                        localDocumentId = localDocumentId,
+                        localLineItemId = lineItemId,
+                    )
+                    val result = priceObservationProcessor.submit(entry.queueId)
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isSubmittingPriceObservation = false,
+                        priceObservationQueueId = result.queueId,
+                        priceObservationQueueStatus = result.status,
+                        priceObservationAppliedAction = result.appliedAction,
+                        priceObservationLastError = result.lastError,
+                        message = priceObservationQueueMessage(result),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    isSubmittingPriceObservation = false,
+                    message = "PriceTrace observation stayed local and needs review: ${error::class.java.simpleName}.",
+                )
+            }
+        }
+    }
+
+    fun submitRestaurantReceipt() {
+        val state = mutableUiState.value
+        val receipt = state.receipt
+        if (state.isSubmittingRestaurantReceipt) return
+        if (state.selectedWorkflow != OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT) {
+            mutableUiState.value = state.copy(message = "식당 영수증 워크플로에서만 식당 영수증을 제출할 수 있습니다.")
+            return
+        }
+        if (receipt?.document?.source?.transcriptionStatus != TranscriptionStatus.USER_VERIFIED) {
+            mutableUiState.value = state.copy(message = "사용자 검수 완료 후 식당 영수증을 제출할 수 있습니다.")
+            return
+        }
+        if (state.priceTraceSignedInEmail == null) {
+            mutableUiState.value = state.copy(message = "PriceTrace 연결 설정에서 먼저 로그인하세요.")
+            return
+        }
+        val payload = runCatching { restaurantPayload(receipt) }.getOrElse { error ->
+            mutableUiState.value = state.copy(
+                restaurantReceiptLastError = error.message,
+                message = error.message ?: "식당 영수증의 메뉴별 가격을 만들 수 없습니다.",
+            )
+            return
+        }
+        viewModelScope.launch {
+            mutableUiState.value = mutableUiState.value.copy(
+                isSubmittingRestaurantReceipt = true,
+                restaurantReceiptLastError = null,
+                message = null,
+            )
+            when (val result = priceObservationGateway.submit(payload)) {
+                is RestaurantReceiptSubmitResult.Success -> mutableUiState.value = mutableUiState.value.copy(
+                    isSubmittingRestaurantReceipt = false,
+                    restaurantReceiptId = result.response.receiptId,
+                    restaurantReceiptReplayed = result.response.replayed,
+                    restaurantReceiptItemCount = result.response.itemCount,
+                    message = if (result.response.replayed) {
+                        "이미 제출된 식당 영수증을 확인했습니다. 메뉴 ${result.response.itemCount}건입니다."
+                    } else {
+                        "식당 영수증을 PriceTrace에 저장했습니다. 메뉴 ${result.response.itemCount}건입니다."
+                    },
+                )
+                is RestaurantReceiptSubmitResult.Failure -> mutableUiState.value = mutableUiState.value.copy(
+                    isSubmittingRestaurantReceipt = false,
+                    restaurantReceiptLastError = result.message ?: result.kind.name,
+                    message = "식당 영수증 서버 제출 실패: ${result.message ?: result.kind.name}",
+                )
+            }
+        }
+    }
+
+    private fun restaurantPayload(receipt: ReceiptV2): RestaurantReceiptSubmitPayload {
+        val items = receipt.lineItems.mapNotNull { item ->
+            if (item.type in setOf(
+                    ReceiptLineType.DISCOUNT,
+                    ReceiptLineType.FEE,
+                    ReceiptLineType.TAX,
+                    ReceiptLineType.TIP,
+                    ReceiptLineType.REFUND,
+                    ReceiptLineType.ROUNDING,
+                )
+            ) return@mapNotNull null
+            val description = item.description?.trim().orEmpty()
+            val quantity = item.quantity?.value?.let { raw ->
+                raw.toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO }?.setScale(0, RoundingMode.UNNECESSARY)
+                    ?.intValueExact()
+            }
+            val total = item.netAmountMinor ?: item.grossAmountMinor
+            val unit = item.unitPriceAmountMinor ?: if (quantity != null && total != null) {
+                BigDecimal.valueOf(total).divide(BigDecimal.valueOf(quantity.toLong())).setScale(0, RoundingMode.UNNECESSARY)
+                    .longValueExact()
+            } else {
+                null
+            }
+            if (description.isBlank() || quantity == null || unit == null || total == null) return@mapNotNull null
+            RestaurantReceiptSubmitItem(
+                lineId = item.id,
+                description = description,
+                quantity = quantity,
+                unitPriceKrw = unit.toIntExact("unit price"),
+                totalPriceKrw = total.toIntExact("total price"),
+                lineType = item.type.wireValue,
+            )
+        }
+        require(items.isNotEmpty()) { "식당 영수증에서 메뉴명과 가격이 확인된 행이 없습니다." }
+        val observedOn = requireNotNull(receipt.document.issuedOn) { "방문 날짜를 확인하세요." }
+        val total = requireNotNull(receipt.totals.grandTotalAmountMinor) { "최종 결제 금액을 확인하세요." }
+        return RestaurantReceiptSubmitPayload(
+            idempotencyKey = StableIds.sha256("restaurant|${receipt.document.id}|${ReceiptV2Json.revisionHash(receipt)}"),
+            documentId = receipt.document.id,
+            restaurantName = requireNotNull(receipt.merchant.name?.trim()?.takeIf(String::isNotBlank)) {
+                "식당 이름을 확인하세요."
+            },
+            branchName = receipt.merchant.branchName?.trim()?.takeIf(String::isNotBlank),
+            observedOn = observedOn,
+            totalPriceKrw = total.toIntExact("receipt total"),
+            items = items,
+        )
+    }
+
     fun showEvaluation() {
         mutableUiState.value = mutableUiState.value.copy(screen = AppScreen.EVALUATION, message = null)
         buildAccuracyReport()
@@ -1000,9 +1774,11 @@ class ReceiptAppViewModel(
             AppScreen.OCR_PROGRESS -> return true
             AppScreen.FIELD_REVIEW -> AppScreen.IMAGE_CONFIRM
             AppScreen.ITEM_REVIEW -> AppScreen.FIELD_REVIEW
-            AppScreen.AI_CORRECTION -> AppScreen.ITEM_REVIEW
+            AppScreen.AI_CORRECTION -> if (state.isAiPreflight) AppScreen.IMAGE_CONFIRM else AppScreen.ITEM_REVIEW
             AppScreen.RECONCILIATION -> AppScreen.ITEM_REVIEW
             AppScreen.JSON_PREVIEW -> AppScreen.RECONCILIATION
+            AppScreen.PRICE_OBSERVATION_SUBMIT -> AppScreen.JSON_PREVIEW
+            AppScreen.RESTAURANT_RECEIPT_SUBMIT -> AppScreen.JSON_PREVIEW
             AppScreen.NUTRITION_REVIEW -> AppScreen.IMAGE_CONFIRM
             AppScreen.EVALUATION -> AppScreen.SESSION_LIST
         }
@@ -1075,10 +1851,35 @@ class ReceiptAppViewModel(
             aiCorrectionCandidates = emptyList(),
             rejectedAiCorrectionCount = 0,
         )
-        mutableUiState.value = stateFromReview(
-            screen = AppScreen.FIELD_REVIEW,
+        val aiStatus = if (correctionSuggester.provider.isAvailable) {
+            ReceiptAiReviewStatus.NOT_REQUESTED
+        } else {
+            ReceiptAiReviewStatus.UNAVAILABLE
+        }
+        val preflightDecision = evaluatePreflight(
+            receipt = receipt,
             ocrDocument = document,
-            message = "OCR 초안을 만들었습니다. 원본 이미지와 대조해 직접 검수하세요.",
+            aiStatus = aiStatus,
+        )
+        val reviewState = stateFromReview(
+            screen = AppScreen.AI_CORRECTION,
+            ocrDocument = document,
+            message = null,
+        )
+        mutableUiState.value = reviewState.copy(
+            isAiPreflight = true,
+            aiReviewStatus = aiStatus,
+            aiEvidenceAssessment = null,
+            aiImageEvidenceCoverageComplete = false,
+            preflightDecision = preflightDecision,
+            message = when (preflightDecision.route) {
+                ReceiptPreflightRoute.RECAPTURE_RECOMMENDED ->
+                    "OCR 근거가 너무 약합니다. 기존 세션을 보존한 채 새로 촬영하는 것을 권장합니다."
+                ReceiptPreflightRoute.REQUEST_AI_REVIEW ->
+                    "OCR 초안을 만들었습니다. 필드 검수 전에 전송 범위를 확인하고 AI 사전검토를 실행하세요."
+                else ->
+                    "AI를 사용할 수 없어 수동 검수로 진행할 수 있습니다."
+            },
         )
     }
 
@@ -1210,6 +2011,11 @@ class ReceiptAppViewModel(
             progress = null,
             diagnosis = null,
             nutritionDraft = draft,
+            nutritionAiProvider = nutritionCorrectionSuggester.provider,
+            nutritionAiCandidates = emptyList(),
+            nutritionAiRejectedCount = 0,
+            nutritionAiAssessment = null,
+            isRequestingNutritionAiCorrections = false,
             nutritionValidationErrors = NutritionLabelValidator.validate(draft).errors,
             ocrDocument = ocrDocument,
             message = message,
@@ -1224,6 +2030,7 @@ class ReceiptAppViewModel(
         possibleDuplicatePageIds: List<String> = emptyList(),
     ): ReceiptAppUiState {
         val config = nutritionSupabaseStore.read()
+        val priceTraceConfig = container.priceTraceSupabaseStore.read()
         return ReceiptAppUiState(
             screen = screen,
             selectedWorkflow = workflow,
@@ -1234,6 +2041,9 @@ class ReceiptAppViewModel(
             nutritionSupabaseUrl = config.url,
             isNutritionPublishableKeyConfigured = config.publishableKey.isNotBlank(),
             nutritionSignedInEmail = config.email.takeIf { config.isSignedIn },
+            priceTraceSupabaseUrl = priceTraceConfig.url,
+            isPriceTracePublishableKeyConfigured = priceTraceConfig.publishableKey.isNotBlank(),
+            priceTraceSignedInEmail = priceTraceConfig.email.takeIf { priceTraceConfig.isSignedIn },
         )
     }
 
@@ -1245,6 +2055,17 @@ class ReceiptAppViewModel(
             nutritionSupabaseUrl = config.url,
             isNutritionPublishableKeyConfigured = config.publishableKey.isNotBlank(),
             nutritionSignedInEmail = config.email.takeIf { config.isSignedIn },
+            message = message,
+        )
+    }
+
+    private fun refreshPriceTraceConnectionState(message: String? = mutableUiState.value.message) {
+        val config = container.priceTraceSupabaseStore.read()
+        mutableUiState.value = mutableUiState.value.copy(
+            isPriceTraceSigningIn = false,
+            priceTraceSupabaseUrl = config.url,
+            isPriceTracePublishableKeyConfigured = config.publishableKey.isNotBlank(),
+            priceTraceSignedInEmail = config.email.takeIf { config.isSignedIn },
             message = message,
         )
     }
@@ -1281,6 +2102,71 @@ class ReceiptAppViewModel(
         persistDraft()
     }
 
+    private fun evaluatePreflight(
+        receipt: ReceiptV2,
+        ocrDocument: OcrDocument,
+        aiStatus: ReceiptAiReviewStatus,
+        assessment: ReceiptEvidenceAssessment? = null,
+        aiImageEvidenceCoverageComplete: Boolean = false,
+        acceptedCandidateCount: Int = 0,
+        rejectedCandidateCount: Int = 0,
+    ): ReceiptPreflightDecision {
+        val validation = ReceiptValidator.validateForUserVerification(
+            receipt,
+            reviewController?.state?.value?.reconciliationReason,
+        )
+        return ReceiptPreflightEvaluator.evaluate(
+            pages = preflightPages,
+            ocrDocument = ocrDocument,
+            validation = validation,
+            aiStatus = aiStatus,
+            assessment = assessment,
+            aiImageEvidenceCoverageComplete = aiImageEvidenceCoverageComplete,
+            acceptedCandidateCount = acceptedCandidateCount,
+            rejectedCandidateCount = rejectedCandidateCount,
+        )
+    }
+
+    private fun ReceiptAppUiState.preflightDecisionIfNeeded(
+        receipt: ReceiptV2,
+        ocrDocument: OcrDocument,
+        aiStatus: ReceiptAiReviewStatus,
+        assessment: ReceiptEvidenceAssessment? = null,
+        aiImageEvidenceCoverageComplete: Boolean = false,
+        acceptedCandidateCount: Int = 0,
+        rejectedCandidateCount: Int = 0,
+    ): ReceiptPreflightDecision? = if (isAiPreflight) {
+        evaluatePreflight(
+            receipt = receipt,
+            ocrDocument = ocrDocument,
+            aiStatus = aiStatus,
+            assessment = assessment,
+            aiImageEvidenceCoverageComplete = aiImageEvidenceCoverageComplete,
+            acceptedCandidateCount = acceptedCandidateCount,
+            rejectedCandidateCount = rejectedCandidateCount,
+        )
+    } else {
+        preflightDecision
+    }
+
+    private fun refreshPreflightDecision() {
+        val state = mutableUiState.value
+        if (!state.isAiPreflight) return
+        val receipt = reviewController?.state?.value?.receipt ?: return
+        val ocrDocument = state.ocrDocument ?: return
+        mutableUiState.value = state.copy(
+            preflightDecision = evaluatePreflight(
+                receipt = receipt,
+                ocrDocument = ocrDocument,
+                aiStatus = state.aiReviewStatus,
+                assessment = state.aiEvidenceAssessment,
+                aiImageEvidenceCoverageComplete = state.aiImageEvidenceCoverageComplete,
+                acceptedCandidateCount = state.aiCorrectionCandidates.size,
+                rejectedCandidateCount = state.rejectedAiCorrectionCount,
+            ),
+        )
+    }
+
     private fun stateFromReview(
         screen: AppScreen,
         ocrDocument: OcrDocument?,
@@ -1295,7 +2181,7 @@ class ReceiptAppViewModel(
         )
         return current.copy(
             screen = screen,
-            selectedWorkflow = OcrWorkflowType.PRICE_TRACE_RECEIPT,
+            selectedWorkflow = current.selectedWorkflow,
             isPreparingScanner = false,
             isImportingPages = false,
             isProcessingOcr = false,
@@ -1509,10 +2395,11 @@ class ReceiptAppViewModel(
         ),
     )
 
-    private fun captureFailureMessage(reason: String): String = when (reason) {
-        "unsupported" -> "이 기기는 ML Kit 문서 스캐너를 지원하지 않습니다."
-        "model_download_required" -> "문서 스캐너 구성요소 다운로드가 필요합니다. 네트워크 연결 후 다시 시도하세요."
-        "user_cancelled" -> "스캔을 취소했습니다."
+    private fun captureFailureMessage(reason: String, detail: String? = null): String = when {
+        detail == "selected_image_unreadable" -> "선택한 이미지를 읽지 못했습니다. 다른 사진을 선택하세요."
+        reason == "unsupported" -> "이 기기는 ML Kit 문서 스캐너를 지원하지 않습니다."
+        reason == "model_download_required" -> "문서 스캐너 구성요소 다운로드가 필요합니다. 네트워크 연결 후 다시 시도하세요."
+        reason == "user_cancelled" -> "스캔을 취소했습니다."
         else -> "스캔 결과를 가져오지 못했습니다. 다시 시도하세요."
     }
 
@@ -1521,6 +2408,38 @@ class ReceiptAppViewModel(
         "image_decode_failed", "image_read_failed" -> "보존된 이미지를 읽지 못했습니다. 원본 페이지를 확인하세요."
         "parse_or_persist_failed" -> "OCR 결과를 초안으로 저장하지 못했습니다. 세션을 보존했으므로 다시 시도하세요."
         else -> "OCR 처리에 실패했습니다. 세션을 보존했으므로 다시 시도할 수 있습니다."
+    }
+
+    private fun priceObservationFailureMessage(kind: PriceObservationFailureKind): String = when (kind) {
+        PriceObservationFailureKind.NOT_CONFIGURED ->
+            "PriceTrace URL/key and an authenticated PriceTrace session are required."
+        PriceObservationFailureKind.AUTHENTICATION ->
+            "PriceTrace authentication failed or expired. Sign in again; this item was not retried automatically."
+        PriceObservationFailureKind.INVALID_SELECTION ->
+            "The selected store or catalog product is not an approved PriceTrace identity. Review the selection."
+        PriceObservationFailureKind.IDEMPOTENCY_MISMATCH ->
+            "The preserved idempotency key was rejected for a different request. This item needs review."
+        PriceObservationFailureKind.CONTRACT ->
+            "PriceTrace returned an unexpected contract response. This item needs review."
+        PriceObservationFailureKind.NETWORK ->
+            "The PriceTrace network request failed without a timeout. This item needs review; it was not retried automatically."
+        PriceObservationFailureKind.NETWORK_TIMEOUT ->
+            "PriceTrace timed out. The local queue is retryable and preserves the same opaque key."
+        PriceObservationFailureKind.SERVER ->
+            "PriceTrace returned a server error. The local queue is retryable."
+    }
+
+    private fun priceObservationQueueMessage(entry: PriceObservationQueueEntry): String {
+        val appliedAction = entry.appliedAction
+        return when {
+            entry.status == PriceObservationQueueStatus.SUCCEEDED && appliedAction != null ->
+                "PriceTrace observation succeeded: ${appliedAction.wireValue}."
+            entry.status == PriceObservationQueueStatus.RETRYABLE_FAILURE ->
+                "PriceTrace submission is retryable. The same local queue entry and idempotency key are preserved."
+            entry.status == PriceObservationQueueStatus.NEEDS_REVIEW ->
+                "PriceTrace submission needs review and was not retried automatically: ${entry.lastError.orEmpty()}"
+            else -> "PriceTrace observation remains pending locally."
+        }
     }
 
     private fun nutritionFailureMessage(reason: NutritionGatewayFailure): String = when (reason) {
@@ -1540,6 +2459,21 @@ class ReceiptAppViewModel(
             "Nutrition DB 서버가 요청을 처리하지 못했습니다. 잠시 후 다시 시도하세요."
     }
 
+    private fun nutritionAiCorrectionFailureMessage(reason: NutritionCorrectionFailureReason): String = when (reason) {
+        NutritionCorrectionFailureReason.NOT_CONFIGURED -> "Gemini API 키를 먼저 저장하세요."
+        NutritionCorrectionFailureReason.NO_ELIGIBLE_EVIDENCE ->
+            "Gemini에 보낼 수 있는 성분표 OCR 근거가 없습니다."
+        NutritionCorrectionFailureReason.AUTHENTICATION ->
+            "Gemini 인증이 실패했습니다. API 키와 권한을 확인하세요."
+        NutritionCorrectionFailureReason.RATE_LIMITED ->
+            "Gemini 요청 한도에 도달했습니다. 잠시 후 다시 시도하세요."
+        NutritionCorrectionFailureReason.NETWORK ->
+            "네트워크 문제로 성분표 AI 검토를 받지 못했습니다."
+        NutritionCorrectionFailureReason.PROVIDER ->
+            "Gemini 성분표 검토 요청이 실패했습니다. 원본 초안은 보존됩니다."
+        NutritionCorrectionFailureReason.INVALID_RESPONSE ->
+            "Gemini 응답이 성분표 교정 계약과 맞지 않아 폐기했습니다."
+    }
     private fun aiCorrectionFailureMessage(reason: ReceiptCorrectionFailureReason): String = when (reason) {
         ReceiptCorrectionFailureReason.NOT_CONFIGURED -> "Gemini API 키를 먼저 저장하세요."
         ReceiptCorrectionFailureReason.NO_ELIGIBLE_EVIDENCE -> "Gemini에 보낼 수 있는 OCR 상품 행 근거가 없습니다."

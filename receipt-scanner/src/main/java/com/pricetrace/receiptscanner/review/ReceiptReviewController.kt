@@ -185,42 +185,42 @@ class ReceiptReviewController(
         return true
     }
 
-    fun updateMerchantName(value: String?) = update(
+    fun updateMerchantName(value: String?) = updateEditable(
         fieldPath = "merchant.name",
         previous = mutableState.value.receipt.merchant.name,
-        next = value,
-    ) { receipt -> receipt.copy(merchant = receipt.merchant.copy(name = value.cleaned())) }
+        value = value,
+    ) { receipt, next -> receipt.copy(merchant = receipt.merchant.copy(name = next)) }
 
-    fun updateBranchName(value: String?) = update(
+    fun updateBranchName(value: String?) = updateEditable(
         fieldPath = "merchant.branch_name",
         previous = mutableState.value.receipt.merchant.branchName,
-        next = value,
-    ) { receipt -> receipt.copy(merchant = receipt.merchant.copy(branchName = value.cleaned())) }
+        value = value,
+    ) { receipt, next -> receipt.copy(merchant = receipt.merchant.copy(branchName = next)) }
 
-    fun updateBusinessRegistrationNumber(value: String?) = update(
+    fun updateBusinessRegistrationNumber(value: String?) = updateEditable(
         fieldPath = "merchant.business_registration_number",
         previous = mutableState.value.receipt.merchant.businessRegistrationNumber,
-        next = value,
-    ) { receipt -> receipt.copy(merchant = receipt.merchant.copy(businessRegistrationNumber = value.cleaned())) }
+        value = value,
+    ) { receipt, next -> receipt.copy(merchant = receipt.merchant.copy(businessRegistrationNumber = next)) }
 
-    fun updateAddress(value: String?) = update(
+    fun updateAddress(value: String?) = updateEditable(
         fieldPath = "merchant.address",
         previous = mutableState.value.receipt.merchant.address,
-        next = value,
-    ) { receipt -> receipt.copy(merchant = receipt.merchant.copy(address = value.cleaned())) }
+        value = value,
+    ) { receipt, next -> receipt.copy(merchant = receipt.merchant.copy(address = next)) }
 
-    fun updatePhone(value: String?) = update(
+    fun updatePhone(value: String?) = updateEditable(
         fieldPath = "merchant.phone",
         previous = mutableState.value.receipt.merchant.phone,
-        next = value,
-    ) { receipt -> receipt.copy(merchant = receipt.merchant.copy(phone = value.cleaned())) }
+        value = value,
+    ) { receipt, next -> receipt.copy(merchant = receipt.merchant.copy(phone = next)) }
 
-    fun updateOriginalDocumentId(value: String?) = update(
+    fun updateOriginalDocumentId(value: String?) = updateEditable(
         fieldPath = "document.source.original_document_id",
         previous = mutableState.value.receipt.document.source.originalDocumentId,
-        next = value,
-    ) { receipt ->
-        receipt.copy(document = receipt.document.copy(source = receipt.document.source.copy(originalDocumentId = value.cleaned())))
+        value = value,
+    ) { receipt, next ->
+        receipt.copy(document = receipt.document.copy(source = receipt.document.source.copy(originalDocumentId = next)))
     }
 
     fun updateIssuedOn(value: String?) = update(
@@ -314,8 +314,8 @@ class ReceiptReviewController(
         index = index,
         field = "method",
         previous = { it.method },
-        next = value.cleaned(),
-        transform = { payment -> payment.copy(method = value.cleaned()) },
+        next = value.editableText(),
+        transform = { payment -> payment.copy(method = value.editableText()) },
     )
 
     fun updatePaymentAmount(index: Int, value: String?): Boolean {
@@ -334,9 +334,9 @@ class ReceiptReviewController(
     fun updateLineDescription(lineId: String, value: String?): Boolean = updateLine(
         lineId = lineId,
         field = "description",
-        nextValue = value.cleaned(),
+        nextValue = value.editableText(),
         previous = { it.description },
-        transform = { item -> item.copy(description = value.cleaned(), confidence = ConfidenceLevel.USER_VERIFIED) },
+        transform = { item -> item.copy(description = value.editableText(), confidence = ConfidenceLevel.USER_VERIFIED) },
     )
 
     fun updateLineType(lineId: String, value: ReceiptLineType): Boolean = updateLine(
@@ -350,13 +350,13 @@ class ReceiptReviewController(
     fun updateMerchantSku(lineId: String, value: String?): Boolean = updateLine(
         lineId = lineId,
         field = "identifiers.merchant_sku",
-        nextValue = value.cleaned(),
+        nextValue = value.editableText(),
         previous = { item -> item.identifiers.firstOrNull { it.scheme == "merchant_sku" }?.value },
         transform = { item ->
             val retained = item.identifiers.filterNot { it.scheme == "merchant_sku" }
             item.copy(
                 identifiers = retained + listOfNotNull(
-                    value.cleaned()?.let { ReceiptIdentifier("merchant_sku", it) },
+                    value.editableText()?.let { ReceiptIdentifier("merchant_sku", it) },
                 ),
                 confidence = ConfidenceLevel.USER_VERIFIED,
             )
@@ -406,7 +406,7 @@ class ReceiptReviewController(
 
     fun setReconciliationReason(value: String?) {
         val current = mutableState.value
-        val next = value.cleaned()
+        val next = value.editableText()
         if (current.reconciliationReason == next) return
         commit(
             receipt = current.receipt,
@@ -423,6 +423,8 @@ class ReceiptReviewController(
      */
     fun applyCorrectionSuggestion(candidate: ReceiptCorrectionCandidate): Boolean {
         val current = mutableState.value
+        val merchantField = ReceiptCorrectionPolicy.parseMerchantFieldPath(candidate.fieldPath)
+        if (merchantField != null) return applyMerchantCorrection(current, candidate, merchantField)
         val (lineItemId, field) = ReceiptCorrectionPolicy.parseLineFieldPath(candidate.fieldPath) ?: return false
         if (ReceiptCorrectionPolicy.currentValue(current.receipt, candidate.fieldPath).cleaned() != candidate.oldValue.cleaned()) {
             return false
@@ -460,6 +462,41 @@ class ReceiptReviewController(
         val items = current.receipt.lineItems.toMutableList().apply { set(index, updated) }
         commit(
             receipt = current.receipt.copy(lineItems = items),
+            fieldPath = candidate.fieldPath,
+            previous = candidate.oldValue.cleaned(),
+            next = proposed,
+            provenanceJson = buildJsonObject {
+                put("user_modified", true)
+                put("ai_suggestion_accepted", true)
+                put("provider", candidate.providerId)
+                put("model", candidate.model)
+                put("prompt_version", candidate.promptVersion)
+                put("source_line_ids", JsonArray(candidate.sourceLineIds.map(::JsonPrimitive)))
+            }.toString(),
+        )
+        return true
+    }
+
+    private fun applyMerchantCorrection(
+        current: ReceiptReviewState,
+        candidate: ReceiptCorrectionCandidate,
+        field: String,
+    ): Boolean {
+        if (ReceiptCorrectionPolicy.currentValue(current.receipt, candidate.fieldPath).cleaned() != candidate.oldValue.cleaned()) {
+            return false
+        }
+        val proposed = candidate.proposedValue.cleaned() ?: return false
+        val updatedMerchant = when (field) {
+            "name" -> current.receipt.merchant.copy(name = proposed)
+            "branch_name" -> current.receipt.merchant.copy(branchName = proposed)
+            "business_registration_number" ->
+                current.receipt.merchant.copy(businessRegistrationNumber = proposed)
+            "address" -> current.receipt.merchant.copy(address = proposed)
+            "phone" -> current.receipt.merchant.copy(phone = proposed)
+            else -> return false
+        }
+        commit(
+            receipt = current.receipt.copy(merchant = updatedMerchant),
             fieldPath = candidate.fieldPath,
             previous = candidate.oldValue.cleaned(),
             next = proposed,
@@ -551,6 +588,22 @@ class ReceiptReviewController(
         return true
     }
 
+    private fun updateEditable(
+        fieldPath: String,
+        previous: String?,
+        value: String?,
+        transform: (ReceiptV2, String?) -> ReceiptV2,
+    ): Boolean {
+        val next = value.editableText()
+        commit(
+            receipt = transform(mutableState.value.receipt, next),
+            fieldPath = fieldPath,
+            previous = previous,
+            next = next,
+        )
+        return true
+    }
+
     private fun commit(
         receipt: ReceiptV2,
         fieldPath: String,
@@ -603,6 +656,9 @@ class ReceiptReviewController(
     }
 
     private fun String?.cleaned(): String? = this?.trim()?.takeIf(String::isNotEmpty)
+
+    /** Keep spaces while the reviewer is still typing a description. */
+    private fun String?.editableText(): String? = this?.takeIf(String::isNotBlank)
 
     private fun ReceiptV2.asDraftAfterEdit(): ReceiptV2 = copy(
         document = document.copy(

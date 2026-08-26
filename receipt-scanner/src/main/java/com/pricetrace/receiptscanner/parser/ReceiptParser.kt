@@ -4,6 +4,7 @@ import com.pricetrace.receiptscanner.domain.FieldProvenance
 import com.pricetrace.receiptscanner.domain.ParsedField
 import com.pricetrace.receiptscanner.domain.ParsedPayment
 import com.pricetrace.receiptscanner.domain.ParsedReceipt
+import com.pricetrace.receiptscanner.domain.RestaurantPlaceResolution
 import com.pricetrace.receiptscanner.ocr.OcrDocument
 import com.pricetrace.receiptscanner.ocr.OcrLine
 
@@ -86,7 +87,7 @@ class GenericReceiptParser(
             }
         }
 
-        return ParsedReceipt(
+        val parsedReceipt = ParsedReceipt(
             documentId = document.documentId,
             sourceImages = document.pages.sortedBy { it.pageIndex }.map { it.pageId },
             rawText = document.rawText,
@@ -119,6 +120,9 @@ class GenericReceiptParser(
             lineItems = lineItems,
             totals = receiptFields.totals,
             payments = payments,
+        )
+        return parsedReceipt.copy(
+            placeResolution = RestaurantPlaceResolution.fromParsedReceipt(parsedReceipt),
         )
     }
 

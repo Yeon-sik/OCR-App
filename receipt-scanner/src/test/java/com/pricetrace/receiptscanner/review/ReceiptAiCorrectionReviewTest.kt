@@ -28,6 +28,24 @@ class ReceiptAiCorrectionReviewTest {
     }
 
     @Test
+    fun `accepted AI merchant suggestion updates merchant and records provenance`() {
+        val controller = ReceiptReviewController(
+            SyntheticFixtures.verifiedCandidate(),
+            now = { "2026-08-11T10:00:00+09:00" },
+        )
+        val candidate = candidate(
+            oldValue = "가상마트",
+            proposedValue = "가상 마트",
+        ).copy(fieldPath = "merchant.name")
+
+        assertTrue(controller.applyCorrectionSuggestion(candidate))
+
+        val state = controller.state.value
+        assertEquals("가상 마트", state.receipt.merchant.name)
+        assertTrue(requireNotNull(state.edits.single().provenanceJson).contains("\"ai_suggestion_accepted\":true"))
+    }
+
+    @Test
     fun `stale AI suggestion cannot overwrite a later reviewer edit`() {
         val controller = ReceiptReviewController(SyntheticFixtures.verifiedCandidate())
         controller.updateLineDescription("line_fixture_001", "사용자 수정")

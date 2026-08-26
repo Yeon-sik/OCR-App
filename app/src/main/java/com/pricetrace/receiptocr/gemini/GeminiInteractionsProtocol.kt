@@ -2,6 +2,8 @@ package com.pricetrace.receiptocr.gemini
 
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionPrompt
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionRequest
+import com.pricetrace.receiptscanner.correction.ReceiptEvidenceVerdict
+import com.pricetrace.receiptscanner.correction.ReceiptFieldVerdict
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -107,6 +109,59 @@ internal object GeminiInteractionsProtocol {
             "properties",
             buildJsonObject {
                 put(
+                    "evidenceVerdict",
+                    buildJsonObject {
+                        put("type", "string")
+                        put("enum", JsonArray(ReceiptEvidenceVerdict.entries.map { JsonPrimitive(it.wireValue) }))
+                    },
+                )
+                put(
+                    "merchantVerdict",
+                    buildJsonObject {
+                        put("type", "string")
+                        put("enum", JsonArray(ReceiptEvidenceVerdict.entries.map { JsonPrimitive(it.wireValue) }))
+                    },
+                )
+                put(
+                    "fieldChecks",
+                    buildJsonObject {
+                        put("type", "array")
+                        put(
+                            "items",
+                            buildJsonObject {
+                                put("type", "object")
+                                put(
+                                    "properties",
+                                    buildJsonObject {
+                                        put("fieldPath", stringSchema())
+                                        put(
+                                            "verdict",
+                                            buildJsonObject {
+                                                put("type", "string")
+                                                put("enum", JsonArray(ReceiptFieldVerdict.entries.map { JsonPrimitive(it.wireValue) }))
+                                            },
+                                        )
+                                        put(
+                                            "sourceLineIds",
+                                            buildJsonObject {
+                                                put("type", "array")
+                                                put("items", stringSchema())
+                                            },
+                                        )
+                                        put("reason", stringSchema())
+                                    },
+                                )
+                                put(
+                                    "required",
+                                    JsonArray(
+                                        listOf("fieldPath", "verdict", "sourceLineIds", "reason").map(::JsonPrimitive),
+                                    ),
+                                )
+                            },
+                        )
+                    },
+                )
+                put(
                     "candidates",
                     buildJsonObject {
                         put("type", "array")
@@ -150,7 +205,10 @@ internal object GeminiInteractionsProtocol {
                 )
             },
         )
-        put("required", JsonArray(listOf(JsonPrimitive("candidates"))))
+        put(
+            "required",
+            JsonArray(listOf("evidenceVerdict", "merchantVerdict", "fieldChecks", "candidates").map(::JsonPrimitive)),
+        )
     }
 
     private fun stringSchema(): JsonObject = buildJsonObject { put("type", "string") }

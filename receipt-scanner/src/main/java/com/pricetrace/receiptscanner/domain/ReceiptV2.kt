@@ -10,6 +10,7 @@ data class ReceiptV2(
     val lineItems: List<ReceiptV2LineItem>,
     val totals: ReceiptV2Totals,
     val payments: List<ReceiptV2Payment>,
+    val placeResolution: RestaurantPlaceResolution = RestaurantPlaceResolution.unresolved(),
 ) {
     init {
         require(schemaVersion == SCHEMA_VERSION) { "Unsupported schema version: $schemaVersion" }
@@ -181,4 +182,5 @@ fun ParsedReceipt.toReceiptV2(
             sourceLineReferences = payment.sourceLineReferences,
         )
     },
+    placeResolution = placeResolution,
 )

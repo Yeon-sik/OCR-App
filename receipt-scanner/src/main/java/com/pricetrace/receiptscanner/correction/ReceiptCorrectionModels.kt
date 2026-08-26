@@ -21,6 +21,8 @@ data class ReceiptCorrectionTarget(
     val unitPriceAmountMinor: Long?,
     val netAmountMinor: Long?,
     val sourceLineIds: List<String>,
+    val fieldPath: String = "",
+    val currentValue: String? = null,
 )
 
 data class ReceiptCorrectionEvidenceLine(
@@ -56,8 +58,55 @@ data class ReceiptCorrectionCandidate(
     val promptVersion: String,
 )
 
+enum class ReceiptEvidenceVerdict(val wireValue: String) {
+    PLAUSIBLE("plausible"),
+    NEEDS_REVIEW("needs_review"),
+    INSUFFICIENT_EVIDENCE("insufficient_evidence"),
+    ;
+
+    companion object {
+        fun fromWireValue(value: String?): ReceiptEvidenceVerdict? = entries.firstOrNull {
+            it.wireValue == value
+        }
+    }
+}
+
+enum class ReceiptFieldVerdict(val wireValue: String) {
+    MATCHES_EVIDENCE("matches_evidence"),
+    NEEDS_REVIEW("needs_review"),
+    WRONG_FIELD_TYPE("wrong_field_type"),
+    INSUFFICIENT_EVIDENCE("insufficient_evidence"),
+    ;
+
+    companion object {
+        fun fromWireValue(value: String?): ReceiptFieldVerdict? = entries.firstOrNull {
+            it.wireValue == value
+        }
+    }
+}
+
+data class ReceiptFieldCheck(
+    val fieldPath: String,
+    val verdict: ReceiptFieldVerdict,
+    val sourceLineIds: List<String>,
+    val reason: String,
+)
+
+data class ReceiptEvidenceAssessment(
+    val verdict: ReceiptEvidenceVerdict,
+    val merchantVerdict: ReceiptEvidenceVerdict? = null,
+    val fieldChecks: List<ReceiptFieldCheck> = emptyList(),
+) {
+    val requiresFieldReview: Boolean
+        get() = merchantVerdict in setOf(
+            ReceiptEvidenceVerdict.NEEDS_REVIEW,
+            ReceiptEvidenceVerdict.INSUFFICIENT_EVIDENCE,
+        ) || fieldChecks.any { it.verdict != ReceiptFieldVerdict.MATCHES_EVIDENCE }
+}
+
 data class ReceiptCorrectionBatch(
     val candidates: List<ReceiptCorrectionCandidate>,
+    val assessment: ReceiptEvidenceAssessment,
     val providerId: String,
     val model: String,
     val promptVersion: String,
@@ -105,11 +154,28 @@ object ReceiptCorrectionRequestFactory {
     const val MAX_TARGETS = 12
 
     fun create(receipt: ReceiptV2, ocrDocument: OcrDocument): ReceiptCorrectionRequest {
-        val knownLines = ocrDocument.lines
+        val allLines = ocrDocument.lines
+        val knownLines = allLines
             .asSequence()
             .filterNot { SensitiveReceiptEvidenceFilter.isSensitive(it.text) }
             .associateBy { it.id }
-        val targets = receipt.lineItems
+        val merchantTargets = ReceiptMerchantFieldSemantics.FIELD_PATHS.map { fieldPath ->
+            ReceiptCorrectionTarget(
+                lineItemId = MERCHANT_TARGET_ID,
+                description = null,
+                quantity = null,
+                unitPriceAmountMinor = null,
+                netAmountMinor = null,
+                sourceLineIds = ReceiptMerchantFieldSemantics.sourceLineIds(
+                    fieldPath = fieldPath,
+                    currentValue = ReceiptMerchantFieldSemantics.currentValue(receipt, fieldPath),
+                    lines = allLines,
+                ),
+                fieldPath = fieldPath,
+                currentValue = ReceiptMerchantFieldSemantics.currentValue(receipt, fieldPath),
+            )
+        }
+        val lineTargets = receipt.lineItems
             .asSequence()
             .filterNot { it.isUserEntered() }
             .filter { it.type == ReceiptLineType.PRODUCT }
@@ -124,7 +190,7 @@ object ReceiptCorrectionRequestFactory {
                     ConfidenceLevel.USER_VERIFIED -> 3
                 }
             }
-            .take(MAX_TARGETS)
+            .take((MAX_TARGETS - merchantTargets.size).coerceAtLeast(0))
             .map { item ->
                 ReceiptCorrectionTarget(
                     lineItemId = item.id,
@@ -133,11 +199,13 @@ object ReceiptCorrectionRequestFactory {
                     unitPriceAmountMinor = item.unitPriceAmountMinor,
                     netAmountMinor = item.netAmountMinor,
                     sourceLineIds = item.sourceLineReferences.filter(knownLines::containsKey).distinct(),
+                    fieldPath = "line_items[${item.id}]",
                 )
             }
             .toList()
+        val targets = merchantTargets + lineTargets
         val evidenceIds = targets.flatMap(ReceiptCorrectionTarget::sourceLineIds).toSet()
-        val evidenceLines = ocrDocument.lines
+        val evidenceLines = allLines
             .asSequence()
             .filter { it.id in evidenceIds }
             .sortedWith(compareBy({ it.pageIndex }, { it.recognitionOrder }))
@@ -155,6 +223,8 @@ object ReceiptCorrectionRequestFactory {
             evidenceLines = evidenceLines,
         )
     }
+
+    private const val MERCHANT_TARGET_ID = "merchant_identity"
 }
 
 private object SensitiveReceiptEvidenceFilter {
