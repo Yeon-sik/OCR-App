@@ -2,10 +2,17 @@ package com.pricetrace.receiptscanner.storage
 
 import android.content.Context
 import com.pricetrace.receiptscanner.domain.ReceiptPage
+import com.pricetrace.receiptscanner.input.InputOrigin
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.time.OffsetDateTime
+
+data class SessionInputMetadata(
+    val inputOrigin: InputOrigin = InputOrigin.ANDROID_OCR,
+    val upstreamDocumentId: String? = null,
+    val importFingerprint: String? = null,
+)
 
 data class ReceiptSession(
     val documentId: String,
@@ -26,9 +33,23 @@ data class ReceiptSession(
     val reviewedAt: String?,
     val ocrCompletedAt: String? = null,
     val workflowType: OcrWorkflowType = OcrWorkflowType.PRICE_TRACE_RECEIPT,
+    val inputOrigin: InputOrigin = InputOrigin.ANDROID_OCR,
+    val upstreamDocumentId: String? = null,
+    val importFingerprint: String? = null,
     val displayTitle: String? = null,
     val workflowDraftStorageKey: String? = null,
-)
+) {
+    val hasPersistedCanonicalDraft: Boolean
+        get() = if (workflowType == OcrWorkflowType.FITNESS_NUTRITION) {
+            workflowDraftStorageKey != null
+        } else {
+            receiptStorageKey != null
+        }
+
+    /** External JSON may be restored without pages only when its canonical draft is persisted. */
+    fun canRestore(pages: List<ReceiptPage>): Boolean = pages.isNotEmpty() ||
+        (inputOrigin == InputOrigin.EXTERNAL_JSON && hasPersistedCanonicalDraft)
+}
 
 data class ReviewEdit(
     val id: String,
@@ -56,10 +77,13 @@ interface ReceiptSessionRepository {
     suspend fun getSession(documentId: String): ReceiptSession?
     suspend fun getPages(documentId: String): List<ReceiptPage>
     suspend fun getEdits(documentId: String): List<ReviewEdit>
+    suspend fun findSessionsByImportFingerprint(importFingerprint: String): List<ReceiptSession>
+    suspend fun findSessionsByUpstreamDocumentId(upstreamDocumentId: String): List<ReceiptSession>
     suspend fun createSession(
         documentId: String,
         workflowType: OcrWorkflowType = OcrWorkflowType.PRICE_TRACE_RECEIPT,
         createdAt: String = OffsetDateTime.now().toString(),
+        inputMetadata: SessionInputMetadata = SessionInputMetadata(),
     )
     suspend fun addPages(documentId: String, pages: List<ReceiptPage>): List<String>
     suspend fun updateSession(session: ReceiptSession)
@@ -98,10 +122,17 @@ class RoomReceiptSessionRepository internal constructor(
     override suspend fun getEdits(documentId: String): List<ReviewEdit> =
         dao.getEdits(documentId).map(ReviewEditEntity::toDomain)
 
+    override suspend fun findSessionsByImportFingerprint(importFingerprint: String): List<ReceiptSession> =
+        dao.findSessionsByImportFingerprint(importFingerprint).map(ScanSessionEntity::toDomain)
+
+    override suspend fun findSessionsByUpstreamDocumentId(upstreamDocumentId: String): List<ReceiptSession> =
+        dao.findSessionsByUpstreamDocumentId(upstreamDocumentId).map(ScanSessionEntity::toDomain)
+
     override suspend fun createSession(
         documentId: String,
         workflowType: OcrWorkflowType,
         createdAt: String,
+        inputMetadata: SessionInputMetadata,
     ) {
         dao.upsertSession(
             ScanSessionEntity(
@@ -123,6 +154,9 @@ class RoomReceiptSessionRepository internal constructor(
                 reviewedAt = null,
                 ocrCompletedAt = null,
                 workflowType = workflowType.wireValue,
+                inputOrigin = inputMetadata.inputOrigin.wireValue,
+                upstreamDocumentId = inputMetadata.upstreamDocumentId,
+                importFingerprint = inputMetadata.importFingerprint,
                 displayTitle = null,
                 workflowDraftStorageKey = null,
             ),
@@ -220,6 +254,9 @@ private fun ScanSessionEntity.toDomain() = ReceiptSession(
     reviewedAt = reviewedAt,
     ocrCompletedAt = ocrCompletedAt,
     workflowType = OcrWorkflowType.fromWireValue(workflowType),
+    inputOrigin = InputOrigin.fromWireValue(inputOrigin),
+    upstreamDocumentId = upstreamDocumentId,
+    importFingerprint = importFingerprint,
     displayTitle = displayTitle,
     workflowDraftStorageKey = workflowDraftStorageKey,
 )
@@ -243,6 +280,9 @@ private fun ReceiptSession.toEntity() = ScanSessionEntity(
     reviewedAt = reviewedAt,
     ocrCompletedAt = ocrCompletedAt,
     workflowType = workflowType.wireValue,
+    inputOrigin = inputOrigin.wireValue,
+    upstreamDocumentId = upstreamDocumentId,
+    importFingerprint = importFingerprint,
     displayTitle = displayTitle,
     workflowDraftStorageKey = workflowDraftStorageKey,
 )

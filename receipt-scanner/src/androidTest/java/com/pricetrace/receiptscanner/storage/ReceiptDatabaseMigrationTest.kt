@@ -125,18 +125,20 @@ class ReceiptDatabaseMigrationTest {
 
         val migrated = migrationHelper.runMigrationsAndValidate(
             TEST_DB,
-            5,
+            6,
             true,
             ReceiptDatabase.MIGRATION_1_2,
             ReceiptDatabase.MIGRATION_2_3,
             ReceiptDatabase.MIGRATION_3_4,
             ReceiptDatabase.MIGRATION_4_5,
+            ReceiptDatabase.MIGRATION_5_6,
         )
 
         migrated.query(
             SimpleSQLiteQuery(
                 "SELECT document_id, merchant_name, review_status, reviewed_at, ocr_completed_at, " +
-                    "workflow_type, display_title, workflow_draft_storage_key " +
+                    "workflow_type, display_title, workflow_draft_storage_key, " +
+                    "input_origin, upstream_document_id, import_fingerprint " +
                     "FROM scan_sessions WHERE document_id = ?",
                 arrayOf("doc-migrate"),
             ),
@@ -151,6 +153,9 @@ class ReceiptDatabaseMigrationTest {
             assertEquals("pricetrace_receipt", cursor.getString(5))
             assertNull(cursor.getString(6))
             assertNull(cursor.getString(7))
+            assertEquals("android_ocr", cursor.getString(8))
+            assertNull(cursor.getString(9))
+            assertNull(cursor.getString(10))
         }
 
         migrated.query(
