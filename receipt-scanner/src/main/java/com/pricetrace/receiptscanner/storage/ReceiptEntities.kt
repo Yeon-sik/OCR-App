@@ -6,7 +6,14 @@ import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "scan_sessions")
+@Entity(
+    tableName = "scan_sessions",
+    indices = [
+        Index("input_origin"),
+        Index("upstream_document_id"),
+        Index("import_fingerprint"),
+    ],
+)
 internal data class ScanSessionEntity(
     @PrimaryKey
     @ColumnInfo(name = "document_id")
@@ -46,6 +53,12 @@ internal data class ScanSessionEntity(
     val ocrCompletedAt: String?,
     @ColumnInfo(name = "workflow_type", defaultValue = "'pricetrace_receipt'")
     val workflowType: String,
+    @ColumnInfo(name = "input_origin", defaultValue = "'android_ocr'")
+    val inputOrigin: String,
+    @ColumnInfo(name = "upstream_document_id")
+    val upstreamDocumentId: String?,
+    @ColumnInfo(name = "import_fingerprint")
+    val importFingerprint: String?,
     @ColumnInfo(name = "display_title")
     val displayTitle: String?,
     @ColumnInfo(name = "workflow_draft_storage_key")

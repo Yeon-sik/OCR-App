@@ -19,6 +19,7 @@ fun ReceiptOcrApp(
     viewModel: ReceiptAppViewModel,
     onLaunchScanner: (IntentSender) -> Unit,
     onLaunchImagePicker: (Boolean) -> Unit,
+    onLaunchJsonPicker: () -> Unit,
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -70,11 +71,15 @@ fun ReceiptOcrApp(
             activity?.let { viewModel.prepareScanner(it, onLaunchScanner) }
         },
         onPickImages = { onLaunchImagePicker(false) },
+        onPickJson = onLaunchJsonPicker,
         onWorkflowSelected = viewModel::selectWorkflow,
         onAppendScan = {
             activity?.let { viewModel.prepareScanner(it, onLaunchScanner, appendToCurrent = true) }
         },
         onAppendPickImages = { onLaunchImagePicker(true) },
+        onStartImportReview = viewModel::startImportReview,
+        onAttachImportImage = { onLaunchImagePicker(true) },
+        onCancelImport = viewModel::cancelImportPreview,
         onSelectSession = viewModel::selectSession,
         onDeleteSession = viewModel::deleteSession,
         onShowApiSettings = viewModel::showApiSettings,

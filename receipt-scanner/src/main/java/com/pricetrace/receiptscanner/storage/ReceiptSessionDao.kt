@@ -18,6 +18,12 @@ internal interface ReceiptSessionDao {
     @Query("SELECT * FROM scan_sessions WHERE document_id = :documentId")
     suspend fun getSession(documentId: String): ScanSessionEntity?
 
+    @Query("SELECT * FROM scan_sessions WHERE import_fingerprint = :importFingerprint ORDER BY updated_at DESC")
+    suspend fun findSessionsByImportFingerprint(importFingerprint: String): List<ScanSessionEntity>
+
+    @Query("SELECT * FROM scan_sessions WHERE upstream_document_id = :upstreamDocumentId ORDER BY updated_at DESC")
+    suspend fun findSessionsByUpstreamDocumentId(upstreamDocumentId: String): List<ScanSessionEntity>
+
     @Query("SELECT * FROM receipt_pages WHERE document_id = :documentId ORDER BY page_index, revision")
     fun observePages(documentId: String): Flow<List<ReceiptPageEntity>>
 

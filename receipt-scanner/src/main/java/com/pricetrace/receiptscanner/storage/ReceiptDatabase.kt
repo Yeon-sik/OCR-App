@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [ScanSessionEntity::class, ReceiptPageEntity::class, ReviewEditEntity::class, PriceObservationQueueEntity::class],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 internal abstract class ReceiptDatabase : RoomDatabase() {
@@ -80,12 +80,31 @@ internal abstract class ReceiptDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE scan_sessions ADD COLUMN input_origin TEXT NOT NULL DEFAULT 'android_ocr'")
+                db.execSQL("ALTER TABLE scan_sessions ADD COLUMN upstream_document_id TEXT")
+                db.execSQL("ALTER TABLE scan_sessions ADD COLUMN import_fingerprint TEXT")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_scan_sessions_input_origin` " +
+                        "ON `scan_sessions` (`input_origin`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_scan_sessions_upstream_document_id` " +
+                        "ON `scan_sessions` (`upstream_document_id`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_scan_sessions_import_fingerprint` " +
+                        "ON `scan_sessions` (`import_fingerprint`)",
+                )
+            }
+        }
         fun getInstance(context: Context): ReceiptDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 ReceiptDatabase::class.java,
                 "receipt-scanner.db",
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .build().also { database -> instance = database }
         }
     }
