@@ -33,6 +33,23 @@ class NutritionSupabaseGatewayTest {
     }
 
     @Test
+    fun unverifiedDraftIsRejectedBeforeAnyTransportCall() = runTest {
+        val store = FakeStore(signedIn())
+        val transport = QueueTransport()
+        val gateway = NutritionSupabaseGateway(store, transport)
+
+        val result = gateway.publish(
+            verifiedDraft().copy(
+                status = com.pricetrace.receiptscanner.nutrition.NutritionDraftStatus.PARSED,
+                confirmedAt = null,
+            ),
+        )
+
+        assertEquals(NutritionPublishOutcome.Failure(NutritionGatewayFailure.CONTRACT), result)
+        assertTrue(transport.requests.isEmpty())
+    }
+
+    @Test
     fun newVerifiedDraftIsInsertedAsOwnerPrivateWithoutOcrEvidence() = runTest {
         val store = FakeStore(signedIn())
         val transport = QueueTransport(
