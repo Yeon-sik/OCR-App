@@ -74,4 +74,29 @@ internal interface ReceiptSessionDao {
 
     @Upsert
     suspend fun upsertPriceObservationQueue(entry: PriceObservationQueueEntity)
+
+    @Query("SELECT * FROM ingestion_sessions WHERE ingestion_id = :ingestionId")
+    suspend fun getIngestionSession(ingestionId: String): IngestionSessionEntity?
+
+    @Query("SELECT * FROM ingestion_projections WHERE ingestion_id = :ingestionId ORDER BY projection")
+    suspend fun getIngestionProjections(ingestionId: String): List<IngestionProjectionEntity>
+
+    @Query("SELECT * FROM ingestion_attachments WHERE ingestion_id = :ingestionId ORDER BY attachment_id")
+    suspend fun getIngestionAttachments(ingestionId: String): List<IngestionAttachmentEntity>
+
+    @Upsert
+    suspend fun upsertIngestionSession(session: IngestionSessionEntity)
+
+    @Upsert
+    suspend fun upsertIngestionProjections(projections: List<IngestionProjectionEntity>)
+
+    @Upsert
+    suspend fun upsertIngestionAttachments(attachments: List<IngestionAttachmentEntity>)
+
+    @Transaction
+    suspend fun upsertIngestionSnapshot(session: IngestionSessionEntity, projections: List<IngestionProjectionEntity>, attachments: List<IngestionAttachmentEntity>) {
+        upsertIngestionSession(session)
+        upsertIngestionProjections(projections)
+        upsertIngestionAttachments(attachments)
+    }
 }

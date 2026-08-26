@@ -21,6 +21,7 @@ import com.pricetrace.receiptscanner.storage.ReceiptFileStore
 import com.pricetrace.receiptscanner.storage.PriceObservationQueueProcessor
 import com.pricetrace.receiptscanner.storage.RoomPriceObservationQueueRepository
 import com.pricetrace.receiptscanner.storage.RoomReceiptSessionRepository
+import com.pricetrace.receiptscanner.storage.RoomIngestionSessionStore
 
 class ReceiptOcrApplication : Application() {
     val container: AppContainer by lazy { AppContainer(this) }
@@ -29,6 +30,7 @@ class ReceiptOcrApplication : Application() {
 class AppContainer(application: Application) {
     val fileStore = ReceiptFileStore(application)
     val sessionRepository = RoomReceiptSessionRepository.create(application, fileStore)
+    val ingestionSessionStore = RoomIngestionSessionStore.create(application)
     val captureProvider = MlKitDocumentCaptureProvider(
         context = application,
         fileStore = fileStore,

@@ -15,6 +15,10 @@ import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelJson
 import com.pricetrace.receiptscanner.nutrition.NutritionContract
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
+import com.pricetrace.receiptscanner.ingestion.IngestionMode
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_SCHEMA
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeJson
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -32,6 +36,7 @@ import kotlinx.serialization.json.jsonPrimitive
 sealed interface CanonicalDraft {
     data class Receipt(val value: ReceiptV2) : CanonicalDraft
     data class Nutrition(val value: NutritionLabelDraft) : CanonicalDraft
+    data class Envelope(val value: YeonsikOcrEnvelope) : CanonicalDraft
 }
 
 enum class ExternalJsonImportErrorCode {
@@ -108,6 +113,7 @@ class ExternalJsonImporter(
             when (schema) {
                 ReceiptV2.SCHEMA_VERSION -> importReceipt(root, localDocumentId, workflowType)
                 FITNESS_NUTRITION_DRAFT_SCHEMA -> importNutrition(root, localDocumentId, workflowType)
+                YEONSIK_OCR_SCHEMA -> importEnvelope(value, localDocumentId, workflowType)
                 else -> ExternalJsonImportOutcome.Failure(
                     ExternalJsonImportError(
                         ExternalJsonImportErrorCode.UNSUPPORTED_SCHEMA,
@@ -125,6 +131,28 @@ class ExternalJsonImporter(
         }
     }
 
+
+    private fun importEnvelope(
+        value: String,
+        localDocumentId: String,
+        workflowType: OcrWorkflowType,
+    ): ExternalJsonImportOutcome {
+        val envelope = YeonsikOcrEnvelopeJson.decode(value, localDocumentId)
+        val expectedWorkflow = when (envelope.mode) {
+            IngestionMode.MERCHANT -> OcrWorkflowType.PRICE_TRACE_MERCHANT
+            IngestionMode.RESTAURANT -> OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT
+            IngestionMode.PACKAGED_PRODUCT -> OcrWorkflowType.FITNESS_NUTRITION
+        }
+        if (workflowType != expectedWorkflow) return workflowMismatch(YEONSIK_OCR_SCHEMA, workflowType)
+        val fingerprint = StableIds.sha256("external-json|$YEONSIK_OCR_SCHEMA|${YeonsikOcrEnvelopeJson.canonicalize(envelope)}")
+        return ExternalJsonImportOutcome.Success(ExternalJsonImportResult(
+            draft = CanonicalDraft.Envelope(envelope),
+            workflowType = expectedWorkflow,
+            localDocumentId = localDocumentId,
+            upstreamDocumentId = "envelope-${fingerprint.take(24)}",
+            importFingerprint = fingerprint,
+        ))
+    }
     private fun importReceipt(
         root: JsonObject,
         localDocumentId: String,

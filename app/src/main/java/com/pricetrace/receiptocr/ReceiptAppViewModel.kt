@@ -489,6 +489,7 @@ class ReceiptAppViewModel(
         val draftKey = "${result.localDocumentId}/draft/" + when (result.draft) {
             is CanonicalDraft.Receipt -> "receipt.json"
             is CanonicalDraft.Nutrition -> "fitness-nutrition.json"
+            is CanonicalDraft.Envelope -> "yeonsik-ocr.json"
         }
         var created = false
         try {
@@ -505,6 +506,7 @@ class ReceiptAppViewModel(
             val encoded = when (val draft = result.draft) {
                 is CanonicalDraft.Receipt -> ReceiptV2Json.encodeCanonical(draft.value)
                 is CanonicalDraft.Nutrition -> NutritionLabelJson.encode(draft.value)
+                is CanonicalDraft.Envelope -> com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeJson.encode(draft.value)
             }
             fileStore.writeText(draftKey, encoded)
             val session = requireNotNull(repository.getSession(result.localDocumentId))
@@ -527,6 +529,19 @@ class ReceiptAppViewModel(
                     reviewStatus = draft.value.status.wireValue,
                     jsonRevision = StableIds.sha256(encoded),
                     displayTitle = draft.value.productName.takeIf(String::isNotBlank),
+                    workflowDraftStorageKey = draftKey,
+                    uploadStatus = "local_only",
+                )
+                is CanonicalDraft.Envelope -> session.copy(
+                    updatedAt = OffsetDateTime.now().toString(),
+                    ocrStatus = "parsed",
+                    reviewStatus = draft.value.review.status.wireValue,
+                    jsonRevision = StableIds.sha256(encoded),
+                    merchantName = draft.value.merchantCandidate?.name,
+                    displayTitle = draft.value.merchantCandidate?.name ?: draft.value.nutrition.filterIsInstance<com.pricetrace.receiptscanner.ingestion.IngestionNutrition.ProductLabel>().firstOrNull()?.draft?.productName,
+                    issuedOn = draft.value.receipt?.document?.issuedOn,
+                    grandTotalAmountMinor = draft.value.receipt?.totals?.grandTotalAmountMinor,
+                    receiptStorageKey = null,
                     workflowDraftStorageKey = draftKey,
                     uploadStatus = "local_only",
                 )
@@ -579,7 +594,7 @@ class ReceiptAppViewModel(
         ExternalJsonImportErrorCode.EMPTY_INPUT,
         ExternalJsonImportErrorCode.INVALID_JSON -> "JSON 형식이 올바르지 않습니다. 지원되는 JSON 파일을 선택하세요."
         ExternalJsonImportErrorCode.MISSING_SCHEMA,
-        ExternalJsonImportErrorCode.UNSUPPORTED_SCHEMA -> "지원하지 않는 JSON schema입니다. receipt.v2 또는 fitness-nutrition-draft.v1만 가져올 수 있습니다."
+        ExternalJsonImportErrorCode.UNSUPPORTED_SCHEMA -> "지원하지 않는 JSON schema입니다. receipt.v2, fitness-nutrition-draft.v1, yeonsik-ocr.v1만 가져올 수 있습니다."
         ExternalJsonImportErrorCode.WORKFLOW_MISMATCH -> "현재 선택한 workflow와 JSON schema가 맞지 않습니다. workflow를 바꿔 다시 시도하세요."
         ExternalJsonImportErrorCode.INVALID_CANONICAL_JSON -> "JSON 필수 데이터가 canonical 형식과 맞지 않습니다."
         ExternalJsonImportErrorCode.INVALID_LOCAL_DOCUMENT_ID -> "JSON 세션 ID를 만들지 못했습니다. 다시 시도하세요."
@@ -631,6 +646,29 @@ class ReceiptAppViewModel(
                         message = "Fitness 영양성분 검수 초안을 복원했습니다.",
                     )
                 }
+                return@launch
+            }
+
+            if (session.workflowType == OcrWorkflowType.PRICE_TRACE_MERCHANT ||
+                (session.inputOrigin == InputOrigin.EXTERNAL_JSON && session.receiptStorageKey == null && session.workflowDraftStorageKey != null && session.upstreamDocumentId?.startsWith("envelope-") == true)
+            ) {
+                val envelopeReadable = try {
+                    com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeJson.decode(
+                        fileStore.readBytes(requireNotNull(session.workflowDraftStorageKey)).toString(Charsets.UTF_8),
+                        documentId,
+                    )
+                    true
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    false
+                }
+                mutableUiState.value = mutableUiState.value.copy(
+                    screen = AppScreen.IMAGE_CONFIRM,
+                    inputOrigin = session.inputOrigin,
+                    currentDocumentId = documentId,
+                    message = if (envelopeReadable) "통합 ingestion 초안을 복원했습니다. 원본 증거를 대조하세요." else "통합 ingestion 초안을 읽지 못했습니다.",
+                )
                 return@launch
             }
 

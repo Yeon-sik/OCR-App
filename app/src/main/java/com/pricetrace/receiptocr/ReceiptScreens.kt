@@ -751,6 +751,14 @@ private fun ImportPreviewScreen(
                                 Text("${field.koreanLabel} · ${formatNutritionNumber(draft.value.value(field)).ifBlank { "미확인" }} ${field.canonicalUnit}")
                             }
                         }
+                        is com.pricetrace.receiptscanner.importer.CanonicalDraft.Envelope -> {
+                            Text("Integrated ingestion", style = MaterialTheme.typography.titleMedium)
+                            Text("모드 · ${draft.value.mode.wireValue}")
+                            Text("PriceTrace · ${if (draft.value.receipt != null || draft.value.merchantCandidate != null) "활성" else "비활성"}")
+                            Text("Fitness · ${if (draft.value.nutrition.isNotEmpty()) "활성" else "비활성"}")
+                            Text("CashOS · ${draft.value.classificationHints.keys.any { it.startsWith("cashos.") }}")
+                            Text("외부 검증 상태는 강등되었고, 원본 이미지 대조가 필요합니다.")
+                        }
                     }
                 }
             }
@@ -776,6 +784,7 @@ private fun ImportPreviewScreen(
 private fun com.pricetrace.receiptscanner.importer.ExternalJsonImportResult.externalSchemaLabel(): String = when (draft) {
     is com.pricetrace.receiptscanner.importer.CanonicalDraft.Receipt -> ReceiptV2.SCHEMA_VERSION
     is com.pricetrace.receiptscanner.importer.CanonicalDraft.Nutrition -> "fitness-nutrition-draft.v1"
+    is com.pricetrace.receiptscanner.importer.CanonicalDraft.Envelope -> com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_SCHEMA
 }
 @Composable
 private fun WorkflowSelector(
@@ -788,6 +797,12 @@ private fun WorkflowSelector(
             .padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
+        WorkflowChoice(
+            label = "가게",
+            selected = selectedWorkflow == OcrWorkflowType.PRICE_TRACE_MERCHANT,
+            onClick = { onWorkflowSelected(OcrWorkflowType.PRICE_TRACE_MERCHANT) },
+            modifier = Modifier.testTag("workflow_merchant"),
+        )
         WorkflowChoice(
             label = "가격 영수증",
             selected = selectedWorkflow == OcrWorkflowType.PRICE_TRACE_RECEIPT,

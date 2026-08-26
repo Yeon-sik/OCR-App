@@ -1,0 +1,11 @@
+{
+  "schema_version": "yeonsik-ocr.v1",
+  "mode": "packaged_product",
+  "source": {"producer": "chatgpt", "source_files": [{"id": "label-1", "type": "nutrition_label", "label": "영양성분표"}], "user_text": "완제품"},
+  "merchant_candidate": null,
+  "receipt": null,
+  "nutrition": [{"client_key": "label-1", "kind": "product_label", "line_id": null, "menu_name": null, "payload": {"schema_version": "fitness-nutrition-draft.v1", "document_id": "label-source-1", "parser_version": "nutrition-label-parser.v2", "status": "parsed", "confirmed_at": null, "name": "Test cereal", "brand": "Test brand", "kind": "external_menu", "category": "cereal", "basis_amount": 100, "basis_unit": "g", "prep_state": "unspecified", "cooking_method": "unspecified", "nutrients": {"calories_kcal": 380, "protein_grams": 10, "carbs_grams": 70, "fat_grams": 5, "sodium_mg": 100, "saturated_fat_grams": 1, "sugars_grams": 12, "fiber_grams": null, "added_sugars_grams": null, "trans_fat_grams": null, "cholesterol_mg": null}, "source_type": "product_label_ocr", "source_reference": "ocr-document:label-source-1", "source_version": "nutrition-label-parser.v2", "data_version": 2, "visibility": "private", "parse_warnings": [], "evidence": {}}, "estimate": null}],
+  "classification_hints": {"cashos": {}},
+  "links": [],
+  "review": {"status": "ready", "blocking_issues": [], "warnings": []}
+}

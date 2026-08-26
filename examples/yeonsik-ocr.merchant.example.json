@@ -1,0 +1,11 @@
+{
+  "schema_version": "yeonsik-ocr.v1",
+  "mode": "merchant",
+  "source": {"producer": "chatgpt", "source_files": [], "user_text": "가게 Test Mart"},
+  "merchant_candidate": {"name": "Test Mart", "branch_name": null, "address": null, "phone": null, "business_registration_number": null, "source_attachment_ids": []},
+  "receipt": null,
+  "nutrition": [],
+  "classification_hints": {"cashos": {}},
+  "links": [],
+  "review": {"status": "ready", "blocking_issues": [], "warnings": []}
+}

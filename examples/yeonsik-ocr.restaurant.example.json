@@ -1,0 +1,18 @@
+{
+  "schema_version": "yeonsik-ocr.v1",
+  "mode": "restaurant",
+  "source": {"producer": "chatgpt", "source_files": [{"id": "receipt-1", "type": "receipt", "label": "영수증"}, {"id": "food-1", "type": "food_photo", "label": "음식 사진"}], "user_text": "식당 영수증과 음식 사진"},
+  "merchant_candidate": {"name": "Test Restaurant", "branch_name": null, "address": null, "phone": null, "business_registration_number": null, "source_attachment_ids": ["receipt-1"]},
+  "receipt": {
+    "schema_version": "receipt.v2",
+    "document": {"id": "receipt-source-1", "type": "receipt", "status": "final", "issued_on": "2026-08-27", "issued_at": null, "currency": "KRW", "source": {"capture_method": "ocr", "original_document_id": null, "source_images": [], "transcription_status": "user_verified", "notes": [], "raw_text": null}},
+    "merchant": {"name": "Test Restaurant", "branch_name": null, "business_kind": "food_service", "retail_channel": "regular", "catalog_namespace": null, "merchant_id": null, "business_registration_number": null, "address": null, "phone": null},
+    "line_items": [{"id": "line-1", "type": "product", "description": "Noodles", "source_line_references": [], "identifiers": [], "quantity": {"value": 1, "unit": "each"}, "unit_price_amount_minor": 10000, "gross_amount_minor": 10000, "discount_amount_minor": 0, "tax_amount_minor": 0, "net_amount_minor": 10000, "confidence": "user_verified", "tax_rate_percent": null}],
+    "totals": {"subtotal_amount_minor": 10000, "discount_amount_minor": 0, "tax_amount_minor": 0, "fee_amount_minor": 0, "grand_total_amount_minor": 10000},
+    "payments": []
+  },
+  "nutrition": [{"client_key": "food-1", "kind": "restaurant_estimate", "line_id": "line-1", "menu_name": "Noodles", "payload": null, "estimate": {"estimated": true, "confidence": "medium", "nutrients": {"calories_kcal": 500, "protein_grams": 20, "carbs_grams": 70, "fat_grams": 15, "sodium_mg": 800, "saturated_fat_grams": 3, "sugars_grams": 5, "fiber_grams": null, "added_sugars_grams": null, "trans_fat_grams": null, "cholesterol_mg": null}, "ranges": {}}}],
+  "classification_hints": {"cashos": {"category_hint": "식비", "account_hint": null, "payment_method_hint": null}},
+  "links": [{"receipt_line_id": "line-1", "nutrition_client_key": "food-1"}],
+  "review": {"status": "ready", "blocking_issues": [], "warnings": []}
+}

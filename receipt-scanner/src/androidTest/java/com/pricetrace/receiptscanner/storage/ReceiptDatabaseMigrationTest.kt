@@ -125,13 +125,14 @@ class ReceiptDatabaseMigrationTest {
 
         val migrated = migrationHelper.runMigrationsAndValidate(
             TEST_DB,
-            6,
+            7,
             true,
             ReceiptDatabase.MIGRATION_1_2,
             ReceiptDatabase.MIGRATION_2_3,
             ReceiptDatabase.MIGRATION_3_4,
             ReceiptDatabase.MIGRATION_4_5,
             ReceiptDatabase.MIGRATION_5_6,
+            ReceiptDatabase.MIGRATION_6_7,
         )
 
         migrated.query(

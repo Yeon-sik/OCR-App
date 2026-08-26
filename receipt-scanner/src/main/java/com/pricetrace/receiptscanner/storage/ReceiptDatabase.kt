@@ -8,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [ScanSessionEntity::class, ReceiptPageEntity::class, ReviewEditEntity::class, PriceObservationQueueEntity::class],
-    version = 6,
+    entities = [ScanSessionEntity::class, ReceiptPageEntity::class, ReviewEditEntity::class, PriceObservationQueueEntity::class, IngestionSessionEntity::class, IngestionProjectionEntity::class, IngestionAttachmentEntity::class],
+    version = 7,
     exportSchema = false,
 )
 internal abstract class ReceiptDatabase : RoomDatabase() {
@@ -99,12 +99,25 @@ internal abstract class ReceiptDatabase : RoomDatabase() {
                 )
             }
         }
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS `ingestion_sessions` (`ingestion_id` TEXT NOT NULL, `local_document_id` TEXT NOT NULL, `envelope_storage_key` TEXT NOT NULL, `canonical_fingerprint` TEXT NOT NULL, `review_status` TEXT NOT NULL, `created_at` TEXT NOT NULL, `updated_at` TEXT NOT NULL, PRIMARY KEY(`ingestion_id`))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_ingestion_sessions_local_document_id` ON `ingestion_sessions` (`local_document_id`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_ingestion_sessions_canonical_fingerprint` ON `ingestion_sessions` (`canonical_fingerprint`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `ingestion_projections` (`ingestion_id` TEXT NOT NULL, `projection` TEXT NOT NULL, `status` TEXT NOT NULL, `idempotency_key` TEXT, `remote_id` TEXT, `attempt_count` INTEGER NOT NULL, `last_error` TEXT, `updated_at` TEXT NOT NULL, PRIMARY KEY(`ingestion_id`, `projection`))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_ingestion_projections_status` ON `ingestion_projections` (`status`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `ingestion_attachments` (`ingestion_id` TEXT NOT NULL, `attachment_id` TEXT NOT NULL, `type` TEXT NOT NULL, `page_id` TEXT, `file_readable` INTEGER NOT NULL, PRIMARY KEY(`ingestion_id`, `attachment_id`))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_ingestion_attachments_ingestion_id` ON `ingestion_attachments` (`ingestion_id`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_ingestion_attachments_page_id` ON `ingestion_attachments` (`page_id`)")
+            }
+        }
+
         fun getInstance(context: Context): ReceiptDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 ReceiptDatabase::class.java,
                 "receipt-scanner.db",
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .build().also { database -> instance = database }
         }
     }
