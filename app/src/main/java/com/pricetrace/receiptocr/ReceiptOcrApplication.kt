@@ -6,10 +6,14 @@ import com.pricetrace.receiptocr.gemini.DirectGeminiNutritionCorrectionSuggester
 import com.pricetrace.receiptocr.gemini.EncryptedGeminiApiKeyStore
 import com.pricetrace.receiptocr.gemini.GeminiApiKeyStore
 import com.pricetrace.receiptocr.fitness.AndroidNutritionSupabaseStore
+import com.pricetrace.receiptocr.fitness.FitnessCanonicalProjectionSubmitter
 import com.pricetrace.receiptocr.fitness.NutritionSupabaseGateway
 import com.pricetrace.receiptocr.pricetrace.AndroidPriceTraceSupabaseStore
 import com.pricetrace.receiptocr.pricetrace.AndroidCashOsSupabaseStore
 import com.pricetrace.receiptocr.pricetrace.AndroidCashOsLedgerSelectionStore
+import com.pricetrace.receiptocr.pricetrace.CashOsCanonicalProjectionSubmitter
+import com.pricetrace.receiptocr.pricetrace.PriceTraceCanonicalGateway
+import com.pricetrace.receiptocr.pricetrace.PriceTraceCanonicalProjectionSubmitter
 import com.pricetrace.receiptocr.pricetrace.PriceObservationGateway
 import com.pricetrace.receiptscanner.capture.MlKitDocumentCaptureProvider
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionSuggester
@@ -24,12 +28,9 @@ import com.pricetrace.receiptscanner.storage.PriceObservationQueueProcessor
 import com.pricetrace.receiptscanner.storage.RoomPriceObservationQueueRepository
 import com.pricetrace.receiptscanner.storage.RoomReceiptSessionRepository
 import com.pricetrace.receiptscanner.storage.RoomIngestionSessionStore
-import com.pricetrace.receiptscanner.ingestion.IdentityResolution
-import com.pricetrace.receiptscanner.ingestion.IdentityResolutionStatus
-import com.pricetrace.receiptscanner.ingestion.IngestionIdentityResolver
 import com.pricetrace.receiptscanner.ingestion.IngestionOrchestrator
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
-import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
+import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 
 class ReceiptOcrApplication : Application() {
     val container: AppContainer by lazy { AppContainer(this) }
@@ -43,14 +44,6 @@ class AppContainer(application: Application) {
      * The app keeps payload construction in the existing gateways. This coordinator owns
      * durable lifecycle state and refuses implicit cross-service identity inference.
      */
-    internal val ingestionOrchestrator = IngestionOrchestrator(
-        store = ingestionSessionStore,
-        identityResolver = object : IngestionIdentityResolver {
-            override suspend fun resolve(projection: IngestionProjection, envelope: YeonsikOcrEnvelope) =
-                IdentityResolution(IdentityResolutionStatus.NOT_FOUND, message = "explicit_projection_identity_required")
-        },
-        submitters = emptyMap(),
-    )
     val captureProvider = MlKitDocumentCaptureProvider(
         context = application,
         fileStore = fileStore,
@@ -82,6 +75,19 @@ class AppContainer(application: Application) {
     internal val cashOsSupabaseStore = AndroidCashOsSupabaseStore(application)
     internal val cashOsLedgerSelectionStore = AndroidCashOsLedgerSelectionStore(application)
     internal val cashOsReceiptGateway = com.pricetrace.receiptocr.pricetrace.CashOsReceiptGateway(cashOsSupabaseStore)
+    internal val priceTraceCanonicalGateway = PriceTraceCanonicalGateway(priceTraceSupabaseStore)
+    internal val canonicalProjectionSubmitters: Map<IngestionProjection, IngestionProjectionSubmitter> = mapOf(
+        IngestionProjection.PRICETRACE_RECEIPT to PriceTraceCanonicalProjectionSubmitter(priceTraceCanonicalGateway),
+        IngestionProjection.PRICETRACE_PRICE_OBSERVATION to PriceTraceCanonicalProjectionSubmitter(priceTraceCanonicalGateway),
+        IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE to PriceTraceCanonicalProjectionSubmitter(priceTraceCanonicalGateway),
+        IngestionProjection.FITNESS_NUTRITION to FitnessCanonicalProjectionSubmitter(nutritionGateway),
+        IngestionProjection.CASHOS_RECEIPT to CashOsCanonicalProjectionSubmitter(cashOsReceiptGateway),
+    )
+    internal val ingestionOrchestrator = IngestionOrchestrator(
+        store = ingestionSessionStore,
+        identityResolver = null,
+        submitters = canonicalProjectionSubmitters,
+    )
     internal val priceObservationProcessor = PriceObservationQueueProcessor(
         queue = priceObservationQueue,
         submitter = priceObservationGateway,

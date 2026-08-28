@@ -24,6 +24,11 @@ data class ReceiptV2(
 data class ReceiptDocument(
     /** Upstream receipt.v2 document ID. External producers may legitimately leave this null. */
     val id: String?,
+    /**
+     * OCR App-only stable session identity. This is deliberately not part of receipt.v2 JSON and
+     * must never be sent as receipt.document.id to an external service.
+     */
+    val localDocumentId: String? = null,
     val type: String = "receipt",
     val status: ReceiptStatus = ReceiptStatus.DRAFT,
     val issuedOn: String?,
@@ -58,8 +63,8 @@ data class ReceiptFoodService(
 )
 
 /** OCR-created or imported drafts must receive a separate local ID before they enter editable storage. */
-fun ReceiptDocument.requireLocalDocumentId(): String = requireNotNull(id) {
-    "Receipt document.id is nullable upstream but required after OCR App local import."
+fun ReceiptDocument.requireLocalDocumentId(): String = requireNotNull(localDocumentId ?: id) {
+    "OCR App localDocumentId is required for local persistence and projection idempotency."
 }
 
 data class ReceiptSource(
@@ -161,7 +166,8 @@ fun ParsedReceipt.toReceiptV2(
     includePrivateRawText: Boolean = true,
 ): ReceiptV2 = ReceiptV2(
     document = ReceiptDocument(
-        id = documentId,
+        id = originalDocumentId.value,
+        localDocumentId = documentId,
         status = status,
         issuedOn = issuedOn.value,
         issuedAt = issuedAt.value,

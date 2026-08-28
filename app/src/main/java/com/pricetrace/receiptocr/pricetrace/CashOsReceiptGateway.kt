@@ -4,6 +4,9 @@ import com.pricetrace.receiptscanner.publisher.CashOsReceiptSubmitPayload
 import com.pricetrace.receiptscanner.publisher.CashOsReceiptSubmitResult
 import com.pricetrace.receiptscanner.publisher.CashOsReceiptSubmitResponse
 import com.pricetrace.receiptscanner.publisher.CashOsReceiptSubmitter
+import com.pricetrace.receiptscanner.publisher.CashOsReceiptIngestV3Json
+import com.pricetrace.receiptscanner.publisher.CashOsReceiptIngestV3Payload
+import com.pricetrace.receiptscanner.publisher.CashOsReceiptIngestV3Response
 import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
@@ -102,6 +105,34 @@ internal class CashOsReceiptGateway(
             PriceObservationReadOutcome.Failure(PriceObservationFailureKind.CONTRACT)
         }
     }
+    suspend fun ingestVerifiedReceiptV3(payload: CashOsReceiptIngestV3Payload): PriceObservationReadOutcome<CashOsReceiptIngestV3Response> {
+        val config = store.read()
+        if (!config.isSignedIn) return PriceObservationReadOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
+        return try {
+            val response = transport.execute(
+                request(
+                    config = config,
+                    method = "POST",
+                    path = "/rest/v1/rpc/finance_ingest_verified_receipt_v3",
+                    body = payload.toRpcJson(),
+                ),
+            )
+            if (response.statusCode !in 200..299) {
+                PriceObservationReadOutcome.Failure(classify(response), response.body.takeIf(String::isNotBlank))
+            } else {
+                PriceObservationReadOutcome.Success(CashOsReceiptIngestV3Json.decodeResponse(response.body))
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: SocketTimeoutException) {
+            PriceObservationReadOutcome.Failure(PriceObservationFailureKind.NETWORK_TIMEOUT)
+        } catch (_: IOException) {
+            PriceObservationReadOutcome.Failure(PriceObservationFailureKind.NETWORK)
+        } catch (error: Exception) {
+            PriceObservationReadOutcome.Failure(PriceObservationFailureKind.CONTRACT, error.message)
+        }
+    }
+
     override suspend fun submit(payload: CashOsReceiptSubmitPayload): CashOsReceiptSubmitResult {
         val config = store.read()
         if (!config.isSignedIn) {

@@ -68,11 +68,11 @@ object ReceiptV2Json {
 
     fun idempotencyKey(receipt: ReceiptV2): String = "receipt:${receipt.document.id ?: "unassigned"}:${revisionHash(receipt)}"
 
-    fun decode(value: String): ReceiptV2 {
+    fun decode(value: String, localDocumentId: String? = null): ReceiptV2 {
         val root = compactJson.parseToJsonElement(value).jsonObject
         root.requireOnlyKeys("schema_version", "document", "merchant", "line_items", "totals", "payments")
         val schemaVersion = root.requiredString("schema_version")
-        val document = root.requiredObject("document").toDocument()
+        val document = root.requiredObject("document").toDocument(localDocumentId)
         val merchant = root.requiredObject("merchant").toMerchant()
         val lineItems = root.requiredArray("line_items").map { it.jsonObject.toLineItem() }
         val totals = root.requiredObject("totals").toTotals()
@@ -140,7 +140,7 @@ object ReceiptV2Json {
         "quantity" to quantity?.let { value ->
             objectOf(
                 "value" to JsonPrimitive(BigDecimal(value.value)),
-                "unit" to JsonPrimitive(value.unit.wireValue),
+                "unit" to JsonPrimitive(value.wireUnit),
             )
         }.orJsonNull(),
         "unit_price_amount_minor" to unitPriceAmountMinor.jsonLongOrNull(),
@@ -175,13 +175,14 @@ object ReceiptV2Json {
         "reference" to reference.jsonStringOrNull(),
     )
 
-    private fun JsonObject.toDocument(): ReceiptDocument {
+    private fun JsonObject.toDocument(localDocumentId: String? = null): ReceiptDocument {
         requireOneOfKeySets(
             setOf("id", "type", "status", "issued_on", "issued_at", "currency", "fulfillment", "source"),
             setOf("id", "type", "status", "issued_on", "issued_at", "currency", "source"),
         )
         return ReceiptDocument(
             id = nullableNonEmptyString("id"),
+            localDocumentId = localDocumentId,
             type = requiredEnumString("type", DOCUMENT_TYPES),
             status = enumValue(requiredString("status"), ReceiptStatus.entries, ReceiptStatus::wireValue),
             issuedOn = nullableIsoDate("issued_on"),
@@ -259,8 +260,12 @@ object ReceiptV2Json {
                 quantity.requireOnlyKeys("value", "unit")
                 ReceiptQuantity(
                     value = quantity.requiredPositiveNumberText("value"),
-                    unit = enumValue(quantity.requiredString("unit"), QuantityUnit.entries, QuantityUnit::wireValue),
-                )
+                    unit = quantity.requiredString("unit").let { raw ->
+                        QuantityUnit.entries.firstOrNull { it.wireValue == raw } ?: QuantityUnit.UNKNOWN
+                    },
+                    rawUnit = quantity.requiredString("unit").takeUnless { raw ->
+                        QuantityUnit.entries.any { it.wireValue == raw }
+                    },                )
             },
             unitPriceAmountMinor = nullableNonNegativeLong("unit_price_amount_minor"),
             grossAmountMinor = nullableNonNegativeLong("gross_amount_minor"),

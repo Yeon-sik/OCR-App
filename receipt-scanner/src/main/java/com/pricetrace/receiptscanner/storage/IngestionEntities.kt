@@ -12,7 +12,7 @@ import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.LocalEvidence
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 
-@Entity(tableName = "ingestion_sessions", indices = [Index("local_document_id"), Index("canonical_fingerprint")])
+@Entity(tableName = "ingestion_sessions", indices = [Index("local_document_id"), Index("canonical_fingerprint"), Index("import_fingerprint")])
 internal data class IngestionSessionEntity(
     @PrimaryKey @ColumnInfo(name = "ingestion_id") val ingestionId: String,
     @ColumnInfo(name = "local_document_id") val localDocumentId: String,
@@ -21,6 +21,10 @@ internal data class IngestionSessionEntity(
     @ColumnInfo(name = "review_status") val reviewStatus: String,
     @ColumnInfo(name = "created_at") val createdAt: String,
     @ColumnInfo(name = "updated_at") val updatedAt: String,
+    @ColumnInfo(name = "revision_seq") val revisionSeq: Long,
+    @ColumnInfo(name = "verified_canonical_fingerprint") val verifiedCanonicalFingerprint: String?,
+    @ColumnInfo(name = "verified_at") val verifiedAt: String?,
+    @ColumnInfo(name = "import_fingerprint") val importFingerprint: String?,
 )
 
 @Entity(tableName = "ingestion_projections", primaryKeys = ["ingestion_id", "projection"], indices = [Index("status")])
@@ -33,6 +37,7 @@ internal data class IngestionProjectionEntity(
     @ColumnInfo(name = "attempt_count") val attemptCount: Int,
     @ColumnInfo(name = "last_error") val lastError: String?,
     @ColumnInfo(name = "updated_at") val updatedAt: String,
+    @ColumnInfo(name = "metadata_json") val metadataJson: String?,
 )
 
 @Entity(tableName = "ingestion_attachments", primaryKeys = ["ingestion_id", "attachment_id"], indices = [Index("ingestion_id"), Index("page_id")])
@@ -44,24 +49,60 @@ internal data class IngestionAttachmentEntity(
     @ColumnInfo(name = "file_readable") val fileReadable: Boolean,
 )
 
-internal fun IngestionSessionEntity.toDomain(projections: List<IngestionProjectionEntity>, attachments: List<IngestionAttachmentEntity> = emptyList()) = IngestionSession(
-    ingestionId, localDocumentId, envelopeStorageKey, canonicalFingerprint,
-    IngestionReviewStatus.entries.first { it.wireValue == reviewStatus }, createdAt, updatedAt,
-    projections.map(IngestionProjectionEntity::toDomain),
-    attachments.map { LocalEvidence(it.attachmentId, SourceAttachmentType.fromWireValue(it.type), it.fileReadable, it.pageId) },
+internal fun IngestionSessionEntity.toDomain(
+    projections: List<IngestionProjectionEntity>,
+    attachments: List<IngestionAttachmentEntity> = emptyList(),
+) = IngestionSession(
+    ingestionId = ingestionId,
+    localDocumentId = localDocumentId,
+    envelopeStorageKey = envelopeStorageKey,
+    canonicalFingerprint = canonicalFingerprint,
+    reviewStatus = IngestionReviewStatus.entries.first { it.wireValue == reviewStatus },
+    createdAt = createdAt,
+    updatedAt = updatedAt,
+    projections = projections.map(IngestionProjectionEntity::toDomain),
+    attachments = attachments.map { LocalEvidence(it.attachmentId, SourceAttachmentType.fromWireValue(it.type), it.fileReadable, it.pageId) },
+    revisionSeq = revisionSeq.coerceAtLeast(1),
+    verifiedCanonicalFingerprint = verifiedCanonicalFingerprint,
+    verifiedAt = verifiedAt,
+    importFingerprint = importFingerprint ?: canonicalFingerprint,
 )
 
 internal fun IngestionProjectionEntity.toDomain() = ProjectionState(
-    IngestionProjection.entries.first { it.wireValue == projection }, ProjectionStatus.fromPersisted(status),
-    idempotencyKey, remoteId, attemptCount, lastError, updatedAt,
+    projection = IngestionProjection.entries.first { it.wireValue == projection },
+    status = ProjectionStatus.fromPersisted(status),
+    idempotencyKey = idempotencyKey,
+    remoteId = remoteId,
+    attemptCount = attemptCount,
+    lastError = lastError,
+    updatedAt = updatedAt,
+    metadataJson = metadataJson,
 )
 
 internal fun ProjectionState.toEntity(ingestionId: String) = IngestionProjectionEntity(
-    ingestionId, projection.wireValue, status.wireValue, idempotencyKey, remoteId, attemptCount, lastError, updatedAt,
+    ingestionId = ingestionId,
+    projection = projection.wireValue,
+    status = status.wireValue,
+    idempotencyKey = idempotencyKey,
+    remoteId = remoteId,
+    attemptCount = attemptCount,
+    lastError = lastError,
+    updatedAt = updatedAt,
+    metadataJson = metadataJson,
 )
 
 internal fun LocalEvidence.toEntity(ingestionId: String) = IngestionAttachmentEntity(ingestionId, attachmentId, type.wireValue, pageId, fileReadable)
 
 internal fun IngestionSession.toEntity() = IngestionSessionEntity(
-    ingestionId, localDocumentId, envelopeStorageKey, canonicalFingerprint, reviewStatus.wireValue, createdAt, updatedAt,
+    ingestionId = ingestionId,
+    localDocumentId = localDocumentId,
+    envelopeStorageKey = envelopeStorageKey,
+    canonicalFingerprint = canonicalFingerprint,
+    reviewStatus = reviewStatus.wireValue,
+    createdAt = createdAt,
+    updatedAt = updatedAt,
+    revisionSeq = revisionSeq,
+    verifiedCanonicalFingerprint = verifiedCanonicalFingerprint,
+    verifiedAt = verifiedAt,
+    importFingerprint = importFingerprint,
 )

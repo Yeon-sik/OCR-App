@@ -116,6 +116,7 @@ import com.pricetrace.receiptscanner.nutrition.NutritionFieldVerdict
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.nutrition.NutritionUnit
+import com.pricetrace.receiptscanner.ingestion.MerchantCandidate
 import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
 import com.pricetrace.receiptscanner.publisher.PriceObservationSource
 import com.pricetrace.receiptscanner.preflight.ReceiptAiReviewStatus
@@ -170,6 +171,22 @@ fun ReceiptOcrContent(
     onLoadCashOsLedgerCandidates: () -> Unit = {},
     onSelectCashOsLedgerEntry: (String) -> Unit = {},
     onSubmitCashOsReceipt: () -> Unit = {},
+    isCanonicalIngestion: Boolean = false,
+    canonicalNutritionCount: Int = 0,
+    nutritionSignedInEmail: String? = null,
+    isSubmittingCanonicalNutrition: Boolean = false,
+    onSubmitCanonicalNutrition: () -> Unit = {},
+    isSubmittingCanonicalPriceTrace: Boolean = false,
+    canonicalPriceTraceReceiptId: String? = null,
+    canonicalPriceTraceLastError: String? = null,
+    onSubmitCanonicalPriceTrace: () -> Unit = {},
+    merchantCandidate: MerchantCandidate? = null,
+    merchantCandidateVerified: Boolean = false,
+    isSubmittingMerchantCandidate: Boolean = false,
+    merchantCandidateId: String? = null,
+    merchantCandidateLastError: String? = null,
+    onConfirmMerchantCandidate: () -> Unit = {},
+    onSubmitMerchantCandidate: () -> Unit = {},
     onMerchantNameChanged: (String) -> Unit = {},
     onBranchNameChanged: (String) -> Unit = {},
     onBusinessRegistrationNumberChanged: (String) -> Unit = {},
@@ -246,6 +263,7 @@ fun ReceiptOcrContent(
                     AppScreen.ITEM_REVIEW,
                     AppScreen.RECONCILIATION,
                     AppScreen.NUTRITION_REVIEW,
+                    AppScreen.MERCHANT_REVIEW,
                 ) &&
                 pages.isEmpty()
             ) {
@@ -271,6 +289,19 @@ fun ReceiptOcrContent(
                         onStartReview = onStartImportReview,
                         onAttachImage = onAttachImportImage,
                         onCancel = onCancelImport,
+                    )
+                }
+                AppScreen.MERCHANT_REVIEW -> uiState.merchantCandidate?.let { candidate ->
+                    MerchantCandidateReviewScreen(
+                        candidate = candidate,
+                        verified = uiState.merchantCandidateVerified,
+                        signedInEmail = uiState.priceTraceSignedInEmail,
+                        isSubmitting = uiState.isSubmittingMerchantCandidate,
+                        submittedCandidateId = uiState.merchantCandidateId,
+                        lastError = uiState.merchantCandidateLastError,
+                        onBack = onBack,
+                        onConfirm = onConfirmMerchantCandidate,
+                        onSubmit = onSubmitMerchantCandidate,
                     )
                 }
                 AppScreen.API_SETTINGS -> ApiSettingsScreen(
@@ -420,6 +451,16 @@ fun ReceiptOcrContent(
                     onShare = onShare,
                     onShowPriceObservationSubmit = onShowPriceObservationSubmit,
                     isRestaurantReceipt = uiState.receipt?.merchant?.businessKind == BusinessKind.FOOD_SERVICE,
+                    priceTraceSignedInEmail = uiState.priceTraceSignedInEmail,
+                    isCanonicalIngestion = uiState.isCanonicalIngestion,
+                    canonicalNutritionCount = uiState.canonicalNutritionCount,
+                    nutritionSignedInEmail = uiState.nutritionSignedInEmail,
+                    isSubmittingCanonicalNutrition = uiState.isNutritionPublishing,
+                    onSubmitCanonicalNutrition = onSubmitCanonicalNutrition,
+                    isSubmittingCanonicalPriceTrace = uiState.isSubmittingCanonicalPriceTrace,
+                    canonicalPriceTraceReceiptId = uiState.canonicalPriceTraceReceiptId,
+                    canonicalPriceTraceLastError = uiState.canonicalPriceTraceLastError,
+                    onSubmitCanonicalPriceTrace = onSubmitCanonicalPriceTrace,
                     cashOsSignedInEmail = uiState.cashOsSignedInEmail,
                     cashOsLedgerEntryId = uiState.cashOsLedgerEntryId,
                     cashOsLedgerCandidates = uiState.cashOsLedgerCandidates,
@@ -801,6 +842,86 @@ private fun ImportPreviewScreen(
             TextButton(onClick = onCancel, modifier = Modifier.fillMaxWidth().testTag("cancel_import_button")) {
                 Text("취소")
             }
+        }
+    }
+}
+
+@Composable
+private fun MerchantCandidateReviewScreen(
+    candidate: MerchantCandidate,
+    verified: Boolean,
+    signedInEmail: String?,
+    isSubmitting: Boolean,
+    submittedCandidateId: String?,
+    lastError: String?,
+    onBack: () -> Unit,
+    onConfirm: () -> Unit,
+    onSubmit: () -> Unit,
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().testTag("merchant_candidate_review"),
+        contentPadding = PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item {
+            ScreenHeader(
+                "판매처 후보 검수",
+                "외부 JSON은 초안입니다. 원본 이미지와 대조한 뒤 PriceTrace에 후보로 제출하세요.",
+                onBack,
+            )
+        }
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Merchant candidate", style = MaterialTheme.typography.titleMedium)
+                    Text("판매처 · " + candidate.name)
+                    candidate.branchName?.takeIf(String::isNotBlank)?.let { Text("지점 · " + it) }
+                    candidate.address?.takeIf(String::isNotBlank)?.let { Text("주소 · " + it) }
+                    candidate.phone?.takeIf(String::isNotBlank)?.let { Text("전화 · " + it) }
+                    candidate.businessRegistrationNumber?.takeIf(String::isNotBlank)?.let { Text("사업자번호 · " + it) }
+                    Text("업종 · " + candidate.businessKind.name)
+                    Text("근거 이미지 · " + candidate.sourceAttachmentIds.size + "개")
+                    candidate.sourceNamespace?.takeIf(String::isNotBlank)?.let { Text("source namespace · " + it) }
+                    candidate.sourceLocationCode?.takeIf(String::isNotBlank)?.let { Text("source location · " + it) }
+                }
+            }
+        }
+        item {
+            Text(
+                "PriceTrace에는 후보 사실과 로컬 근거 참조만 전송합니다. OCR 원문·원본 이미지는 외부로 보내지 않습니다.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        item {
+            if (!verified) {
+                Button(
+                    onClick = onConfirm,
+                    enabled = !isSubmitting,
+                    modifier = Modifier.fillMaxWidth().testTag("merchant_candidate_confirm_button"),
+                ) {
+                    Text("검수 완료")
+                }
+            }
+            OutlinedButton(
+                onClick = onSubmit,
+                enabled = verified && signedInEmail != null && !isSubmitting,
+                modifier = Modifier.fillMaxWidth().testTag("merchant_candidate_submit_button"),
+            ) {
+                if (isSubmitting) BusyIndicator()
+                Text("PriceTrace에 merchant candidate 제출")
+            }
+            Text(
+                when {
+                    signedInEmail == null -> "PriceTrace 연결 설정에서 로그인 후 제출할 수 있습니다."
+                    submittedCandidateId != null -> "제출 완료 · " + submittedCandidateId
+                    lastError != null -> "재시도 필요 · " + lastError
+                    verified -> "검수 완료 상태입니다. 제출 버튼을 눌러 서버 candidate RPC를 호출하세요."
+                    else -> "검수 완료 전에는 외부 제출이 차단됩니다."
+                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }
@@ -2707,6 +2828,16 @@ fun JsonPreviewScreen(
     onShare: () -> Unit,
     onShowPriceObservationSubmit: () -> Unit = {},
     isRestaurantReceipt: Boolean = false,
+    priceTraceSignedInEmail: String? = null,
+    isCanonicalIngestion: Boolean = false,
+    canonicalNutritionCount: Int = 0,
+    nutritionSignedInEmail: String? = null,
+    isSubmittingCanonicalNutrition: Boolean = false,
+    onSubmitCanonicalNutrition: () -> Unit = {},
+    isSubmittingCanonicalPriceTrace: Boolean = false,
+    canonicalPriceTraceReceiptId: String? = null,
+    canonicalPriceTraceLastError: String? = null,
+    onSubmitCanonicalPriceTrace: () -> Unit = {},
     cashOsSignedInEmail: String? = null,
     cashOsLedgerEntryId: String? = null,
     cashOsLedgerCandidates: List<CashOsLedgerCandidate> = emptyList(),
@@ -2792,27 +2923,82 @@ fun JsonPreviewScreen(
                 }
             }
         }
-        item {
-            OutlinedButton(
-                onClick = onShowPriceObservationSubmit,
-                enabled = verified && !isExporting,
-                modifier = Modifier.fillMaxWidth().testTag("price_observation_submit_button"),
-            ) {
+        if (isCanonicalIngestion) {
+            item {
+                OutlinedButton(
+                    onClick = onSubmitCanonicalPriceTrace,
+                    enabled = verified && priceTraceSignedInEmail != null &&
+                        !isExporting && !isSubmittingCanonicalPriceTrace,
+                    modifier = Modifier.fillMaxWidth().testTag("pricetrace_canonical_submit_button"),
+                ) {
+                    if (isSubmittingCanonicalPriceTrace) BusyIndicator()
+                    Text("PriceTrace에 receipt.v2 + price observation 저장")
+                }
                 Text(
-                    if (isRestaurantReceipt) "검수된 식당 영수증을 PriceTrace에 제출"
-                    else "검증된 가격 1건을 PriceTrace에 제출",
+                    when {
+                        priceTraceSignedInEmail == null -> "PriceTrace 연결 설정에서 별도 로그인 후 canonical 제출할 수 있습니다."
+                        canonicalPriceTraceReceiptId != null -> "PriceTrace canonical receipt 완료 · $canonicalPriceTraceReceiptId"
+                        canonicalPriceTraceLastError != null -> "PriceTrace 재시도 필요 · $canonicalPriceTraceLastError"
+                        else -> "검수된 전체 receipt.v2를 source images/raw text/payment reference 없이 제출합니다."
+                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        } else {
+            item {
+                OutlinedButton(
+                    onClick = onShowPriceObservationSubmit,
+                    enabled = verified && !isExporting,
+                    modifier = Modifier.fillMaxWidth().testTag("price_observation_submit_button"),
+                ) {
+                    Text(
+                        if (isRestaurantReceipt) "검수된 식당 영수증을 PriceTrace에 제출"
+                        else "검증된 가격 1건을 PriceTrace에 제출",
+                    )
+                }
+            }
+        }
+        if (isCanonicalIngestion && canonicalNutritionCount > 0) {
+            item {
+                OutlinedButton(
+                    onClick = onSubmitCanonicalNutrition,
+                    enabled = verified && nutritionSignedInEmail != null && !isExporting && !isSubmittingCanonicalNutrition,
+                    modifier = Modifier.fillMaxWidth().testTag("fitness_canonical_submit_button"),
+                ) {
+                    if (isSubmittingCanonicalNutrition) BusyIndicator()
+                    Text("관련 nutrition을 Fitness에 저장")
+                }
+                Text(
+                    if (nutritionSignedInEmail == null) {
+                        "Fitness 연결 설정에서 별도 로그인 후 제출할 수 있습니다."
+                    } else {
+                        "관련 nutrition " + canonicalNutritionCount + "개를 nutrition-label.v1/food-estimate.v1로 제출합니다."
+                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
                 )
             }
         }
-        item {
-            CashOsLedgerSelectionPanel(
-                signedInEmail = cashOsSignedInEmail,
-                selectedLedgerEntryId = cashOsLedgerEntryId,
-                candidates = cashOsLedgerCandidates,
-                isLoading = isLoadingCashOsLedgerCandidates,
-                onLoad = onLoadCashOsLedgerCandidates,
-                onSelect = onSelectCashOsLedgerEntry,
-            )
+        if (isCanonicalIngestion) {
+            item {
+                Text(
+                    "CashOS v3가 원장·계정·카테고리를 서버에서 resolve합니다. 신규 OCR 흐름에서는 원장을 사전 선택하지 않습니다.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        } else {
+            item {
+                CashOsLedgerSelectionPanel(
+                    signedInEmail = cashOsSignedInEmail,
+                    selectedLedgerEntryId = cashOsLedgerEntryId,
+                    candidates = cashOsLedgerCandidates,
+                    isLoading = isLoadingCashOsLedgerCandidates,
+                    onLoad = onLoadCashOsLedgerCandidates,
+                    onSelect = onSelectCashOsLedgerEntry,
+                )
+            }
         }
         item {
             OutlinedButton(

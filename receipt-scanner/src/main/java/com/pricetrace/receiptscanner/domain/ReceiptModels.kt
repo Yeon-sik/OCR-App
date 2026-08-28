@@ -102,7 +102,11 @@ data class ReceiptQuantity(
     /** Exact decimal text. It is emitted as a JSON number, never through Double. */
     val value: String,
     val unit: QuantityUnit = QuantityUnit.EACH,
-)
+    /** Unknown/non-enum units are retained verbatim for receipt.v2 interoperability. */
+    val rawUnit: String? = null,
+) {
+    val wireUnit: String get() = rawUnit ?: unit.wireValue
+}
 
 data class ParsedLineItem(
     val id: String,

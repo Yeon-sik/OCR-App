@@ -114,8 +114,43 @@ class YeonsikOcrIngestionTest {
         assertEquals(ProjectionStatus.UPLOADED, retried.single().status)
         assertEquals(1, calls[IngestionProjection.PRICETRACE_RECEIPT])
         assertEquals(2, calls[IngestionProjection.FITNESS_NUTRITION])
+        assertEquals(fitness.idempotencyKey, retried.single().idempotencyKey)
     }
 
+    @Test
+    fun `external decode downgrades but local persisted decode preserves verified revision`() {
+        val imported = import(restaurantJson(), "local-persisted")
+        val envelope = (imported.draft as CanonicalDraft.Envelope).value
+        val verifiedReceipt = requireNotNull(envelope.receipt).copy(
+            document = requireNotNull(envelope.receipt).document.copy(
+                status = com.pricetrace.receiptscanner.domain.ReceiptStatus.FINAL,
+                source = requireNotNull(envelope.receipt).document.source.copy(
+                    transcriptionStatus = com.pricetrace.receiptscanner.domain.TranscriptionStatus.USER_VERIFIED,
+                ),
+            ),
+        )
+        val encoded = YeonsikOcrEnvelopeJson.encode(envelope.copy(receipt = verifiedReceipt))
+
+        val externalRead = YeonsikOcrEnvelopeJson.decode(encoded, "local-persisted")
+        val localRead = YeonsikOcrEnvelopeJson.decode(
+            encoded,
+            "local-persisted",
+            preservePersistedVerification = true,
+        )
+
+        assertEquals(
+            com.pricetrace.receiptscanner.domain.TranscriptionStatus.PARSED,
+            externalRead.receipt?.document?.source?.transcriptionStatus,
+        )
+        assertEquals(
+            com.pricetrace.receiptscanner.domain.TranscriptionStatus.USER_VERIFIED,
+            localRead.receipt?.document?.source?.transcriptionStatus,
+        )
+        assertEquals(
+            com.pricetrace.receiptscanner.domain.ReceiptStatus.FINAL,
+            localRead.receipt?.document?.status,
+        )
+    }
     @Test
     fun `same canonical bundle is duplicate regardless of local document id`() = runBlocking {
         val store = InMemoryIngestionSessionStore()
@@ -154,6 +189,57 @@ class YeonsikOcrIngestionTest {
         )
     }
 
+    @Test
+    fun `canonical revision requires re verification before submit`() = runBlocking {
+        val store = InMemoryIngestionSessionStore()
+        val requests = mutableListOf<ProjectionRequest>()
+        val orchestrator = IngestionOrchestrator(
+            store = store,
+            submitters = mapOf(
+                IngestionProjection.PRICETRACE_RECEIPT to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                        requests += request
+                        return ProjectionSubmission.Success("remote-receipt")
+                    }
+                },
+            ),
+            now = { "2026-08-27T00:00:00Z" },
+        )
+        val envelope = (import(restaurantJson(), "local-revision").draft as CanonicalDraft.Envelope).value
+        val evidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("food", SourceAttachmentType.FOOD_PHOTO, true),
+        )
+        val started = orchestrator.start("ingestion-revision", "local-revision", envelope, evidence) as IngestionStartResult.Success
+        orchestrator.markUserVerified("ingestion-revision", envelope, evidence)
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            orchestrator.submitProjection("ingestion-revision", IngestionProjection.PRICETRACE_RECEIPT, envelope).status,
+        )
+
+        val revisedEnvelope = envelope.copy(
+            classificationHints = envelope.classificationHints + ("cashos.category_hint" to "updated"),
+        )
+        val revised = orchestrator.reviseCanonicalDraft("ingestion-revision", revisedEnvelope) as IngestionStartResult.Success
+        assertEquals(2L, revised.session.revisionSeq)
+        assertEquals(null, revised.session.verifiedCanonicalFingerprint)
+        assertEquals(ProjectionStatus.PENDING, revised.session.projections.first { it.projection == IngestionProjection.PRICETRACE_RECEIPT }.status)
+        assertEquals(null, revised.session.projections.first { it.projection == IngestionProjection.PRICETRACE_RECEIPT }.idempotencyKey)
+
+        val blocked = orchestrator.submitProjection("ingestion-revision", IngestionProjection.PRICETRACE_RECEIPT, revisedEnvelope)
+        assertEquals(ProjectionStatus.BLOCKED, blocked.status)
+        assertEquals("projection_not_reverified", blocked.lastError)
+        assertEquals(1, requests.size)
+
+        orchestrator.markUserVerified("ingestion-revision", revisedEnvelope, evidence)
+        val retried = orchestrator.submitProjection("ingestion-revision", IngestionProjection.PRICETRACE_RECEIPT, revisedEnvelope)
+        assertEquals(ProjectionStatus.UPLOADED, retried.status)
+        assertEquals(2, requests.size)
+        assertFalse(requests[0].idempotencyKey == requests[1].idempotencyKey)
+        assertEquals(2L, requests[1].revisionSeq)
+        assertEquals(revised.session.canonicalFingerprint, requests[1].canonicalFingerprint)
+        assertEquals(started.session.ingestionId, revised.session.ingestionId)
+    }
     private fun import(
         value: String,
         localId: String,

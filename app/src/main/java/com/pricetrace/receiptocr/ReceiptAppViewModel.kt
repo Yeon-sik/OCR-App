@@ -50,8 +50,13 @@ import com.pricetrace.receiptscanner.importer.ExternalJsonImporter
 import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionOrchestrator
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
+import com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus
 import com.pricetrace.receiptscanner.ingestion.IngestionStartResult
+import com.pricetrace.receiptscanner.ingestion.MerchantCandidate
+import com.pricetrace.receiptscanner.ingestion.ProjectionState
+import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.LocalEvidence
+import com.pricetrace.receiptscanner.ingestion.SourceAttachment
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeJson
@@ -124,6 +129,11 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.LocalDate
 import java.time.OffsetDateTime
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 
 private class VerifiedDraftGateBlockedException(message: String) : IllegalStateException(message)
 
@@ -136,6 +146,7 @@ enum class AppScreen {
     API_SETTINGS,
     IMAGE_CONFIRM,
     IMPORT_PREVIEW,
+    MERCHANT_REVIEW,
     OCR_PROGRESS,
     FIELD_REVIEW,
     ITEM_REVIEW,
@@ -152,6 +163,13 @@ data class ReceiptAppUiState(
     val screen: AppScreen = AppScreen.SESSION_LIST,
     val selectedWorkflow: OcrWorkflowType = OcrWorkflowType.PRICE_TRACE_RECEIPT,
     val inputOrigin: InputOrigin = InputOrigin.ANDROID_OCR,
+    val isCanonicalIngestion: Boolean = false,
+    val canonicalNutritionCount: Int = 0,
+    val merchantCandidate: MerchantCandidate? = null,
+    val merchantCandidateVerified: Boolean = false,
+    val isSubmittingMerchantCandidate: Boolean = false,
+    val merchantCandidateId: String? = null,
+    val merchantCandidateLastError: String? = null,
     val isPreparingScanner: Boolean = false,
     val isImportingPages: Boolean = false,
     val isProcessingOcr: Boolean = false,
@@ -224,6 +242,9 @@ data class ReceiptAppUiState(
     val isLoadingPriceObservationProducts: Boolean = false,
     val isSubmittingPriceObservation: Boolean = false,
     val isSubmittingRestaurantReceipt: Boolean = false,
+    val isSubmittingCanonicalPriceTrace: Boolean = false,
+    val canonicalPriceTraceReceiptId: String? = null,
+    val canonicalPriceTraceLastError: String? = null,
     val restaurantReceiptId: String? = null,
     val restaurantReceiptReplayed: Boolean? = null,
     val restaurantReceiptItemCount: Int? = null,
@@ -290,6 +311,7 @@ class ReceiptAppViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val persistenceMutex = Mutex()
+    private val canonicalRevisionMutex = Mutex()
     private val persistedEditIds = mutableSetOf<String>()
     private var reviewController: ReceiptReviewController? = null
     private var preflightPages: List<ReceiptPage> = emptyList()
@@ -658,20 +680,49 @@ class ReceiptAppViewModel(
         documentId: String,
         restoredOcr: OcrDocument?,
     ): Boolean {
-        if (session.inputOrigin != InputOrigin.EXTERNAL_JSON || session.workflowDraftStorageKey == null ||
-            !session.upstreamDocumentId.orEmpty().startsWith("envelope-")
-        ) return false
+        if (session.workflowDraftStorageKey == null) return false
+        val ingestionSession = container.ingestionSessionStore.get(ingestionIdFor(documentId)) ?: return false
         val envelope = loadIngestionEnvelope(documentId) ?: return false
+        val merchantCandidate = envelope.merchantCandidate
+        if (merchantCandidate != null && envelope.receipt == null && envelope.nutrition.isEmpty()) {
+            val canonicalVerified = ingestionSession.reviewStatus == IngestionReviewStatus.READY &&
+                ingestionSession.verifiedCanonicalFingerprint == ingestionSession.canonicalFingerprint
+            val projection = ingestionSession.projections.firstOrNull {
+                it.projection == IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE
+            }
+            mutableUiState.value = mutableUiState.value.copy(
+                screen = AppScreen.MERCHANT_REVIEW,
+                currentDocumentId = documentId,
+                merchantCandidate = merchantCandidate,
+                merchantCandidateVerified = canonicalVerified,
+                isSubmittingMerchantCandidate = false,
+                merchantCandidateId = projection?.remoteId,
+                merchantCandidateLastError = projection?.lastError,
+                canonicalNutritionCount = 0,
+                isCanonicalIngestion = true,
+            )
+            return true
+        }
         envelope.receipt?.let { receipt ->
             val edits = repository.getEdits(documentId)
             persistedEditIds.clear()
             persistedEditIds += edits.map { it.id }
             reviewController = ReceiptReviewController(receipt, edits)
+            val priceTraceProjection = ingestionSession.projections.firstOrNull { it.projection == IngestionProjection.PRICETRACE_RECEIPT }
+            val cashOsProjection = ingestionSession.projections.firstOrNull { it.projection == IngestionProjection.CASHOS_RECEIPT }
             mutableUiState.value = stateFromReview(
                 screen = AppScreen.FIELD_REVIEW,
                 ocrDocument = restoredOcr,
                 message = "통합 receipt 초안을 복원했습니다. 원본 증거와 모든 관련 nutrition 링크를 확인하세요.",
                 reviewedAt = session.reviewedAt.takeIf { receipt.document.source.transcriptionStatus == TranscriptionStatus.USER_VERIFIED },
+            ).copy(
+                isCanonicalIngestion = true,
+                canonicalNutritionCount = envelope.nutrition.size,
+                isSubmittingCanonicalPriceTrace = false,
+                canonicalPriceTraceReceiptId = priceTraceProjection?.remoteId,
+                canonicalPriceTraceLastError = priceTraceProjection?.lastError,
+                cashOsReceiptId = cashOsProjection?.remoteId,
+                cashOsReceiptLastError = cashOsProjection?.lastError,
             )
             return true
         }
@@ -683,6 +734,9 @@ class ReceiptAppViewModel(
                 draft = productLabel,
                 ocrDocument = restoredOcr,
                 message = "통합 nutrition 초안을 복원했습니다. 원본 라벨을 대조하세요.",
+            ).copy(
+                isCanonicalIngestion = true,
+                canonicalNutritionCount = 1,
             )
             return true
         }
@@ -1227,11 +1281,13 @@ class ReceiptAppViewModel(
             mutableUiState.value = state.copy(message = "조회된 후보만 선택할 수 있습니다.")
             return
         }
-        val documentId = state.receipt?.document?.id ?: return
+        val documentId = state.receipt?.document?.localDocumentId
+            ?: state.receipt?.document?.id
+            ?: return
         container.cashOsLedgerSelectionStore.saveSelectedLedgerEntry(documentId, candidate.id)
         mutableUiState.value = state.copy(cashOsLedgerEntryId = candidate.id, message = "CashOS 원장 후보를 선택했습니다.")
     }
-    fun submitCashOsReceipt() {
+    private fun submitLegacyCashOsReceipt() {
         val state = mutableUiState.value
         val receipt = state.receipt
         if (state.isSubmittingCashOsReceipt) return
@@ -1294,6 +1350,244 @@ class ReceiptAppViewModel(
                     )
                     recordProjectionFailure(documentId, IngestionProjection.CASHOS_RECEIPT, result.message ?: result.kind.name, payload.idempotencyKey)
                 }
+            }
+        }
+    }
+    fun confirmMerchantCandidate() {
+        val state = mutableUiState.value
+        val candidate = state.merchantCandidate ?: return
+        if (state.merchantCandidateVerified) return
+        val documentId = state.currentDocumentId ?: return
+        if (candidate.name.isBlank()) {
+            mutableUiState.value = state.copy(message = "판매처 이름을 먼저 확인하세요.")
+            return
+        }
+        viewModelScope.launch {
+            val gate = currentVerificationGate(documentId)
+            if (!gate.isAllowed) {
+                mutableUiState.value = mutableUiState.value.copy(message = verifiedDraftGateMessage(gate))
+                return@launch
+            }
+            val verification = markIngestionVerified(documentId)
+            when {
+                verification == null -> mutableUiState.value = mutableUiState.value.copy(
+                    message = "merchant candidate canonical session을 찾지 못했습니다.",
+                )
+                verification is IngestionStartResult.Failure -> mutableUiState.value = mutableUiState.value.copy(
+                    message = "merchant candidate 검증을 완료하지 못했습니다: " + verification.issues.joinToString(),
+                )
+                else -> mutableUiState.value = mutableUiState.value.copy(
+                    merchantCandidateVerified = true,
+                    message = "merchant candidate 검수를 완료했습니다. PriceTrace 제출을 별도로 실행할 수 있습니다.",
+                )
+            }
+        }
+    }
+
+    fun submitMerchantCandidate() {
+        val state = mutableUiState.value
+        val candidate = state.merchantCandidate ?: return
+        if (state.isSubmittingMerchantCandidate) return
+        if (!state.merchantCandidateVerified) {
+            mutableUiState.value = state.copy(message = "merchant candidate를 먼저 검수 완료하세요.")
+            return
+        }
+        if (state.priceTraceSignedInEmail == null) {
+            mutableUiState.value = state.copy(message = "연결 설정에서 먼저 PriceTrace에 로그인하세요.")
+            return
+        }
+        val documentId = state.currentDocumentId ?: return
+        viewModelScope.launch {
+            val gate = currentVerificationGate(documentId)
+            if (!gate.isAllowed) {
+                mutableUiState.value = mutableUiState.value.copy(message = verifiedDraftGateMessage(gate))
+                return@launch
+            }
+            mutableUiState.value = mutableUiState.value.copy(
+                isSubmittingMerchantCandidate = true,
+                merchantCandidateLastError = null,
+                message = null,
+            )
+            try {
+                val projection = submitCanonicalProjectionToUi(
+                    documentId = documentId,
+                    projection = IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE,
+                )
+                if (projection == null) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isSubmittingMerchantCandidate = false,
+                        merchantCandidateLastError = "canonical_envelope_missing",
+                        message = "PriceTrace merchant candidate canonical envelope를 찾지 못했습니다.",
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    isSubmittingMerchantCandidate = false,
+                    merchantCandidateLastError = error.message ?: error::class.java.simpleName,
+                    message = "PriceTrace merchant candidate projection을 완료하지 못했습니다.",
+                )
+            }
+        }
+    }
+
+    fun submitCanonicalPriceTrace() {
+        val state = mutableUiState.value
+        val receipt = state.receipt ?: return
+        if (!state.isCanonicalIngestion || state.isSubmittingCanonicalPriceTrace) return
+        if (state.priceTraceSignedInEmail == null) {
+            mutableUiState.value = state.copy(message = "연결 설정에서 먼저 PriceTrace에 로그인하세요.")
+            return
+        }
+        if (receipt.document.source.transcriptionStatus != TranscriptionStatus.USER_VERIFIED) {
+            mutableUiState.value = state.copy(message = "검수 완료 후 PriceTrace canonical receipt를 제출할 수 있습니다.")
+            return
+        }
+        val documentId = state.currentDocumentId ?: receipt.document.requireLocalDocumentId()
+        viewModelScope.launch {
+            val envelope = loadIngestionEnvelope(documentId)
+            if (envelope == null) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = "PriceTrace canonical envelope를 찾지 못했습니다.",
+                )
+                return@launch
+            }
+            val gate = currentVerificationGate(documentId)
+            if (!gate.isAllowed) {
+                mutableUiState.value = mutableUiState.value.copy(message = verifiedDraftGateMessage(gate))
+                return@launch
+            }
+            mutableUiState.value = mutableUiState.value.copy(
+                isSubmittingCanonicalPriceTrace = true,
+                canonicalPriceTraceLastError = null,
+                message = null,
+            )
+            try {
+                val projection = submitCanonicalProjectionToUi(
+                    documentId = documentId,
+                    projection = IngestionProjection.PRICETRACE_RECEIPT,
+                )
+                if (projection == null) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isSubmittingCanonicalPriceTrace = false,
+                        canonicalPriceTraceLastError = "canonical_envelope_missing",
+                        message = "PriceTrace canonical envelope를 찾지 못했습니다.",
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    isSubmittingCanonicalPriceTrace = false,
+                    canonicalPriceTraceLastError = error.message ?: error::class.java.simpleName,
+                    message = "PriceTrace canonical projection을 완료하지 못했습니다.",
+                )
+            }
+        }
+    }
+
+    fun submitCanonicalFitnessNutrition() {
+        val state = mutableUiState.value
+        if (!state.isCanonicalIngestion || state.canonicalNutritionCount <= 0) return
+        if (state.isNutritionPublishing) return
+        if (state.nutritionSignedInEmail == null) {
+            mutableUiState.value = state.copy(message = "연결 설정에서 먼저 Fitness에 로그인하세요.")
+            return
+        }
+        val receipt = state.receipt
+        if (receipt != null && receipt.document.source.transcriptionStatus != TranscriptionStatus.USER_VERIFIED) {
+            mutableUiState.value = state.copy(message = "관련 receipt 검수 완료 후 Fitness에 제출할 수 있습니다.")
+            return
+        }
+        val documentId = state.currentDocumentId ?: receipt?.document?.requireLocalDocumentId() ?: return
+        viewModelScope.launch {
+            val envelope = loadIngestionEnvelope(documentId)
+            if (envelope == null || envelope.nutrition.isEmpty()) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = "Fitness canonical nutrition artifact를 찾지 못했습니다.",
+                )
+                return@launch
+            }
+            val gate = currentVerificationGate(documentId)
+            if (!gate.isAllowed) {
+                mutableUiState.value = mutableUiState.value.copy(message = verifiedDraftGateMessage(gate))
+                return@launch
+            }
+            mutableUiState.value = mutableUiState.value.copy(
+                isNutritionPublishing = true,
+                message = null,
+            )
+            try {
+                val projection = submitCanonicalProjectionToUi(
+                    documentId = documentId,
+                    projection = IngestionProjection.FITNESS_NUTRITION,
+                )
+                if (projection == null) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isNutritionPublishing = false,
+                        message = "Fitness canonical envelope를 찾지 못했습니다.",
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    isNutritionPublishing = false,
+                    message = error.message ?: "Fitness canonical nutrition projection을 완료하지 못했습니다.",
+                )
+            }
+        }
+    }
+    fun submitCashOsReceipt() {
+        val state = mutableUiState.value
+        val receipt = state.receipt ?: return
+        if (state.isSubmittingCashOsReceipt) return
+        if (receipt.document.source.transcriptionStatus != TranscriptionStatus.USER_VERIFIED) {
+            mutableUiState.value = state.copy(message = "user_verified 영수증만 CashOS에 기록할 수 있습니다.")
+            return
+        }
+        if (state.cashOsSignedInEmail == null) {
+            mutableUiState.value = state.copy(message = "연결 설정에서 CashOS에 먼저 로그인하세요.")
+            return
+        }
+        val documentId = receipt.document.requireLocalDocumentId()
+        viewModelScope.launch {
+            val envelope = loadIngestionEnvelope(documentId)
+            if (envelope == null) {
+                submitLegacyCashOsReceipt()
+                return@launch
+            }
+            val gate = currentVerificationGate(documentId)
+            if (!gate.isAllowed) {
+                mutableUiState.value = mutableUiState.value.copy(message = verifiedDraftGateMessage(gate))
+                return@launch
+            }
+            mutableUiState.value = mutableUiState.value.copy(
+                isSubmittingCashOsReceipt = true,
+                cashOsReceiptLastError = null,
+                message = null,
+            )
+            try {
+                val projection = submitCanonicalProjectionToUi(
+                    documentId = documentId,
+                    projection = IngestionProjection.CASHOS_RECEIPT,
+                )
+                if (projection == null) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isSubmittingCashOsReceipt = false,
+                        cashOsReceiptLastError = "canonical_envelope_missing",
+                        message = "CashOS canonical envelope를 찾지 못했습니다.",
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    isSubmittingCashOsReceipt = false,
+                    cashOsReceiptLastError = error.message ?: error::class.java.simpleName,
+                    message = "CashOS canonical projection을 완료하지 못했습니다.",
+                )
             }
         }
     }
@@ -1364,6 +1658,7 @@ class ReceiptAppViewModel(
             YeonsikOcrEnvelopeJson.decode(
                 fileStore.readBytes(session.envelopeStorageKey).toString(Charsets.UTF_8),
                 documentId,
+                preservePersistedVerification = true,
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -1372,6 +1667,93 @@ class ReceiptAppViewModel(
         }
     }
 
+    private suspend fun syncCanonicalReceiptRevision(documentId: String, receipt: ReceiptV2): IngestionStartResult? =
+        canonicalRevisionMutex.withLock {
+            val envelope = loadIngestionEnvelope(documentId) ?: return@withLock null
+            val updated = envelope.copy(receipt = receipt)
+            val key = "${documentId}/ingestion/yeonsik-ocr.json"
+            fileStore.writeText(key, YeonsikOcrEnvelopeJson.encode(updated))
+            ingestionOrchestrator.reviseCanonicalDraft(ingestionIdFor(documentId), updated)
+        }
+
+    private suspend fun syncCanonicalNutritionRevision(documentId: String, draft: NutritionLabelDraft): IngestionStartResult? =
+        canonicalRevisionMutex.withLock {
+            val envelope = loadIngestionEnvelope(documentId) ?: return@withLock null
+            var replaced = false
+            val nutrition = envelope.nutrition.map { item ->
+                if (item is IngestionNutrition.ProductLabel &&
+                    (item.draft.documentId == draft.documentId || item.clientKey == draft.documentId || envelope.nutrition.size == 1)
+                ) {
+                    replaced = true
+                    item.copy(draft = draft)
+                } else item
+            }
+            if (!replaced) return@withLock IngestionStartResult.Failure(listOf("nutrition_artifact_not_found"))
+            val updated = envelope.copy(nutrition = nutrition)
+            val key = "${documentId}/ingestion/yeonsik-ocr.json"
+            fileStore.writeText(key, YeonsikOcrEnvelopeJson.encode(updated))
+            ingestionOrchestrator.reviseCanonicalDraft(ingestionIdFor(documentId), updated)
+        }
+
+    private suspend fun submitCanonicalProjectionToUi(
+        documentId: String,
+        projection: IngestionProjection,
+    ): ProjectionState? {
+        val envelope = loadIngestionEnvelope(documentId) ?: return null
+        val state = ingestionOrchestrator.submitProjection(ingestionIdFor(documentId), projection, envelope)
+        val metadata = state.metadataObject()
+        val current = mutableUiState.value
+        val message = when (state.status) {
+            ProjectionStatus.UPLOADED -> "${projection.wireValue} canonical projection을 완료했습니다.${state.remoteId?.let { " ($it)" }.orEmpty()}"
+            ProjectionStatus.BLOCKED -> "${projection.wireValue} projection이 차단되었습니다: ${state.lastError.orEmpty()}"
+            ProjectionStatus.FAILED -> "${projection.wireValue} projection에 실패했습니다. 같은 idempotency key로 재시도할 수 있습니다."
+            else -> state.lastError
+        }
+        mutableUiState.value = when (projection) {
+            IngestionProjection.CASHOS_RECEIPT -> current.copy(
+                isSubmittingCashOsReceipt = false,
+                cashOsLedgerEntryId = metadata?.stringValue("ledger_entry_id") ?: current.cashOsLedgerEntryId,
+                cashOsReceiptId = state.remoteId ?: current.cashOsReceiptId,
+                cashOsAccountResolution = metadata?.stringValue("account_resolution") ?: current.cashOsAccountResolution,
+                cashOsAccountCandidateIds = metadata?.stringValues("account_candidate_ids") ?: current.cashOsAccountCandidateIds,
+                cashOsReceiptLastError = state.lastError,
+                message = message,
+            )
+            IngestionProjection.PRICETRACE_RECEIPT -> current.copy(
+                isSubmittingRestaurantReceipt = false,
+                isSubmittingCanonicalPriceTrace = false,
+                canonicalPriceTraceReceiptId = state.remoteId ?: current.canonicalPriceTraceReceiptId,
+                canonicalPriceTraceLastError = state.lastError,
+                restaurantReceiptId = state.remoteId ?: current.restaurantReceiptId,
+                restaurantReceiptLastError = state.lastError,
+                message = message,
+            )
+            IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> current.copy(
+                isSubmittingMerchantCandidate = false,
+                merchantCandidateId = state.remoteId ?: current.merchantCandidateId,
+                merchantCandidateLastError = state.lastError,
+                message = message,
+            )
+            IngestionProjection.FITNESS_NUTRITION -> current.copy(
+                isNutritionPublishing = false,
+                message = message,
+            )
+            else -> current.copy(message = message)
+        }
+        return state
+    }
+
+    private fun ProjectionState.metadataObject(): kotlinx.serialization.json.JsonObject? = metadataJson?.let { value ->
+        runCatching { Json.parseToJsonElement(value).jsonObject }.getOrNull()
+    }
+
+    private fun kotlinx.serialization.json.JsonObject.stringValue(key: String): String? =
+        (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+
+    private fun kotlinx.serialization.json.JsonObject.stringValues(key: String): List<String> =
+        this[key]?.let { element ->
+            runCatching { element.jsonArray.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } }.getOrDefault(emptyList())
+        } ?: emptyList()
     private fun fallbackEvidenceType(envelope: YeonsikOcrEnvelope, pageIndex: Int): SourceAttachmentType = when {
         envelope.mode == com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT && pageIndex == 0 -> SourceAttachmentType.RECEIPT
         envelope.mode == com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT -> SourceAttachmentType.FOOD_PHOTO
@@ -1405,17 +1787,8 @@ class ReceiptAppViewModel(
         val envelope = loadIngestionEnvelope(documentId) ?: return null
         val evidence = localIngestionEvidence(documentId, envelope)
         container.ingestionSessionStore.save(current.copy(attachments = evidence, updatedAt = OffsetDateTime.now().toString()))
-        val result = ingestionOrchestrator.markUserVerified(ingestionIdFor(documentId), envelope, evidence)
-        if (result is IngestionStartResult.Success && envelope.receipt != null &&
-            result.session.projections.any { it.projection == IngestionProjection.CASHOS_RECEIPT } &&
-            container.cashOsLedgerSelectionStore.selectedLedgerEntryId(documentId) == null
-        ) {
-            ingestionOrchestrator.recordProjectionBlocked(
-                ingestionId = ingestionIdFor(documentId),
-                projection = IngestionProjection.CASHOS_RECEIPT,
-                message = "ledger_entry_not_selected",
-            )
-        }
+        val inputOrigin = repository.getSession(documentId)?.inputOrigin ?: InputOrigin.EXTERNAL_JSON
+        val result = ingestionOrchestrator.markUserVerified(ingestionIdFor(documentId), envelope, evidence, inputOrigin)
         return result
     }
 
@@ -1512,6 +1885,60 @@ class ReceiptAppViewModel(
             ).copy(isNutritionPublishing = true)
             try {
                 persistNutritionDraftNow(verified, uploadStatus = "pending")
+                val integratedEnvelope = loadIngestionEnvelope(sessionDocumentId)
+                if (integratedEnvelope != null) {
+                    val canonicalRevision = syncCanonicalNutritionRevision(sessionDocumentId, verified)
+                    if (canonicalRevision is IngestionStartResult.Failure) {
+                        persistNutritionDraftNow(latestDraft, uploadStatus = "local_only")
+                        mutableUiState.value = nutritionState(
+                            draft = latestDraft,
+                            ocrDocument = state.ocrDocument,
+                            message = "canonical nutrition envelope 갱신에 실패했습니다: ${canonicalRevision.issues.joinToString()}",
+                        )
+                        return@launch
+                    }
+                    val ingestionVerification = markIngestionVerified(sessionDocumentId)
+                    if (ingestionVerification is IngestionStartResult.Failure) {
+                        persistNutritionDraftNow(latestDraft, uploadStatus = "local_only")
+                        mutableUiState.value = nutritionState(
+                            draft = latestDraft,
+                            ocrDocument = state.ocrDocument,
+                            message = "통합 입력 검증을 완료하지 못했습니다: ${ingestionVerification.issues.joinToString()}",
+                        )
+                        return@launch
+                    }
+                    val finalGate = currentVerificationGate(sessionDocumentId)
+                    if (!finalGate.isAllowed) {
+                        persistNutritionDraftNow(latestDraft, uploadStatus = "local_only")
+                        mutableUiState.value = nutritionState(
+                            draft = latestDraft,
+                            ocrDocument = state.ocrDocument,
+                            message = verifiedDraftGateMessage(finalGate),
+                        )
+                        return@launch
+                    }
+                    val projection = submitCanonicalProjectionToUi(
+                        documentId = sessionDocumentId,
+                        projection = IngestionProjection.FITNESS_NUTRITION,
+                    )
+                    if (projection?.status == ProjectionStatus.UPLOADED) {
+                        updateNutritionSessionPublication(verified, "uploaded", null)
+                        mutableUiState.value = nutritionState(
+                            draft = verified,
+                            ocrDocument = state.ocrDocument,
+                            message = "Fitness에 ${projection.remoteId.orEmpty()} canonical nutrition을 저장했습니다.",
+                        )
+                    } else {
+                        val error = projection?.lastError ?: "fitness_projection_unavailable"
+                        updateNutritionSessionPublication(verified, "failed", error)
+                        mutableUiState.value = nutritionState(
+                            draft = verified,
+                            ocrDocument = state.ocrDocument,
+                            message = "Fitness canonical projection 실패: $error. 같은 입력으로 재시도할 수 있습니다.",
+                        )
+                    }
+                    return@launch
+                }
                 val ingestionVerification = markIngestionVerified(sessionDocumentId)
                 if (ingestionVerification is IngestionStartResult.Failure) {
                     runCatching { persistNutritionDraftNow(latestDraft, uploadStatus = "local_only") }
@@ -1534,28 +1961,18 @@ class ReceiptAppViewModel(
                 }
                 when (val outcome = nutritionGateway.publish(verified)) {
                     is NutritionPublishOutcome.Success -> {
-                        updateNutritionSessionPublication(
-                            verified,
-                            uploadStatus = "uploaded",
-                            lastError = null,
-                        )
+                        updateNutritionSessionPublication(verified, "uploaded", null)
                         recordProjectionUploaded(sessionDocumentId, IngestionProjection.FITNESS_NUTRITION, verified.foodId)
                         mutableUiState.value = nutritionState(
                             draft = verified,
                             ocrDocument = state.ocrDocument,
-                            message = "Fitness Nutrition DB에 private 식품으로 저장했습니다. " +
-                                "상품 연결·공개는 Fitness App의 별도 승인 흐름에서 처리합니다.",
+                            message = "Fitness Nutrition DB에 private 식품으로 저장했습니다. 상품 연결·공개는 Fitness App의 별도 승인 흐름에서 처리합니다.",
                         )
                     }
                     is NutritionPublishOutcome.Failure -> {
-                        updateNutritionSessionPublication(
-                            verified,
-                            uploadStatus = "failed",
-                            lastError = "nutrition_${outcome.reason.name.lowercase()}",
-                        )
+                        updateNutritionSessionPublication(verified, "failed", "nutrition_${outcome.reason.name.lowercase()}")
                         recordProjectionFailure(sessionDocumentId, IngestionProjection.FITNESS_NUTRITION, "nutrition_${outcome.reason.name.lowercase()}")
-                        val failureMessage = nutritionFailureMessage(outcome.reason) +
-                            " 확정 초안은 로컬에 보존했으므로 다시 전송할 수 있습니다."
+                        val failureMessage = nutritionFailureMessage(outcome.reason) + " 확정 초안은 로컬에 보존했으므로 다시 전송할 수 있습니다."
                         mutableUiState.value = nutritionState(
                             draft = verified,
                             ocrDocument = state.ocrDocument,
@@ -1569,16 +1986,15 @@ class ReceiptAppViewModel(
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (_: Exception) {
+            } catch (error: Exception) {
                 mutableUiState.value = nutritionState(
                     draft = verified,
                     ocrDocument = state.ocrDocument,
-                    message = "확정 초안을 저장하거나 전송하지 못했습니다. 현재 화면의 값은 유지됩니다.",
+                    message = error.message ?: "확정 초안을 저장하거나 전송하지 못했습니다. 현재 화면의 값은 유지됩니다.",
                 )
             }
         }
     }
-
     fun updateMerchantName(value: String) = applyEdit { updateMerchantName(value) }
     fun updateBranchName(value: String) = applyEdit { updateBranchName(value) }
     fun updateBusinessRegistrationNumber(value: String) = applyEdit { updateBusinessRegistrationNumber(value) }
@@ -1977,6 +2393,10 @@ class ReceiptAppViewModel(
     fun showJsonPreview() = navigate(AppScreen.JSON_PREVIEW)
     fun showPriceObservationSubmit() {
         val state = mutableUiState.value
+        if (state.isCanonicalIngestion) {
+            submitCanonicalPriceTrace()
+            return
+        }
         val receipt = state.receipt
         if (receipt?.document?.source?.transcriptionStatus != TranscriptionStatus.USER_VERIFIED) {
             mutableUiState.value = state.copy(
@@ -2227,7 +2647,7 @@ class ReceiptAppViewModel(
         }
     }
 
-    fun submitRestaurantReceipt() {
+    private fun submitLegacyRestaurantReceipt() {
         val state = mutableUiState.value
         val receipt = state.receipt
         if (state.isSubmittingRestaurantReceipt) return
@@ -2298,6 +2718,62 @@ class ReceiptAppViewModel(
         }
     }
 
+    fun submitRestaurantReceipt() {
+        val state = mutableUiState.value
+        val receipt = state.receipt ?: return
+        if (state.isSubmittingRestaurantReceipt) return
+        if (receipt.merchant.businessKind != BusinessKind.FOOD_SERVICE) {
+            mutableUiState.value = state.copy(message = "식당 영수증 워크플로에서만 식당 영수증을 제출할 수 있습니다.")
+            return
+        }
+        if (receipt.document.source.transcriptionStatus != TranscriptionStatus.USER_VERIFIED) {
+            mutableUiState.value = state.copy(message = "사용자 검수 완료 후 식당 영수증을 제출할 수 있습니다.")
+            return
+        }
+        if (state.priceTraceSignedInEmail == null) {
+            mutableUiState.value = state.copy(message = "PriceTrace 연결 설정에서 먼저 로그인하세요.")
+            return
+        }
+        val documentId = receipt.document.requireLocalDocumentId()
+        viewModelScope.launch {
+            val envelope = loadIngestionEnvelope(documentId)
+            if (envelope == null) {
+                submitLegacyRestaurantReceipt()
+                return@launch
+            }
+            val gate = currentVerificationGate(documentId)
+            if (!gate.isAllowed) {
+                mutableUiState.value = mutableUiState.value.copy(message = verifiedDraftGateMessage(gate))
+                return@launch
+            }
+            mutableUiState.value = mutableUiState.value.copy(
+                isSubmittingRestaurantReceipt = true,
+                restaurantReceiptLastError = null,
+                message = null,
+            )
+            try {
+                val projection = submitCanonicalProjectionToUi(
+                    documentId = documentId,
+                    projection = IngestionProjection.PRICETRACE_RECEIPT,
+                )
+                if (projection == null) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isSubmittingRestaurantReceipt = false,
+                        restaurantReceiptLastError = "canonical_envelope_missing",
+                        message = "PriceTrace canonical envelope를 찾지 못했습니다.",
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    isSubmittingRestaurantReceipt = false,
+                    restaurantReceiptLastError = error.message ?: error::class.java.simpleName,
+                    message = "PriceTrace canonical receipt projection을 완료하지 못했습니다.",
+                )
+            }
+        }
+    }
     private fun restaurantPayload(receipt: ReceiptV2): RestaurantReceiptSubmitPayload {
         val items = receipt.lineItems.mapNotNull { item ->
             if (item.type in setOf(
@@ -2450,7 +2926,8 @@ class ReceiptAppViewModel(
                 )
                 return@launch
             }
-            val gate = currentVerificationGate(currentReceipt.document.requireLocalDocumentId())
+            val documentId = currentReceipt.document.requireLocalDocumentId()
+            val gate = currentVerificationGate(documentId)
             if (!gate.isAllowed) {
                 mutableUiState.value = stateFromReview(
                     screen = currentState.screen,
@@ -2460,34 +2937,45 @@ class ReceiptAppViewModel(
                 )
                 return@launch
             }
-            val ingestionVerification = markIngestionVerified(currentReceipt.document.requireLocalDocumentId())
-            if (ingestionVerification is IngestionStartResult.Failure) {
+            val verification = controller.markUserVerified()
+            if (verification.isFailure) {
                 mutableUiState.value = stateFromReview(
                     screen = AppScreen.RECONCILIATION,
                     ocrDocument = currentState.ocrDocument,
-                    message = "통합 입력 검증을 완료하지 못했습니다: ${ingestionVerification.issues.joinToString()}",
-                    reviewedAt = currentState.reviewedAt,
-                )
-                return@launch
-            }
-            val verification = controller.markUserVerified()
-            if (verification.isSuccess) {
-                val verifiedAt = OffsetDateTime.now().toString()
-                mutableUiState.value = stateFromReview(
-                    screen = AppScreen.JSON_PREVIEW,
-                    ocrDocument = mutableUiState.value.ocrDocument,
-                    message = "필수 검증을 통과했습니다. user_verified JSON을 내보낼 수 있습니다.",
-                    reviewedAt = verifiedAt,
-                )
-                persistDraft()
-            } else {
-                mutableUiState.value = stateFromReview(
-                    screen = AppScreen.RECONCILIATION,
-                    ocrDocument = mutableUiState.value.ocrDocument,
                     message = "필수 검증 항목을 먼저 해결하세요.",
                     reviewedAt = mutableUiState.value.reviewedAt,
                 )
+                return@launch
             }
+            val verifiedReceipt = verification.getOrThrow()
+            val canonicalRevision = syncCanonicalReceiptRevision(documentId, verifiedReceipt)
+            if (canonicalRevision is IngestionStartResult.Failure) {
+                mutableUiState.value = stateFromReview(
+                    screen = AppScreen.RECONCILIATION,
+                    ocrDocument = mutableUiState.value.ocrDocument,
+                    message = "canonical envelope 저장을 완료하지 못했습니다: ${canonicalRevision.issues.joinToString()}",
+                    reviewedAt = mutableUiState.value.reviewedAt,
+                )
+                return@launch
+            }
+            val ingestionVerification = markIngestionVerified(documentId)
+            if (ingestionVerification is IngestionStartResult.Failure) {
+                mutableUiState.value = stateFromReview(
+                    screen = AppScreen.RECONCILIATION,
+                    ocrDocument = mutableUiState.value.ocrDocument,
+                    message = "통합 입력 검증을 완료하지 못했습니다: ${ingestionVerification.issues.joinToString()}",
+                    reviewedAt = mutableUiState.value.reviewedAt,
+                )
+                return@launch
+            }
+            val verifiedAt = OffsetDateTime.now().toString()
+            mutableUiState.value = stateFromReview(
+                screen = AppScreen.JSON_PREVIEW,
+                ocrDocument = mutableUiState.value.ocrDocument,
+                message = "필수 검증을 통과했습니다. user_verified JSON을 내보낼 수 있습니다.",
+                reviewedAt = verifiedAt,
+            )
+            persistDraft()
         }
     }
     fun setIncludeRawTextInShare(include: Boolean) {
@@ -2510,6 +2998,7 @@ class ReceiptAppViewModel(
             AppScreen.API_SETTINGS -> AppScreen.SESSION_LIST
             AppScreen.IMAGE_CONFIRM -> AppScreen.SESSION_LIST
             AppScreen.IMPORT_PREVIEW -> AppScreen.SESSION_LIST
+            AppScreen.MERCHANT_REVIEW -> AppScreen.SESSION_LIST
             AppScreen.OCR_PROGRESS -> return true
             AppScreen.FIELD_REVIEW -> AppScreen.IMAGE_CONFIRM
             AppScreen.ITEM_REVIEW -> AppScreen.FIELD_REVIEW
@@ -2552,6 +3041,76 @@ class ReceiptAppViewModel(
         ocrEngine.close()
     }
 
+    private suspend fun persistCanonicalReceiptEnvelope(session: ReceiptSession, receipt: ReceiptV2) {
+        val pages = repository.getPages(session.documentId)
+        val envelope = YeonsikOcrEnvelope(
+            mode = if (receipt.merchant.businessKind == BusinessKind.FOOD_SERVICE) {
+                com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT
+            } else {
+                com.pricetrace.receiptscanner.ingestion.IngestionMode.MERCHANT
+            },
+            source = com.pricetrace.receiptscanner.ingestion.IngestionSource(
+                producer = "ocr_app",
+                sourceFiles = pages.mapIndexed { index, page ->
+                    val type = if (receipt.merchant.businessKind == BusinessKind.FOOD_SERVICE) {
+                        if (index == 0) SourceAttachmentType.RECEIPT else SourceAttachmentType.FOOD_PHOTO
+                    } else {
+                        SourceAttachmentType.RECEIPT
+                    }
+                    SourceAttachment(page.id, type)
+                },
+            ),
+            merchantCandidate = receipt.merchant.name?.trim()?.takeIf(String::isNotEmpty)?.let { name ->
+                com.pricetrace.receiptscanner.ingestion.MerchantCandidate(
+                    name = name,
+                    branchName = receipt.merchant.branchName,
+                    address = receipt.merchant.address,
+                    phone = receipt.merchant.phone,
+                    businessRegistrationNumber = receipt.merchant.businessRegistrationNumber,
+                    sourceAttachmentIds = pages.map { it.id },
+                    businessKind = receipt.merchant.businessKind,
+                )
+            },
+            receipt = receipt,
+            review = com.pricetrace.receiptscanner.ingestion.IngestionReview(
+                status = com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus.NEEDS_REVIEW,
+            ),
+        )
+        val key = "${session.documentId}/ingestion/yeonsik-ocr.json"
+        fileStore.writeText(key, YeonsikOcrEnvelopeJson.encode(envelope))
+        ingestionOrchestrator.start(
+            ingestionId = ingestionIdFor(session.documentId),
+            localDocumentId = session.documentId,
+            envelope = envelope,
+            evidence = localIngestionEvidence(session.documentId, envelope),
+            inputOrigin = InputOrigin.ANDROID_OCR,
+        )
+    }
+
+    private suspend fun persistCanonicalNutritionEnvelope(session: ReceiptSession, draft: NutritionLabelDraft) {
+        val pages = repository.getPages(session.documentId)
+        val envelope = YeonsikOcrEnvelope(
+            mode = com.pricetrace.receiptscanner.ingestion.IngestionMode.PACKAGED_PRODUCT,
+            source = com.pricetrace.receiptscanner.ingestion.IngestionSource(
+                producer = "ocr_app",
+                sourceFiles = pages.map { page -> SourceAttachment(page.id, SourceAttachmentType.NUTRITION_LABEL) },
+            ),
+            nutrition = listOf(IngestionNutrition.ProductLabel(draft.documentId, draft)),
+            review = com.pricetrace.receiptscanner.ingestion.IngestionReview(
+                status = com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus.NEEDS_REVIEW,
+            ),
+        )
+        val key = "${session.documentId}/ingestion/yeonsik-ocr.json"
+        fileStore.writeText(key, YeonsikOcrEnvelopeJson.encode(envelope))
+        ingestionOrchestrator.start(
+            ingestionId = ingestionIdFor(session.documentId),
+            localDocumentId = session.documentId,
+            envelope = envelope,
+            evidence = localIngestionEvidence(session.documentId, envelope),
+            inputOrigin = InputOrigin.ANDROID_OCR,
+        )
+    }
+
     private suspend fun processReceiptOcrSuccess(session: ReceiptSession, document: OcrDocument) {
         val parsedReceipt = parser.parse(document)
         val parsedDraft = parsedReceipt.toReceiptV2(includePrivateRawText = true)
@@ -2584,6 +3143,7 @@ class ReceiptAppViewModel(
                 ocrCompletedAt = draftReadyAt,
             ),
         )
+        persistCanonicalReceiptEnvelope(session, receipt)
         reviewController = ReceiptReviewController(receipt)
         persistedEditIds.clear()
         mutableUiState.value = mutableUiState.value.copy(
@@ -2604,7 +3164,7 @@ class ReceiptAppViewModel(
             screen = AppScreen.AI_CORRECTION,
             ocrDocument = document,
             message = null,
-        )
+        ).copy(isCanonicalIngestion = true)
         mutableUiState.value = reviewState.copy(
             isAiPreflight = true,
             aiReviewStatus = aiStatus,
@@ -2644,13 +3204,14 @@ class ReceiptAppViewModel(
                 ocrCompletedAt = draftReadyAt,
             ),
         )
+        persistCanonicalNutritionEnvelope(session, draft)
         reviewController = null
         persistedEditIds.clear()
         mutableUiState.value = nutritionState(
             draft = draft,
             ocrDocument = document,
             message = "영양성분 OCR 초안을 만들었습니다. 모르는 값은 0으로 채우지 말고 원본과 대조하세요.",
-        )
+        ).copy(isCanonicalIngestion = true)
     }
 
     private suspend fun restoreOcrDocument(documentId: String): OcrDocument? = try {
@@ -2676,9 +3237,24 @@ class ReceiptAppViewModel(
 
     private fun persistNutritionDraft(draft: NutritionLabelDraft) {
         nutritionPersistenceJob?.cancel()
+        val sessionDocumentId = mutableUiState.value.currentDocumentId ?: draft.documentId
         nutritionPersistenceJob = viewModelScope.launch {
             try {
-                persistNutritionDraftNow(draft, uploadStatus = "local_only")
+                persistNutritionDraftNow(
+                    draft,
+                    uploadStatus = "local_only",
+                    sessionDocumentId = sessionDocumentId,
+                )
+                if (loadIngestionEnvelope(sessionDocumentId) != null) {
+                    when (val revision = syncCanonicalNutritionRevision(sessionDocumentId, draft)) {
+                        is IngestionStartResult.Failure -> {
+                            mutableUiState.value = mutableUiState.value.copy(
+                                message = "수정된 canonical nutrition을 저장하지 못했습니다. 다시 검수해야 합니다: ${revision.issues.joinToString()}",
+                            )
+                        }
+                        else -> Unit
+                    }
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -2865,6 +3441,26 @@ class ReceiptAppViewModel(
             reviewedAt = null,
         )
         persistDraft()
+        val editedReceipt = reviewController?.state?.value?.receipt ?: return
+        val documentId = editedReceipt.document.localDocumentId ?: editedReceipt.document.id ?: return
+        viewModelScope.launch {
+            try {
+                when (val revision = syncCanonicalReceiptRevision(documentId, editedReceipt)) {
+                    is IngestionStartResult.Failure -> {
+                        mutableUiState.value = mutableUiState.value.copy(
+                            message = "수정된 canonical envelope 저장에 실패했습니다. 다시 검수해야 합니다: ${revision.issues.joinToString()}"
+                        )
+                    }
+                    else -> Unit
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = "수정된 canonical envelope를 저장하지 못했습니다. 다시 검수해야 합니다."
+                )
+            }
+        }
     }
 
     private fun evaluatePreflight(

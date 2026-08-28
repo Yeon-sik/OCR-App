@@ -3,6 +3,9 @@ package com.pricetrace.receiptocr.fitness
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -146,6 +149,67 @@ class NutritionSupabaseGatewayTest {
         assertEquals("Bearer access-2", transport.requests[2].headers["Authorization"])
     }
 
+    @Test
+    fun canonicalNutritionRpcUsesAuthenticatedImportAndPreservesCanonicalFields() = runTest {
+        val store = FakeStore(signedIn())
+        val transport = QueueTransport(
+            NutritionHttpResponse(
+                200,
+                """[{"canonical_import_id":"canonical-1","idempotent_replay":false,"nutrition_food_id":"food-1","input_contract":"nutrition-label.v1","projection_source_type":"ocr_app","projection_import_id":"projection-1","catalog_product_id":null,"estimation_evidence_id":null,"visibility":"private"}]""",
+            ),
+        )
+        val payload = CanonicalNutritionPayloadFactory.fromProductLabel(
+            localDocumentId = "ocr-label-session",
+            revisionSeq = 2,
+            idempotencyKey = "canonical-nutrition-key",
+            draft = verifiedDraft(),
+        )
+
+        val result = NutritionSupabaseGateway(store, transport).importCanonical(payload)
+
+        val success = result as NutritionCanonicalImportOutcome.Success
+        assertEquals("canonical-1", success.response.canonicalImportId)
+        assertEquals("food-1", success.response.nutritionFoodId)
+        assertEquals(NUTRITION_LABEL_V1, success.response.inputContract)
+        val request = transport.requests.single()
+        assertEquals("POST", request.method)
+        assertEquals(
+            "https://nutrition.example.com/rest/v1/rpc/import_canonical_nutrition_v2",
+            request.url,
+        )
+        assertEquals("publishable-key-with-safe-length", request.headers["apikey"])
+        assertEquals("Bearer access-token", request.headers["Authorization"])
+
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        assertEquals(
+            setOf(
+                "p_idempotency_key",
+                "p_input_contract",
+                "p_source_document_ref",
+                "p_food_name",
+                "p_brand",
+                "p_category",
+                "p_basis_amount",
+                "p_basis_unit",
+                "p_required_nutrients",
+                "p_nutrient_provenance",
+                "p_optional_nutrients",
+                "p_provenance",
+                "p_user_verified",
+                "p_pricetrace_identity",
+                "p_estimation_evidence",
+            ),
+            body.keys,
+        )
+        assertEquals("canonical-nutrition-key", body["p_idempotency_key"]?.jsonPrimitive?.content)
+        assertEquals(NUTRITION_LABEL_V1, body["p_input_contract"]?.jsonPrimitive?.content)
+        assertEquals(true, body["p_user_verified"]?.jsonPrimitive?.content?.toBoolean())
+        assertEquals(
+            CanonicalNutritionImportPayload.REQUIRED_NUTRIENTS,
+            body["p_nutrient_provenance"]!!.jsonObject.keys,
+        )
+        assertEquals(null, body["p_estimation_evidence"]?.let { if (it is kotlinx.serialization.json.JsonNull) null else it })
+    }
     @Test
     fun connectionValidationRejectsCleartextAndAcceptsCustomHttps() {
         assertTrue(

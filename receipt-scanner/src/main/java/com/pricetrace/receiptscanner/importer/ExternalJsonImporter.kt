@@ -82,7 +82,14 @@ data class ExternalJsonImportResult(
             is CanonicalDraft.Receipt -> YeonsikOcrEnvelope(
                 mode = if (value.value.merchant.businessKind == BusinessKind.FOOD_SERVICE) IngestionMode.RESTAURANT else IngestionMode.MERCHANT,
                 source = IngestionSource("chatgpt", emptyList()),
-                merchantCandidate = value.value.merchant.name?.let { MerchantCandidate(it, value.value.merchant.branchName) },
+                merchantCandidate = value.value.merchant.name?.let { name -> MerchantCandidate(
+                    name = name,
+                    branchName = value.value.merchant.branchName,
+                    address = value.value.merchant.address,
+                    phone = value.value.merchant.phone,
+                    businessRegistrationNumber = value.value.merchant.businessRegistrationNumber,
+                    businessKind = value.value.merchant.businessKind,
+                ) },
                 receipt = value.value,
                 targets = setOf(
                     IngestionProjection.PRICETRACE_RECEIPT,
@@ -194,13 +201,15 @@ class ExternalJsonImporter(
 
         // ReceiptV2Json remains the source of truth for the existing receipt.v2 wire contract.
         // Only explicitly listed top-level trust metadata is removed before that strict decoder.
-        val decoded = ReceiptV2Json.decode(encode(root.withoutKeys(EXTERNAL_TRUST_KEYS)))
+        val decoded = ReceiptV2Json.decode(encode(root.withoutKeys(EXTERNAL_TRUST_KEYS)), localDocumentId)
         val inferredWorkflow = if (decoded.merchant.businessKind == BusinessKind.FOOD_SERVICE) OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT else OcrWorkflowType.PRICE_TRACE_RECEIPT
         if (workflowType != null && workflowType != inferredWorkflow) return workflowMismatch(ReceiptV2.SCHEMA_VERSION, workflowType)
         val upstreamDocumentId = decoded.document.id
         val sanitized = decoded.copy(
             document = decoded.document.copy(
-                id = localDocumentId,
+                // Preserve the upstream receipt.v2 source ID; localDocumentId is stored separately.
+                id = decoded.document.id,
+                localDocumentId = localDocumentId,
                 status = ReceiptStatus.DRAFT,
                 source = decoded.document.source.copy(
                     transcriptionStatus = TranscriptionStatus.PARSED,
@@ -217,6 +226,7 @@ class ExternalJsonImporter(
         val fingerprintDraft = sanitized.copy(
             document = sanitized.document.copy(
                 id = upstreamDocumentId,
+                localDocumentId = null,
             ),
         )
         return ExternalJsonImportOutcome.Success(

@@ -31,7 +31,8 @@ class YeonsikOcrExampleTest {
 
         val restaurant = ((outcomes.getValue("yeonsik-ocr.restaurant.example.json") as ExternalJsonImportOutcome.Success)
             .result.draft as CanonicalDraft.Envelope).value
-        assertEquals("example-yeonsik-ocr.restaurant.example.json", restaurant.receipt!!.document.id)
+        assertEquals(null, restaurant.receipt!!.document.id)
+        assertEquals("example-yeonsik-ocr.restaurant.example.json", restaurant.receipt!!.document.localDocumentId)
         assertEquals(ReceiptFulfillmentType.DINE_IN, restaurant.receipt.document.fulfillment.type)
         assertEquals(
             listOf(FoodServiceRole.MAIN, FoodServiceRole.OPTION, FoodServiceRole.SIDE),

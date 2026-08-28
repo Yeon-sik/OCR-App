@@ -20,7 +20,8 @@ class ExternalJsonImporterTest {
         val result = success(receiptJson())
         val draft = (result.draft as CanonicalDraft.Receipt).value
 
-        assertEquals("local-document-1", draft.document.id)
+        assertEquals("upstream-receipt-1", draft.document.id)
+        assertEquals("local-document-1", draft.document.localDocumentId)
         assertEquals("upstream-receipt-1", result.upstreamDocumentId)
         assertEquals(ReceiptStatus.DRAFT, draft.document.status)
         assertEquals(TranscriptionStatus.PARSED, draft.document.source.transcriptionStatus)
@@ -29,7 +30,7 @@ class ExternalJsonImporterTest {
         assertEquals("external_json", result.inputOrigin.wireValue)
         assertEquals(
             draft,
-            ReceiptV2Json.decode(ReceiptV2Json.encodeCanonical(draft)),
+            ReceiptV2Json.decode(ReceiptV2Json.encodeCanonical(draft), draft.document.localDocumentId),
         )
     }
 
@@ -90,8 +91,10 @@ class ExternalJsonImporterTest {
 
         assertEquals("upstream-receipt-1", first.upstreamDocumentId)
         assertEquals("upstream-receipt-1", second.upstreamDocumentId)
-        assertEquals("local-a", (first.draft as CanonicalDraft.Receipt).value.document.id)
-        assertEquals("local-b", (second.draft as CanonicalDraft.Receipt).value.document.id)
+        assertEquals("upstream-receipt-1", (first.draft as CanonicalDraft.Receipt).value.document.id)
+        assertEquals("upstream-receipt-1", (second.draft as CanonicalDraft.Receipt).value.document.id)
+        assertEquals("local-a", (first.draft as CanonicalDraft.Receipt).value.document.localDocumentId)
+        assertEquals("local-b", (second.draft as CanonicalDraft.Receipt).value.document.localDocumentId)
         assertEquals(first.importFingerprint, second.importFingerprint)
     }
 
@@ -101,8 +104,10 @@ class ExternalJsonImporterTest {
         val second = success(receiptJson(documentId = "null"), localDocumentId = "local-b")
 
         assertNull(first.upstreamDocumentId)
-        assertEquals("local-a", (first.draft as CanonicalDraft.Receipt).value.document.id)
-        assertEquals("local-b", (second.draft as CanonicalDraft.Receipt).value.document.id)
+        assertNull((first.draft as CanonicalDraft.Receipt).value.document.id)
+        assertNull((second.draft as CanonicalDraft.Receipt).value.document.id)
+        assertEquals("local-a", (first.draft as CanonicalDraft.Receipt).value.document.localDocumentId)
+        assertEquals("local-b", (second.draft as CanonicalDraft.Receipt).value.document.localDocumentId)
         assertEquals(first.importFingerprint, second.importFingerprint)
     }
 

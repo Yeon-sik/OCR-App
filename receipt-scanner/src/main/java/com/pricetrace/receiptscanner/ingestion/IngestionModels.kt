@@ -51,6 +51,15 @@ data class MerchantCandidate(
     val phone: String? = null,
     val businessRegistrationNumber: String? = null,
     val sourceAttachmentIds: List<String> = emptyList(),
+    val sourceNamespace: String? = null,
+    val sourceLocationCode: String? = null,
+    val businessKind: com.pricetrace.receiptscanner.domain.BusinessKind = com.pricetrace.receiptscanner.domain.BusinessKind.UNKNOWN,
+)
+
+data class NutritionNutrientProvenance(
+    val valueStatus: String,
+    val sourceType: String,
+    val evidenceRefs: List<String>,
 )
 
 data class NutritionRange(
@@ -62,8 +71,12 @@ data class NutritionRange(
 data class RestaurantNutritionEstimate(
     val nutrients: Map<NutritionField, Double?>,
     val estimated: Boolean,
+    /** Legacy envelopes may use labels; canonical publication requires confidenceScore. */
     val confidence: String,
+
     val ranges: Map<NutritionField, NutritionRange> = emptyMap(),
+    val nutrientProvenance: Map<NutritionField, NutritionNutrientProvenance> = emptyMap(),
+    val confidenceScore: Double? = null,
 )
 
 sealed interface IngestionNutrition {
@@ -118,6 +131,7 @@ data class YeonsikOcrEnvelope(
 enum class IngestionProjection(val wireValue: String) {
     PRICETRACE_RECEIPT("pricetrace_receipt"),
     PRICETRACE_PRICE_OBSERVATION("pricetrace_price_observation"),
+    PRICETRACE_MERCHANT_CANDIDATE("pricetrace_merchant_candidate"),
     FITNESS_NUTRITION("fitness_nutrition"),
     CASHOS_RECEIPT("cashos_receipt"),
     ;
@@ -153,16 +167,24 @@ data class ProjectionState(
     val attemptCount: Int = 0,
     val lastError: String? = null,
     val updatedAt: String,
+    /** Sanitized response metadata, e.g. CashOS ledger/category/account resolution. */
+    val metadataJson: String? = null,
 )
 
 data class IngestionSession(
     val ingestionId: String,
     val localDocumentId: String,
     val envelopeStorageKey: String,
+    /** Fingerprint of the currently persisted canonical revision. */
     val canonicalFingerprint: String,
     val reviewStatus: IngestionReviewStatus,
     val createdAt: String,
     val updatedAt: String,
     val projections: List<ProjectionState>,
     val attachments: List<LocalEvidence> = emptyList(),
+    val revisionSeq: Long = 1,
+    val verifiedCanonicalFingerprint: String? = null,
+    val verifiedAt: String? = null,
+    /** Immutable import identity; it does not change when the user edits the draft. */
+    val importFingerprint: String = canonicalFingerprint,
 )
