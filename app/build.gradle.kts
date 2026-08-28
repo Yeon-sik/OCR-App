@@ -106,6 +106,8 @@ val configuredNutritionEmail = dotEnv["EMAIL"].orEmpty()
 val configuredNutritionPassword = dotEnv["PASSWORD"].orEmpty()
 val configuredPriceTraceUrl = dotEnv["PRICETRACE_SUPABASE_URL"].orEmpty().trim().trimEnd('/')
 val configuredPriceTraceKey = dotEnv["PRICETRACE_SUPABASE_PUBLISHABLE_KEY"].orEmpty().trim()
+val configuredCashOsUrl = dotEnv["CASHOS_SUPABASE_URL"].orEmpty().trim().trimEnd('/')
+val configuredCashOsKey = dotEnv["CASHOS_SUPABASE_PUBLISHABLE_KEY"].orEmpty().trim()
 val configuredGeminiApiKey = dotEnv["GEMINI_API_KEY"].orEmpty().trim()
 val configuredGeminiModel = dotEnv["GEMINI_MODEL"].orEmpty().trim()
 
@@ -150,6 +152,28 @@ val defaultPriceTraceUrl = if (!hasPriceTracePair) {
     configuredPriceTraceUrl
 }
 val defaultPriceTraceKey = if (defaultPriceTraceUrl.isBlank()) "" else configuredPriceTraceKey
+val hasCashOsPair = configuredCashOsUrl.isNotBlank() && configuredCashOsKey.isNotBlank()
+val defaultCashOsUrl = if (!hasCashOsPair) {
+    if (configuredCashOsUrl.isNotBlank() || configuredCashOsKey.isNotBlank()) {
+        logger.warn(
+            "PriceTrace: CASHOS_SUPABASE_URL and CASHOS_SUPABASE_PUBLISHABLE_KEY " +
+                "must be provided together; ignoring both",
+        )
+    }
+    ""
+} else {
+    require(validNutritionUrl(configuredCashOsUrl)) {
+        "CASHOS_SUPABASE_URL must be an HTTPS URL without query, fragment, or user info"
+    }
+    require(configuredCashOsKey.length in 20..4096 && configuredCashOsKey.none(Char::isWhitespace)) {
+        "CASHOS_SUPABASE_PUBLISHABLE_KEY must be a non-whitespace publishable/anon key"
+    }
+    require(!looksLikeServiceRoleKey(configuredCashOsKey)) {
+        "CASHOS_SUPABASE_PUBLISHABLE_KEY must not be a service_role/secret key"
+    }
+    configuredCashOsUrl
+}
+val defaultCashOsKey = if (defaultCashOsUrl.isBlank()) "" else configuredCashOsKey
 val defaultGeminiModel = configuredGeminiModel
     .takeIf { it.matches(Regex("[A-Za-z0-9._:-]{1,128}")) }
     ?: fallbackGeminiModel
@@ -179,6 +203,8 @@ android {
         buildConfigField("String", "DEFAULT_NUTRITION_SUPABASE_PUBLISHABLE_KEY", buildConfigString(defaultNutritionKey))
         buildConfigField("String", "DEFAULT_PRICETRACE_SUPABASE_URL", buildConfigString(defaultPriceTraceUrl))
         buildConfigField("String", "DEFAULT_PRICETRACE_SUPABASE_PUBLISHABLE_KEY", buildConfigString(defaultPriceTraceKey))
+        buildConfigField("String", "DEFAULT_CASHOS_SUPABASE_URL", buildConfigString(defaultCashOsUrl))
+        buildConfigField("String", "DEFAULT_CASHOS_SUPABASE_PUBLISHABLE_KEY", buildConfigString(defaultCashOsKey))
         buildConfigField("String", "DEFAULT_GEMINI_MODEL", buildConfigString(defaultGeminiModel))
         buildConfigField("String", "DEFAULT_GEMINI_API_KEY", buildConfigString(configuredGeminiApiKey))
         buildConfigField("String", "DEFAULT_NUTRITION_EMAIL", buildConfigString(configuredNutritionEmail))

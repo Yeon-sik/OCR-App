@@ -3,6 +3,7 @@ package com.pricetrace.receiptscanner.correction
 import com.pricetrace.receiptscanner.domain.ConfidenceLevel
 import com.pricetrace.receiptscanner.domain.ReceiptLineType
 import com.pricetrace.receiptscanner.domain.ReceiptV2
+import com.pricetrace.receiptscanner.domain.requireLocalDocumentId
 import com.pricetrace.receiptscanner.domain.isUserEntered
 import com.pricetrace.receiptscanner.ocr.OcrDocument
 
@@ -218,7 +219,7 @@ object ReceiptCorrectionRequestFactory {
             }
             .toList()
         return ReceiptCorrectionRequest(
-            documentId = receipt.document.id,
+            documentId = receipt.document.requireLocalDocumentId(),
             targets = targets,
             evidenceLines = evidenceLines,
         )

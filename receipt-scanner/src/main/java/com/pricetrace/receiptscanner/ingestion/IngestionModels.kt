@@ -110,22 +110,39 @@ data class YeonsikOcrEnvelope(
     val nutrition: List<IngestionNutrition> = emptyList(),
     val classificationHints: Map<String, String?> = emptyMap(),
     val links: List<IngestionLink> = emptyList(),
+    /** Requested destinations; mode is only a validated producer hint, never routing authority. */
+    val targets: Set<IngestionProjection> = emptySet(),
     val review: IngestionReview = IngestionReview(IngestionReviewStatus.NEEDS_REVIEW),
 )
 
 enum class IngestionProjection(val wireValue: String) {
-    PRICETRACE("pricetrace"),
-    FITNESS("fitness"),
-    CASHOS("cashos"),
+    PRICETRACE_RECEIPT("pricetrace_receipt"),
+    PRICETRACE_PRICE_OBSERVATION("pricetrace_price_observation"),
+    FITNESS_NUTRITION("fitness_nutrition"),
+    CASHOS_RECEIPT("cashos_receipt"),
+    ;
+
+    companion object {
+        fun fromWireValue(value: String): IngestionProjection = entries.firstOrNull { it.wireValue == value }
+            ?: error("Unsupported projection target: $value")
+    }
 }
 
 enum class ProjectionStatus(val wireValue: String) {
     PENDING("pending"),
-    READY("ready"),
-    USER_VERIFIED("user_verified"),
-    SUBMITTED("submitted"),
+    BLOCKED("blocked"),
+    UPLOADED("uploaded"),
     FAILED("failed"),
     DISABLED("disabled"),
+    ;
+
+    companion object {
+        fun fromPersisted(value: String): ProjectionStatus = when (value) {
+            "ready", "user_verified" -> PENDING
+            "submitted" -> UPLOADED
+            else -> entries.firstOrNull { it.wireValue == value } ?: error("Unsupported projection status: $value")
+        }
+    }
 }
 
 data class ProjectionState(

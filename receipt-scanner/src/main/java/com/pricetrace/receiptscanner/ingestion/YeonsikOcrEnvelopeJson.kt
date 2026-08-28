@@ -32,7 +32,7 @@ object YeonsikOcrEnvelopeJson {
     fun decode(value: String, localDocumentId: String): YeonsikOcrEnvelope {
         require(localDocumentId.isNotBlank())
         val root = json.parseToJsonElement(value).jsonObject
-        require(root.keys subtract TRUST_KEYS == TOP_LEVEL_KEYS) { "Unexpected or missing envelope keys" }
+        require((root.keys subtract TRUST_KEYS) in setOf(TOP_LEVEL_KEYS, TOP_LEVEL_KEYS - "projection_targets")) { "Unexpected or missing envelope keys" }
         require(root.string("schema_version") == YEONSIK_OCR_SCHEMA)
         val mode = IngestionMode.fromWireValue(root.string("mode"))
         val source = decodeSource(root.objectValue("source"))
@@ -40,7 +40,6 @@ object YeonsikOcrEnvelopeJson {
             val nested = ExternalJsonImporter().import(
                 json.encodeToString(JsonElement.serializer(), element),
                 localDocumentId,
-                OcrWorkflowType.PRICE_TRACE_RECEIPT,
             )
             val result = (nested as? ExternalJsonImportOutcome.Success)?.result
                 ?: error("receipt must be a valid receipt.v2 payload")
@@ -49,8 +48,10 @@ object YeonsikOcrEnvelopeJson {
         val nutrition = root.arrayValue("nutrition").map(::decodeNutrition)
         val merchant = root["merchant_candidate"]?.takeUnless { it == JsonNull }?.let { decodeMerchant(it.jsonObject) }
         val links = root.arrayValue("links").map { decodeLink(it.jsonObject) }
+        val targets = root["projection_targets"]?.jsonArray?.map { IngestionProjection.fromWireValue(it.jsonPrimitive.content) }?.toSet().orEmpty()
         val hints = decodeHints(root.objectValue("classification_hints"))
         validateMode(mode, merchant, receipt, nutrition, links)
+        validateTargets(targets, receipt, nutrition)
         // External review state is descriptive only. A local user must perform verification again.
         return YeonsikOcrEnvelope(
             mode = mode,
@@ -60,6 +61,7 @@ object YeonsikOcrEnvelopeJson {
             nutrition = nutrition,
             classificationHints = hints,
             links = links,
+            targets = targets,
             review = IngestionReview(
                 status = IngestionReviewStatus.NEEDS_REVIEW,
                 blockingIssues = listOf("source_image_required"),
@@ -90,6 +92,7 @@ object YeonsikOcrEnvelopeJson {
         put("nutrition", JsonArray(envelope.nutrition.map { item -> nutritionJson(item, canonicalIds) }))
         put("classification_hints", JsonObject(envelope.classificationHints.mapValues { (_, value) -> value?.let(::JsonPrimitive) ?: JsonNull }))
         put("links", JsonArray(envelope.links.map(::linkJson)))
+        put("projection_targets", JsonArray(envelope.targets.sortedBy(IngestionProjection::wireValue).map { JsonPrimitive(it.wireValue) }))
         put("review", reviewJson(envelope.review))
     }
 
@@ -210,15 +213,68 @@ object YeonsikOcrEnvelopeJson {
         return cashos.mapKeys { "cashos.${it.key}" }.mapValues { (_, value) -> value.takeUnless { it == JsonNull }?.jsonPrimitive?.contentOrNull }
     }
 
-    private fun validateMode(mode: IngestionMode, merchant: MerchantCandidate?, receipt: ReceiptV2?, nutrition: List<IngestionNutrition>, links: List<IngestionLink>) {
-        require(links.all { link -> receipt?.lineItems?.any { it.id == link.receiptLineId } == true && nutrition.any { it.clientKey == link.nutritionClientKey } })
+    private fun validateMode(
+        mode: IngestionMode,
+        merchant: MerchantCandidate?,
+        receipt: ReceiptV2?,
+        nutrition: List<IngestionNutrition>,
+        links: List<IngestionLink>,
+    ) {
+        require(nutrition.map { it.clientKey }.distinct().size == nutrition.size) {
+            "nutrition client_key values must be unique"
+        }
+        require(links.map { it.nutritionClientKey }.distinct().size == links.size) {
+            "each nutrition artifact may have at most one link"
+        }
+        require(links.all { link ->
+            val line = receipt?.lineItems?.singleOrNull { it.id == link.receiptLineId }
+            val item = nutrition.singleOrNull { it.clientKey == link.nutritionClientKey }
+            line != null && item?.lineId == line.id
+        }) {
+            "links must reference an existing receipt line and its nutrition artifact"
+        }
         when (mode) {
-            IngestionMode.MERCHANT -> require(merchant != null && receipt == null && nutrition.isEmpty())
-            IngestionMode.RESTAURANT -> require(merchant != null && receipt != null && nutrition.isNotEmpty() && nutrition.all { it is IngestionNutrition.RestaurantEstimate })
-            IngestionMode.PACKAGED_PRODUCT -> require(nutrition.any { it is IngestionNutrition.ProductLabel })
+            IngestionMode.MERCHANT -> require(
+                merchant != null &&
+                    nutrition.isEmpty() &&
+                    links.isEmpty() &&
+                    (receipt == null || receipt.merchant.businessKind != com.pricetrace.receiptscanner.domain.BusinessKind.FOOD_SERVICE),
+            )
+            IngestionMode.RESTAURANT -> require(
+                merchant != null &&
+                    receipt != null &&
+                    receipt.merchant.businessKind == com.pricetrace.receiptscanner.domain.BusinessKind.FOOD_SERVICE &&
+                    (nutrition.isEmpty() || (
+                        nutrition.all { it is IngestionNutrition.RestaurantEstimate } &&
+                        nutrition.all { item -> links.any { it.nutritionClientKey == item.clientKey && it.receiptLineId == item.lineId } }
+                    )),
+            )
+            IngestionMode.PACKAGED_PRODUCT -> require(
+                merchant == null &&
+                    receipt == null &&
+                    nutrition.isNotEmpty() &&
+                    nutrition.all { it is IngestionNutrition.ProductLabel } &&
+                    links.isEmpty(),
+            )
         }
     }
-
+    private fun validateTargets(
+        targets: Set<IngestionProjection>,
+        receipt: ReceiptV2?,
+        nutrition: List<IngestionNutrition>,
+    ) {
+        val available = buildSet {
+            if (receipt != null) {
+                add(IngestionProjection.PRICETRACE_RECEIPT)
+                add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+                add(IngestionProjection.CASHOS_RECEIPT)
+            }
+            if (nutrition.isNotEmpty()) add(IngestionProjection.FITNESS_NUTRITION)
+        }
+        require(targets.all { it in available }) {
+            "Projection target is incompatible with the supplied artifacts."
+        }
+    }
     private fun sourceJson(source: IngestionSource) = buildJsonObject {
         put("producer", JsonPrimitive(source.producer)); put("source_files", JsonArray(source.sourceFiles.map {
             buildJsonObject { put("id", JsonPrimitive(it.id)); put("type", JsonPrimitive(it.type.wireValue)); put("label", it.label?.let(::JsonPrimitive) ?: JsonNull) }
@@ -242,6 +298,6 @@ object YeonsikOcrEnvelopeJson {
     private fun JsonObject.objectValue(key: String): JsonObject = this[key]?.jsonObject ?: error("$key must be an object")
     private fun JsonObject.arrayValue(key: String): JsonArray = this[key]?.jsonArray ?: error("$key must be an array")
     private fun JsonArray.strings(): List<String> = map { (it as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.contentOrNull?.takeIf(String::isNotBlank) ?: error("array must contain strings") }
-    private val TOP_LEVEL_KEYS = setOf("schema_version", "mode", "source", "merchant_candidate", "receipt", "nutrition", "classification_hints", "links", "review")
+    private val TOP_LEVEL_KEYS = setOf("schema_version", "mode", "source", "merchant_candidate", "receipt", "nutrition", "classification_hints", "links", "projection_targets", "review")
     private val TRUST_KEYS = setOf("user_verified", "confirmed_at", "owner_id", "confirmed_by", "created_at", "updated_at", "published_at", "publisher_status", "revision", "remote_id", "server_id")
 }

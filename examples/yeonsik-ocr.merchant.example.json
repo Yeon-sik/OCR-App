@@ -7,5 +7,6 @@
   "nutrition": [],
   "classification_hints": {"cashos": {}},
   "links": [],
+  "projection_targets": [],
   "review": {"status": "ready", "blocking_issues": [], "warnings": []}
 }

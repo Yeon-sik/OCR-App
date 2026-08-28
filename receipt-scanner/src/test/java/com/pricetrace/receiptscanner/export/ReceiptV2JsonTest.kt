@@ -30,4 +30,14 @@ class ReceiptV2JsonTest {
         val valid = ReceiptV2Json.encodeCanonical(SyntheticFixtures.verifiedCandidate())
         ReceiptV2Json.decode(valid.replaceFirst("{", "{\"invented\":true,"))
     }
+
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `food service links are rejected when merchant is not a food service business`() {
+        val valid = ReceiptV2Json.encodeCanonical(SyntheticFixtures.verifiedCandidate())
+        ReceiptV2Json.decode(valid.replaceFirst(
+            "\"food_service\":null",
+            "\"food_service\":{\"role\":\"option\",\"applies_to_line_id\":null}",
+        ))
+    }
 }

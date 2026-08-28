@@ -9,6 +9,7 @@ import com.pricetrace.receiptscanner.domain.ReceiptLineType
 import com.pricetrace.receiptscanner.domain.ReceiptQuantity
 import com.pricetrace.receiptscanner.domain.ReceiptStatus
 import com.pricetrace.receiptscanner.domain.ReceiptV2
+import com.pricetrace.receiptscanner.domain.requireLocalDocumentId
 import com.pricetrace.receiptscanner.domain.ReceiptValidator
 import com.pricetrace.receiptscanner.domain.StableIds
 import com.pricetrace.receiptscanner.domain.ReceiptV2LineItem
@@ -139,7 +140,7 @@ class ReceiptReviewController(
         netAmountMinor: Long? = null,
     ): String {
         val current = mutableState.value
-        val lineItemId = StableIds.userEnteredLineId(current.receipt.document.id, now(), editSequence)
+        val lineItemId = StableIds.userEnteredLineId(current.receipt.document.requireLocalDocumentId(), now(), editSequence)
         val tracksGross = type == ReceiptLineType.PRODUCT || type == ReceiptLineType.SERVICE
         val item = ReceiptV2LineItem(
             id = lineItemId,
@@ -264,7 +265,7 @@ class ReceiptReviewController(
         field = "subtotal_amount_minor",
         value = value,
         previous = { it.totals.subtotalAmountMinor },
-        transform = { receipt, amount -> receipt.copy(totals = receipt.totals.copy(subtotalAmountMinor = amount)) },
+        transform = { receipt, amount -> receipt.copy(totals = receipt.totals.copy(itemsGrossAmountMinor = amount)) },
     )
 
     fun updateDiscountTotal(value: String?): Boolean = updateTotalAmount(
@@ -315,7 +316,7 @@ class ReceiptReviewController(
         field = "method",
         previous = { it.method },
         next = value.editableText(),
-        transform = { payment -> payment.copy(method = value.editableText()) },
+        transform = { payment -> payment.copy(method = value.editableText()?.takeIf(String::isNotBlank) ?: "unknown") },
     )
 
     fun updatePaymentAmount(index: Int, value: String?): Boolean {
@@ -642,8 +643,8 @@ class ReceiptReviewController(
             receipt = draftReceipt,
             reconciliationReason = reconciliationReason,
             edits = current.edits + ReviewEdit(
-                id = StableIds.editId(draftReceipt.document.id, fieldPath, editedAt, editSequence++),
-                documentId = draftReceipt.document.id,
+                id = StableIds.editId(draftReceipt.document.requireLocalDocumentId(), fieldPath, editedAt, editSequence++),
+                documentId = draftReceipt.document.requireLocalDocumentId(),
                 fieldPath = fieldPath,
                 previousValue = previous,
                 newValue = next,

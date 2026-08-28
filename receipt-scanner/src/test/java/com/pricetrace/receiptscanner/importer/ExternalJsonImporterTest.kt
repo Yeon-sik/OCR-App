@@ -96,6 +96,17 @@ class ExternalJsonImporterTest {
     }
 
     @Test
+    fun `null upstream document id receives a local id without changing fingerprint`() {
+        val first = success(receiptJson(documentId = "null"), localDocumentId = "local-a")
+        val second = success(receiptJson(documentId = "null"), localDocumentId = "local-b")
+
+        assertNull(first.upstreamDocumentId)
+        assertEquals("local-a", (first.draft as CanonicalDraft.Receipt).value.document.id)
+        assertEquals("local-b", (second.draft as CanonicalDraft.Receipt).value.document.id)
+        assertEquals(first.importFingerprint, second.importFingerprint)
+    }
+
+    @Test
     fun `external receipt source images are not local evidence`() {
         val result = success(receiptJson(sourceImages = "\"source_images\":[\"https://example.invalid/receipt.jpg\"],"))
         val draft = (result.draft as CanonicalDraft.Receipt).value
@@ -175,18 +186,17 @@ class ExternalJsonImporterTest {
         description: String = "Milk",
         extra: String = "",
         sourceImages: String = "\"source_images\":[],",
+        documentId: String = "upstream-receipt-1",
     ): String = """
         {
           $extra
           "schema_version":"receipt.v2",
           "document":{
-            "id":"upstream-receipt-1",
+            "id":${if (documentId == "null") "null" else "\"$documentId\""},
             "type":"receipt",
             "status":"final",
             "issued_on":"2026-08-26",
-            "issued_at":"12:30:00",
-            "currency":"KRW",
-            "source":{
+            "issued_at":null,"currency":"KRW","fulfillment":{"type":"unknown","evidence":"unknown"},"source":{
               "capture_method":"ocr",
               "original_document_id":"remote-original",
               $sourceImages
@@ -209,9 +219,7 @@ class ExternalJsonImporterTest {
             "tax_amount_minor":0,
             "net_amount_minor":1000,
             "confidence":"user_verified",
-            "tax_rate_percent":null
-          }],
-          "totals":{"subtotal_amount_minor":1000,"discount_amount_minor":0,"tax_amount_minor":0,"fee_amount_minor":0,"grand_total_amount_minor":1000},
+            "tax_rate_percent":null,"food_service":null}],"totals":{"items_gross_amount_minor":1000,"discount_amount_minor":0,"tax_amount_minor":0,"fee_amount_minor":0,"tip_amount_minor":0,"rounding_amount_minor":0,"grand_total_amount_minor":1000},
           "payments":[]
         }
     """.trimIndent()

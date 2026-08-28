@@ -1,5 +1,11 @@
 package com.pricetrace.receiptscanner.publisher
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -40,5 +46,9 @@ class CashOsReceiptModelsTest {
         assertTrue(json.contains("\"restaurant_menu_id\":\"33333333-3333-4333-8333-333333333333\""))
         assertTrue(json.contains("\"menu_name\":\"텐진라멘\""))
         assertTrue(json.contains("\"catalog_product_id\":\"44444444-4444-4444-8444-444444444444\""))
+
+        val item = Json.parseToJsonElement(json).jsonObject["p_items"]!!.jsonArray.single().jsonObject
+        assertEquals("1", item["quantity"]!!.jsonPrimitive.content)
+        assertFalse(item["quantity"]!!.jsonPrimitive.isString)
     }
 }

@@ -88,7 +88,7 @@ object CashOsReceiptJson {
                     add(buildJsonObject {
                         put("receipt_item_id", JsonPrimitive(item.receiptItemId))
                         put("description_snapshot", JsonPrimitive(item.descriptionSnapshot))
-                        put("quantity", JsonPrimitive(item.quantity))
+                        put("quantity", JsonPrimitive(item.quantity.toBigDecimal()))
                         put("unit", JsonPrimitive(item.unit))
                         put("unit_price_krw", JsonPrimitive(item.unitPriceKrw))
                         put("total_price_krw", JsonPrimitive(item.totalPriceKrw))

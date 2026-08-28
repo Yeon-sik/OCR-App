@@ -105,10 +105,12 @@ object SyntheticFixtures {
             ),
         ),
         totals = ReceiptV2Totals(
-            subtotalAmountMinor = 1_000,
+            itemsGrossAmountMinor = 1_000,
             discountAmountMinor = null,
             taxAmountMinor = null,
             feeAmountMinor = null,
+            tipAmountMinor = null,
+            roundingAmountMinor = null,
             grandTotalAmountMinor = grandTotal,
         ),
         payments = emptyList(),

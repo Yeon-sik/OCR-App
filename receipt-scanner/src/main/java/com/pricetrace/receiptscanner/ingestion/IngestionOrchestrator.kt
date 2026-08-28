@@ -36,17 +36,22 @@ interface IngestionProjectionSubmitter {
 
 interface IngestionSessionStore {
     suspend fun get(ingestionId: String): IngestionSession?
+    suspend fun findByCanonicalFingerprint(fingerprint: String): IngestionSession?
+    suspend fun delete(ingestionId: String)
     suspend fun save(session: IngestionSession)
 }
 
 class InMemoryIngestionSessionStore : IngestionSessionStore {
     private val values = linkedMapOf<String, IngestionSession>()
     override suspend fun get(ingestionId: String): IngestionSession? = values[ingestionId]
+    override suspend fun findByCanonicalFingerprint(fingerprint: String): IngestionSession? = values.values.firstOrNull { it.canonicalFingerprint == fingerprint }
+    override suspend fun delete(ingestionId: String) { values.remove(ingestionId) }
     override suspend fun save(session: IngestionSession) { values[session.ingestionId] = session }
 }
 
 sealed interface IngestionStartResult {
     data class Success(val session: IngestionSession) : IngestionStartResult
+    data class Duplicate(val session: IngestionSession) : IngestionStartResult
     data class Failure(val issues: List<String>) : IngestionStartResult
 }
 
@@ -67,6 +72,9 @@ class IngestionOrchestrator(
         val evidenceResult = IngestionEvidenceGate.evaluate(envelope, evidence)
         val canonical = YeonsikOcrEnvelopeJson.canonicalize(envelope)
         val fingerprint = StableIds.sha256("ingestion|$canonical")
+        store.findByCanonicalFingerprint(fingerprint)?.let { existing ->
+            return IngestionStartResult.Duplicate(existing)
+        }
         val nowValue = now()
         val session = IngestionSession(
             ingestionId = ingestionId,
@@ -80,7 +88,7 @@ class IngestionOrchestrator(
             projections = enabledProjections(envelope).map { projection ->
                 ProjectionState(
                     projection = projection,
-                    status = if (evidenceResult.isAllowed) ProjectionStatus.READY else ProjectionStatus.PENDING,
+                    status = ProjectionStatus.PENDING,
                     updatedAt = nowValue,
                 )
             } + disabledProjections(envelope).map { projection ->
@@ -100,7 +108,8 @@ class IngestionOrchestrator(
             reviewStatus = IngestionReviewStatus.READY,
             updatedAt = now(),
             projections = current.projections.map { state ->
-                if (state.status == ProjectionStatus.DISABLED) state else state.copy(status = ProjectionStatus.USER_VERIFIED, updatedAt = now(), lastError = null)
+                if (state.status == ProjectionStatus.DISABLED || state.status == ProjectionStatus.UPLOADED) state
+                else state.copy(status = ProjectionStatus.PENDING, updatedAt = now(), lastError = null)
             },
         )
         store.save(updated)
@@ -110,11 +119,12 @@ class IngestionOrchestrator(
     suspend fun submitProjection(ingestionId: String, projection: IngestionProjection, envelope: YeonsikOcrEnvelope): ProjectionState {
         val session = requireNotNull(store.get(ingestionId)) { "ingestion_not_found" }
         val current = requireNotNull(session.projections.firstOrNull { it.projection == projection }) { "projection_not_configured" }
-        if (current.status == ProjectionStatus.DISABLED || current.status == ProjectionStatus.SUBMITTED) return current
-        require(current.status == ProjectionStatus.USER_VERIFIED || current.status == ProjectionStatus.FAILED) { "projection_not_verified" }
+        if (current.status == ProjectionStatus.DISABLED || current.status == ProjectionStatus.UPLOADED) return current
+        require(session.reviewStatus == IngestionReviewStatus.READY) { "projection_not_verified" }
+        require(current.status in setOf(ProjectionStatus.PENDING, ProjectionStatus.BLOCKED, ProjectionStatus.FAILED)) { "projection_not_retryable" }
         val resolution = identityResolver.resolve(projection, envelope)
         if (resolution.status != IdentityResolutionStatus.RESOLVED) {
-            return persistFailure(session, projection, current, resolution.message ?: resolution.status.name, retryable = false)
+            return persistBlocked(session, projection, current, resolution.message ?: resolution.status.name)
         }
         val payload = projectionPayload(envelope, projection, resolution.ids)
         val key = StableIds.sha256("projection|${projection.wireValue}|$payload")
@@ -128,20 +138,80 @@ class IngestionOrchestrator(
 
     suspend fun retryFailed(ingestionId: String, envelope: YeonsikOcrEnvelope): List<ProjectionState> {
         val session = requireNotNull(store.get(ingestionId)) { "ingestion_not_found" }
-        return session.projections.filter { it.status == ProjectionStatus.FAILED }.map {
+        return session.projections.filter { it.status == ProjectionStatus.FAILED || it.status == ProjectionStatus.BLOCKED }.map {
             submitProjection(ingestionId, it.projection, envelope)
         }
     }
+
+    /** Records a result produced by an existing app publisher without re-building its contract. */
+    suspend fun recordProjectionUploaded(
+        ingestionId: String,
+        projection: IngestionProjection,
+        remoteId: String,
+        idempotencyKey: String? = null,
+    ): ProjectionState {
+        val session = requireNotNull(store.get(ingestionId)) { "ingestion_not_found" }
+        val current = requireNotNull(session.projections.firstOrNull { it.projection == projection }) { "projection_not_configured" }
+        if (current.status == ProjectionStatus.DISABLED || current.status == ProjectionStatus.UPLOADED) return current
+        val updated = current.copy(
+            status = ProjectionStatus.UPLOADED,
+            idempotencyKey = idempotencyKey ?: current.idempotencyKey ?: StableIds.sha256("projection-record|${projection.wireValue}|$remoteId"),
+            remoteId = remoteId,
+            lastError = null,
+            updatedAt = now(),
+        )
+        store.save(session.copy(updatedAt = now(), projections = session.projections.replace(updated)))
+        return updated
+    }
+
+    suspend fun recordProjectionBlocked(
+        ingestionId: String,
+        projection: IngestionProjection,
+        message: String,
+    ): ProjectionState {
+        val session = requireNotNull(store.get(ingestionId)) { "ingestion_not_found" }
+        val current = requireNotNull(session.projections.firstOrNull { it.projection == projection }) { "projection_not_configured" }
+        if (current.status == ProjectionStatus.DISABLED || current.status == ProjectionStatus.UPLOADED) return current
+        val updated = current.copy(status = ProjectionStatus.BLOCKED, lastError = message, updatedAt = now())
+        store.save(session.copy(updatedAt = now(), projections = session.projections.replace(updated)))
+        return updated
+    }
+
+    suspend fun recordProjectionFailure(
+        ingestionId: String,
+        projection: IngestionProjection,
+        message: String,
+        idempotencyKey: String? = null,
+    ): ProjectionState {
+        val session = requireNotNull(store.get(ingestionId)) { "ingestion_not_found" }
+        val current = requireNotNull(session.projections.firstOrNull { it.projection == projection }) { "projection_not_configured" }
+        if (current.status == ProjectionStatus.DISABLED || current.status == ProjectionStatus.UPLOADED) return current
+        val updated = current.copy(
+            status = ProjectionStatus.FAILED,
+            idempotencyKey = idempotencyKey ?: current.idempotencyKey,
+            attemptCount = current.attemptCount + 1,
+            lastError = message,
+            updatedAt = now(),
+        )
+        store.save(session.copy(updatedAt = now(), projections = session.projections.replace(updated)))
+        return updated
+    }
+
 
     private fun projectionPayload(envelope: YeonsikOcrEnvelope, projection: IngestionProjection, ids: Map<String, String>): String =
         "${YeonsikOcrEnvelopeJson.canonicalize(envelope)}|projection=${projection.wireValue}|identity=${ids.toSortedMap()}"
 
     private suspend fun persistSuccess(session: IngestionSession, projection: IngestionProjection, previous: ProjectionState, key: String, remoteId: String): ProjectionState {
-        val updatedState = previous.copy(status = ProjectionStatus.SUBMITTED, idempotencyKey = key, remoteId = remoteId, updatedAt = now(), lastError = null)
+        val updatedState = previous.copy(status = ProjectionStatus.UPLOADED, idempotencyKey = key, remoteId = remoteId, updatedAt = now(), lastError = null)
         store.save(session.copy(updatedAt = now(), projections = session.projections.replace(updatedState)))
         return updatedState
     }
 
+    private suspend fun persistBlocked(session: IngestionSession, projection: IngestionProjection, previous: ProjectionState, message: String): ProjectionState {
+        val updatedState = previous.copy(status = ProjectionStatus.BLOCKED, lastError = message, updatedAt = now())
+        store.save(session.copy(updatedAt = now(), projections = session.projections.replace(updatedState)))
+        return updatedState
+    }
     private suspend fun persistFailure(session: IngestionSession, projection: IngestionProjection, previous: ProjectionState, message: String, retryable: Boolean, key: String? = previous.idempotencyKey): ProjectionState {
         val updatedState = previous.copy(status = ProjectionStatus.FAILED, idempotencyKey = key, attemptCount = previous.attemptCount + 1, lastError = message, updatedAt = now())
         store.save(session.copy(updatedAt = now(), projections = session.projections.replace(updatedState)))
@@ -150,14 +220,18 @@ class IngestionOrchestrator(
 
     private fun List<ProjectionState>.replace(value: ProjectionState): List<ProjectionState> = map { if (it.projection == value.projection) value else it }
 
-    private fun enabledProjections(envelope: YeonsikOcrEnvelope): List<IngestionProjection> = when (envelope.mode) {
-        IngestionMode.MERCHANT -> listOf(IngestionProjection.PRICETRACE)
-        IngestionMode.RESTAURANT -> listOf(IngestionProjection.PRICETRACE, IngestionProjection.FITNESS, IngestionProjection.CASHOS)
-        IngestionMode.PACKAGED_PRODUCT -> buildList {
-            add(IngestionProjection.FITNESS)
-            if (envelope.receipt != null) { add(IngestionProjection.PRICETRACE); add(IngestionProjection.CASHOS) }
+    private fun enabledProjections(envelope: YeonsikOcrEnvelope): List<IngestionProjection> =
+        (envelope.targets.ifEmpty { inferredTargets(envelope) }).sortedBy(IngestionProjection::wireValue)
+
+    private fun inferredTargets(envelope: YeonsikOcrEnvelope): Set<IngestionProjection> = buildSet {
+        if (envelope.receipt != null) {
+            add(IngestionProjection.PRICETRACE_RECEIPT)
+            add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+            add(IngestionProjection.CASHOS_RECEIPT)
         }
+        if (envelope.nutrition.isNotEmpty()) add(IngestionProjection.FITNESS_NUTRITION)
     }
 
-    private fun disabledProjections(envelope: YeonsikOcrEnvelope): List<IngestionProjection> = IngestionProjection.entries - enabledProjections(envelope).toSet()
+    private fun disabledProjections(envelope: YeonsikOcrEnvelope): List<IngestionProjection> =
+        IngestionProjection.entries - enabledProjections(envelope).toSet()
 }

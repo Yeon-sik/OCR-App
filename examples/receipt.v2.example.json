@@ -16,6 +16,10 @@
       "transcription_status": "user_verified",
       "notes": [],
       "raw_text": null
+    },
+    "fulfillment": {
+      "type": "unknown",
+      "evidence": "unknown"
     }
   },
   "merchant": {
@@ -53,7 +57,8 @@
       "tax_amount_minor": null,
       "net_amount_minor": 1500,
       "confidence": "user_verified",
-      "tax_rate_percent": null
+      "tax_rate_percent": null,
+      "food_service": null
     },
     {
       "id": "line_synthetic_discount_001",
@@ -66,27 +71,29 @@
       "quantity": null,
       "unit_price_amount_minor": null,
       "gross_amount_minor": null,
-      "discount_amount_minor": -200,
+      "discount_amount_minor": 200,
       "tax_amount_minor": null,
       "net_amount_minor": -200,
       "confidence": "user_verified",
-      "tax_rate_percent": null
+      "tax_rate_percent": null,
+      "food_service": null
     }
   ],
   "totals": {
-    "subtotal_amount_minor": 1500,
-    "discount_amount_minor": -200,
+    "discount_amount_minor": 200,
     "tax_amount_minor": null,
     "fee_amount_minor": null,
-    "grand_total_amount_minor": 1300
+    "grand_total_amount_minor": 1300,
+    "items_gross_amount_minor": 1500,
+    "tip_amount_minor": null,
+    "rounding_amount_minor": null
   },
   "payments": [
     {
       "method": "card",
       "amount_minor": 1300,
-      "source_line_references": [
-        "ocr_line_synthetic_payment_001"
-      ]
+      "status": "paid",
+      "reference": null
     }
   ]
 }

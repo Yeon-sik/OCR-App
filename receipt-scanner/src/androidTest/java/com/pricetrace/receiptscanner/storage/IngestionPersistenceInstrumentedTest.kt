@@ -20,11 +20,12 @@ class IngestionPersistenceInstrumentedTest {
     @Test
     fun projectionStatusAndEvidenceSurviveRepositoryRecreation() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val database = Room.inMemoryDatabaseBuilder(context, ReceiptDatabase::class.java)
+        val database = Room.databaseBuilder(context, ReceiptDatabase::class.java, TEST_DB)
             .allowMainThreadQueries()
             .build()
+        lateinit var session: IngestionSession
         try {
-            val session = IngestionSession(
+            session = IngestionSession(
                 ingestionId = "ingestion-test",
                 localDocumentId = "local-test",
                 envelopeStorageKey = "local-test/ingestion/yeonsik-ocr.json",
@@ -33,16 +34,29 @@ class IngestionPersistenceInstrumentedTest {
                 createdAt = "2026-08-27T00:00:00Z",
                 updatedAt = "2026-08-27T00:01:00Z",
                 projections = listOf(
-                    ProjectionState(IngestionProjection.PRICETRACE, ProjectionStatus.SUBMITTED, "k", "remote", updatedAt = "2026-08-27T00:01:00Z"),
-                    ProjectionState(IngestionProjection.FITNESS, ProjectionStatus.FAILED, attemptCount = 1, lastError = "timeout", updatedAt = "2026-08-27T00:01:00Z"),
+                    ProjectionState(IngestionProjection.PRICETRACE_RECEIPT, ProjectionStatus.UPLOADED, "k", "remote", updatedAt = "2026-08-27T00:01:00Z"),
+                    ProjectionState(IngestionProjection.FITNESS_NUTRITION, ProjectionStatus.FAILED, attemptCount = 1, lastError = "timeout", updatedAt = "2026-08-27T00:01:00Z"),
                 ),
                 attachments = listOf(LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true)),
             )
             RoomIngestionSessionStore(database.receiptSessionDao()).save(session)
-            val restarted = RoomIngestionSessionStore(database.receiptSessionDao()).get("ingestion-test")
-            assertEquals(session, restarted)
         } finally {
             database.close()
         }
+
+        val restartedDatabase = Room.databaseBuilder(context, ReceiptDatabase::class.java, TEST_DB)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val restarted = RoomIngestionSessionStore(restartedDatabase.receiptSessionDao()).get("ingestion-test")
+            assertEquals(session, restarted)
+            assertEquals("a".repeat(64), restarted?.canonicalFingerprint)
+        } finally {
+            restartedDatabase.close()
+            context.deleteDatabase(TEST_DB)
+        }
+    }
+    companion object {
+        private const val TEST_DB = "receipt-db-ingestion-persistence-test"
     }
 }

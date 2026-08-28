@@ -76,6 +76,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
 import com.pricetrace.receiptocr.BuildConfig
+import com.pricetrace.receiptocr.pricetrace.CashOsLedgerCandidate
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pricetrace.receiptscanner.domain.BoundingBox
@@ -94,6 +95,7 @@ import com.pricetrace.receiptscanner.domain.ReceiptEvaluationSummary
 import com.pricetrace.receiptscanner.domain.ReceiptPage
 import com.pricetrace.receiptscanner.domain.ReceiptReviewProgress
 import com.pricetrace.receiptscanner.domain.ReceiptValidationResult
+import com.pricetrace.receiptscanner.domain.BusinessKind
 import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.domain.ReceiptV2LineItem
 import com.pricetrace.receiptscanner.domain.PlaceResolutionStatus
@@ -163,6 +165,11 @@ fun ReceiptOcrContent(
     onDismissNutritionAiCorrection: (String) -> Unit = {},
     onSavePriceTraceConnection: (String, String) -> Unit = { _, _ -> },
     onSignInPriceTrace: (String, String) -> Unit = { _, _ -> },
+    onSaveCashOsConnection: (String, String) -> Unit = { _, _ -> },
+    onSignInCashOs: (String, String) -> Unit = { _, _ -> },
+    onLoadCashOsLedgerCandidates: () -> Unit = {},
+    onSelectCashOsLedgerEntry: (String) -> Unit = {},
+    onSubmitCashOsReceipt: () -> Unit = {},
     onMerchantNameChanged: (String) -> Unit = {},
     onBranchNameChanged: (String) -> Unit = {},
     onBusinessRegistrationNumberChanged: (String) -> Unit = {},
@@ -283,6 +290,12 @@ fun ReceiptOcrContent(
                     isPriceTraceSigningIn = uiState.isPriceTraceSigningIn,
                     onSavePriceTraceConnection = onSavePriceTraceConnection,
                     onSignInPriceTrace = onSignInPriceTrace,
+                    cashOsUrl = uiState.cashOsSupabaseUrl,
+                    isCashOsPublishableKeyConfigured = uiState.isCashOsPublishableKeyConfigured,
+                    cashOsSignedInEmail = uiState.cashOsSignedInEmail,
+                    isCashOsSigningIn = uiState.isCashOsSigningIn,
+                    onSaveCashOsConnection = onSaveCashOsConnection,
+                    onSignInCashOs = onSignInCashOs,
                 )
                 AppScreen.IMAGE_CONFIRM -> ImageConfirmationScreen(
                     workflow = uiState.selectedWorkflow,
@@ -406,7 +419,18 @@ fun ReceiptOcrContent(
                     onSave = onSave,
                     onShare = onShare,
                     onShowPriceObservationSubmit = onShowPriceObservationSubmit,
-                    isRestaurantReceipt = uiState.selectedWorkflow == OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT,
+                    isRestaurantReceipt = uiState.receipt?.merchant?.businessKind == BusinessKind.FOOD_SERVICE,
+                    cashOsSignedInEmail = uiState.cashOsSignedInEmail,
+                    cashOsLedgerEntryId = uiState.cashOsLedgerEntryId,
+                    cashOsLedgerCandidates = uiState.cashOsLedgerCandidates,
+                    isLoadingCashOsLedgerCandidates = uiState.isLoadingCashOsLedgerCandidates,
+                    isSubmittingCashOsReceipt = uiState.isSubmittingCashOsReceipt,
+                    cashOsReceiptId = uiState.cashOsReceiptId,
+                    cashOsReceiptReplayed = uiState.cashOsReceiptReplayed,
+                    cashOsReceiptLastError = uiState.cashOsReceiptLastError,
+                    onLoadCashOsLedgerCandidates = onLoadCashOsLedgerCandidates,
+                    onSelectCashOsLedgerEntry = onSelectCashOsLedgerEntry,
+                    onSubmitCashOsReceipt = onSubmitCashOsReceipt,
                 )
                 AppScreen.PRICE_OBSERVATION_SUBMIT -> uiState.receipt?.let { receipt ->
                     PriceObservationSubmitScreen(
@@ -868,6 +892,12 @@ private fun ApiSettingsScreen(
     isPriceTraceSigningIn: Boolean,
     onSavePriceTraceConnection: (String, String) -> Unit,
     onSignInPriceTrace: (String, String) -> Unit,
+    cashOsUrl: String,
+    isCashOsPublishableKeyConfigured: Boolean,
+    cashOsSignedInEmail: String?,
+    isCashOsSigningIn: Boolean,
+    onSaveCashOsConnection: (String, String) -> Unit,
+    onSignInCashOs: (String, String) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("api_settings"),
@@ -908,6 +938,16 @@ private fun ApiSettingsScreen(
                 isSigningIn = isPriceTraceSigningIn,
                 onSaveConnection = onSavePriceTraceConnection,
                 onSignIn = onSignInPriceTrace,
+            )
+        }
+        item {
+            CashOsConnectionCard(
+                supabaseUrl = cashOsUrl,
+                isPublishableKeyConfigured = isCashOsPublishableKeyConfigured,
+                signedInEmail = cashOsSignedInEmail,
+                isSigningIn = isCashOsSigningIn,
+                onSaveConnection = onSaveCashOsConnection,
+                onSignIn = onSignInCashOs,
             )
         }
         item {
@@ -1145,6 +1185,79 @@ private fun PriceTraceConnectionCard(
     }
 }
 
+@Composable
+private fun CashOsConnectionCard(
+    supabaseUrl: String,
+    isPublishableKeyConfigured: Boolean,
+    signedInEmail: String?,
+    isSigningIn: Boolean,
+    onSaveConnection: (String, String) -> Unit,
+    onSignIn: (String, String) -> Unit,
+) {
+    var connectionUrl by remember(supabaseUrl) { mutableStateOf(supabaseUrl) }
+    var publishableKey by remember { mutableStateOf(BuildConfig.DEFAULT_CASHOS_SUPABASE_PUBLISHABLE_KEY) }
+    var email by remember(signedInEmail) { mutableStateOf(signedInEmail.orEmpty()) }
+    var password by remember { mutableStateOf("") }
+    Card {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("CashOS 소비 원장 연결", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "PriceTrace와 분리된 publishable key와 암호화된 CashOS 로그인 세션만 사용합니다. 원본 이미지·OCR 원문·결제 reference는 전송하지 않습니다.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            OutlinedTextField(
+                value = connectionUrl,
+                onValueChange = { connectionUrl = it },
+                label = { Text("CashOS Supabase URL") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("cashos_supabase_url"),
+            )
+            OutlinedTextField(
+                value = publishableKey,
+                onValueChange = { publishableKey = it },
+                label = { Text("CashOS publishable key") },
+                placeholder = { Text(if (isPublishableKeyConfigured) "저장됨 — 변경할 때만 입력" else "publishable key 입력") },
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("cashos_publishable_key"),
+            )
+            OutlinedButton(
+                onClick = { onSaveConnection(connectionUrl, publishableKey) },
+                enabled = connectionUrl.isNotBlank() && (publishableKey.isNotBlank() || isPublishableKeyConfigured) && !isSigningIn,
+                modifier = Modifier.fillMaxWidth().testTag("save_cashos_connection"),
+            ) { Text("CashOS 연결 정보 저장") }
+            if (signedInEmail == null) {
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    label = { Text("CashOS 계정 이메일") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    modifier = Modifier.fillMaxWidth().testTag("cashos_email"),
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("비밀번호 (저장하지 않음)") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("cashos_password"),
+                )
+                Button(
+                    onClick = { onSignIn(email, password) },
+                    enabled = isPublishableKeyConfigured && email.isNotBlank() && password.isNotBlank() && !isSigningIn,
+                    modifier = Modifier.fillMaxWidth().testTag("cashos_sign_in"),
+                ) {
+                    if (isSigningIn) BusyIndicator()
+                    Text("CashOS 계정 로그인")
+                }
+            } else {
+                Text("로그인됨 · $signedInEmail", fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+}
 @Composable
 private fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: () -> Unit) {
     var showDeleteConfirmation by remember { mutableStateOf(false) }
@@ -1815,6 +1928,21 @@ private fun FieldReviewScreen(
             )
         }
         item {
+            Card(modifier = Modifier.fillMaxWidth().testTag("fulfillment_summary")) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("이용 형태", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        "${receipt.document.fulfillment.type.wireValue} · 근거 ${receipt.document.fulfillment.evidence.wireValue}",
+                    )
+                    Text(
+                        "외부 JSON의 fulfillment도 원본 확인 전에는 초안으로만 취급합니다.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        item {
             ReviewTextField(
                 "소계 (KRW 정수)",
                 receipt.totals.subtotalAmountMinor?.toString().orEmpty(),
@@ -1851,6 +1979,19 @@ private fun FieldReviewScreen(
                 testTag = "grand_total_field",
             )
         }
+        item {
+            Card(modifier = Modifier.fillMaxWidth().testTag("additional_totals")) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("최신 totals 필드", style = MaterialTheme.typography.labelLarge)
+                    Text("팁: ${receipt.totals.tipAmountMinor?.toString() ?: "미확인"} · 반올림: ${receipt.totals.roundingAmountMinor?.toString() ?: "미확인"}")
+                    Text(
+                        "금액 단위는 PriceTrace receipt.v2의 정수 minor 단위입니다.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
         if (receipt.payments.isNotEmpty()) {
             item { SectionTitle("결제수단") }
             itemsIndexed(receipt.payments) { index, payment ->
@@ -1865,6 +2006,12 @@ private fun FieldReviewScreen(
                             "결제 금액 ${index + 1}",
                             payment.amountMinor?.toString().orEmpty(),
                             { onPaymentAmountChanged(index, it) },
+                        )
+                        Text("상태: ${payment.status}", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            "참조: ${payment.reference ?: "미확인"}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
@@ -2385,6 +2532,14 @@ private fun LineItemCard(
                 }
             }
             ReviewTextField("행 금액", item.netAmountMinor?.toString().orEmpty(), onNetAmountChanged)
+            item.foodService?.let { foodService ->
+                Text(
+                    "식당 역할: ${foodService.role.wireValue}" +
+                        (foodService.appliesToLineId?.let { " · 적용 대상: $it" } ?: ""),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
             Text(
                 "source refs: ${item.sourceLineReferences.joinToString().ifBlank { "없음" }}",
                 style = MaterialTheme.typography.bodySmall,
@@ -2552,6 +2707,17 @@ fun JsonPreviewScreen(
     onShare: () -> Unit,
     onShowPriceObservationSubmit: () -> Unit = {},
     isRestaurantReceipt: Boolean = false,
+    cashOsSignedInEmail: String? = null,
+    cashOsLedgerEntryId: String? = null,
+    cashOsLedgerCandidates: List<CashOsLedgerCandidate> = emptyList(),
+    isLoadingCashOsLedgerCandidates: Boolean = false,
+    isSubmittingCashOsReceipt: Boolean = false,
+    cashOsReceiptId: String? = null,
+    cashOsReceiptReplayed: Boolean? = null,
+    cashOsReceiptLastError: String? = null,
+    onLoadCashOsLedgerCandidates: () -> Unit = {},
+    onSelectCashOsLedgerEntry: (String) -> Unit = {},
+    onSubmitCashOsReceipt: () -> Unit = {},
 ) {
     val verified = receipt?.document?.source?.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
     LazyColumn(
@@ -2639,6 +2805,37 @@ fun JsonPreviewScreen(
             }
         }
         item {
+            CashOsLedgerSelectionPanel(
+                signedInEmail = cashOsSignedInEmail,
+                selectedLedgerEntryId = cashOsLedgerEntryId,
+                candidates = cashOsLedgerCandidates,
+                isLoading = isLoadingCashOsLedgerCandidates,
+                onLoad = onLoadCashOsLedgerCandidates,
+                onSelect = onSelectCashOsLedgerEntry,
+            )
+        }
+        item {
+            OutlinedButton(
+                onClick = onSubmitCashOsReceipt,
+                enabled = verified && cashOsSignedInEmail != null && !isExporting && !isSubmittingCashOsReceipt,
+                modifier = Modifier.fillMaxWidth().testTag("cashos_receipt_submit_button"),
+            ) {
+                if (isSubmittingCashOsReceipt) BusyIndicator()
+                Text("CashOS에 소비 원장과 영수증 기록")
+            }
+            Text(
+                when {
+                    cashOsSignedInEmail == null -> "CashOS 연결 설정에서 별도 로그인 후 제출할 수 있습니다."
+                    cashOsReceiptId != null && cashOsReceiptReplayed == true -> "CashOS replay 확인: $cashOsReceiptId"
+                    cashOsReceiptId != null -> "CashOS 원자 기록 완료: $cashOsReceiptId"
+                    cashOsReceiptLastError != null -> "CashOS 재시도 필요: $cashOsReceiptLastError"
+                    else -> "CashOS에는 user-verified financial projection만 전송합니다."
+                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        item {
             Text(
                 if (isRestaurantReceipt) {
                     "식당 제출은 식당명·방문일·메뉴 가격만 전송하며 이미지와 OCR 원문은 기기에 남깁니다."
@@ -2648,6 +2845,60 @@ fun JsonPreviewScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
+        }
+    }
+}
+
+@Composable
+private fun CashOsLedgerSelectionPanel(
+    signedInEmail: String?,
+    selectedLedgerEntryId: String?,
+    candidates: List<CashOsLedgerCandidate>,
+    isLoading: Boolean,
+    onLoad: () -> Unit,
+    onSelect: (String) -> Unit,
+) {
+    if (signedInEmail == null) return
+    Card(modifier = Modifier.fillMaxWidth().testTag("cashos_ledger_candidates")) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("CashOS 원장 항목 선택", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "같은 날짜·금액의 후보를 조회합니다. 자동 선택하지 않으며, 정확히 맞는 항목을 직접 선택해야 연결됩니다.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            MaterialOutlinedButton(
+                onClick = onLoad,
+                enabled = !isLoading,
+                modifier = Modifier.fillMaxWidth().testTag("cashos_load_ledger_candidates"),
+            ) {
+                if (isLoading) BusyIndicator()
+                Text("원장 후보 조회")
+            }
+            candidates.forEach { candidate ->
+                val selected = candidate.id == selectedLedgerEntryId
+                MaterialOutlinedButton(
+                    onClick = { onSelect(candidate.id) },
+                    modifier = Modifier.fillMaxWidth().testTag("cashos_ledger_${candidate.id}"),
+                    colors = if (selected) ButtonDefaults.outlinedButtonColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    ) else ButtonDefaults.outlinedButtonColors(),
+                ) {
+                    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
+                        Text(
+                            if (selected) "선택됨 · ${candidate.amountKrw}원 · ${candidate.occurredOn}" else "${candidate.amountKrw}원 · ${candidate.occurredOn}",
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        )
+                        Text(
+                            listOfNotNull(candidate.title, candidate.merchantOrCounterparty, candidate.status).joinToString(" · "),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+            if (!isLoading && candidates.isEmpty()) {
+                Text("조회된 후보가 없습니다.", style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }

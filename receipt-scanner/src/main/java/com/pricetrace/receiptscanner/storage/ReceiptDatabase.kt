@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [ScanSessionEntity::class, ReceiptPageEntity::class, ReviewEditEntity::class, PriceObservationQueueEntity::class, IngestionSessionEntity::class, IngestionProjectionEntity::class, IngestionAttachmentEntity::class],
-    version = 7,
+    version = 8,
     exportSchema = false,
 )
 internal abstract class ReceiptDatabase : RoomDatabase() {
@@ -112,12 +112,19 @@ internal abstract class ReceiptDatabase : RoomDatabase() {
             }
         }
 
+        /** Rename pre-coordinator transient projection states without altering user receipts. */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("UPDATE ingestion_projections SET status = 'pending' WHERE status IN ('ready', 'user_verified')")
+                db.execSQL("UPDATE ingestion_projections SET status = 'uploaded' WHERE status = 'submitted'")
+            }
+        }
         fun getInstance(context: Context): ReceiptDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 ReceiptDatabase::class.java,
                 "receipt-scanner.db",
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 .build().also { database -> instance = database }
         }
     }

@@ -1,18 +1,207 @@
 {
   "schema_version": "yeonsik-ocr.v1",
   "mode": "restaurant",
-  "source": {"producer": "chatgpt", "source_files": [{"id": "receipt-1", "type": "receipt", "label": "영수증"}, {"id": "food-1", "type": "food_photo", "label": "음식 사진"}], "user_text": "식당 영수증과 음식 사진"},
-  "merchant_candidate": {"name": "Test Restaurant", "branch_name": null, "address": null, "phone": null, "business_registration_number": null, "source_attachment_ids": ["receipt-1"]},
+  "source": {
+    "producer": "chatgpt",
+    "source_files": [
+      {"id": "receipt-1", "type": "receipt", "label": "영수증"},
+      {"id": "food-1", "type": "food_photo", "label": "메인 음식 사진"},
+      {"id": "food-2", "type": "food_photo", "label": "옵션 음식 사진"},
+      {"id": "food-3", "type": "food_photo", "label": "사이드 음식 사진"}
+    ],
+    "user_text": "식당 영수증과 음식 사진"
+  },
+  "merchant_candidate": {
+    "name": "Test Restaurant",
+    "branch_name": "강남점",
+    "address": null,
+    "phone": null,
+    "business_registration_number": null,
+    "source_attachment_ids": ["receipt-1"]
+  },
   "receipt": {
     "schema_version": "receipt.v2",
-    "document": {"id": "receipt-source-1", "type": "receipt", "status": "final", "issued_on": "2026-08-27", "issued_at": null, "currency": "KRW", "source": {"capture_method": "ocr", "original_document_id": null, "source_images": [], "transcription_status": "user_verified", "notes": [], "raw_text": null}},
-    "merchant": {"name": "Test Restaurant", "branch_name": null, "business_kind": "food_service", "retail_channel": "regular", "catalog_namespace": null, "merchant_id": null, "business_registration_number": null, "address": null, "phone": null},
-    "line_items": [{"id": "line-1", "type": "product", "description": "Noodles", "source_line_references": [], "identifiers": [], "quantity": {"value": 1, "unit": "each"}, "unit_price_amount_minor": 10000, "gross_amount_minor": 10000, "discount_amount_minor": 0, "tax_amount_minor": 0, "net_amount_minor": 10000, "confidence": "user_verified", "tax_rate_percent": null}],
-    "totals": {"subtotal_amount_minor": 10000, "discount_amount_minor": 0, "tax_amount_minor": 0, "fee_amount_minor": 0, "grand_total_amount_minor": 10000},
-    "payments": []
+    "document": {
+      "id": null,
+      "type": "receipt",
+      "status": "final",
+      "issued_on": "2026-08-27",
+      "issued_at": null,
+      "currency": "KRW",
+      "fulfillment": {"type": "dine_in", "evidence": "printed"},
+      "source": {
+        "capture_method": "ocr",
+        "original_document_id": null,
+        "source_images": [],
+        "transcription_status": "user_verified",
+        "notes": [],
+        "raw_text": null
+      }
+    },
+    "merchant": {
+      "name": "Test Restaurant",
+      "branch_name": "강남점",
+      "business_kind": "food_service",
+      "retail_channel": "regular",
+      "catalog_namespace": null,
+      "merchant_id": null,
+      "business_registration_number": null,
+      "address": null,
+      "phone": null
+    },
+    "line_items": [
+      {
+        "id": "line-1",
+        "type": "product",
+        "description": "Noodles",
+        "source_line_references": [],
+        "identifiers": [],
+        "quantity": {"value": 1, "unit": "each"},
+        "unit_price_amount_minor": 10000,
+        "gross_amount_minor": 10000,
+        "discount_amount_minor": 0,
+        "tax_amount_minor": 0,
+        "net_amount_minor": 10000,
+        "confidence": "user_verified",
+        "tax_rate_percent": null,
+        "food_service": {"role": "main", "applies_to_line_id": null}
+      },
+      {
+        "id": "line-2",
+        "type": "product",
+        "description": "Extra Egg",
+        "source_line_references": [],
+        "identifiers": [],
+        "quantity": {"value": 1, "unit": "each"},
+        "unit_price_amount_minor": 2000,
+        "gross_amount_minor": 2000,
+        "discount_amount_minor": 0,
+        "tax_amount_minor": 0,
+        "net_amount_minor": 2000,
+        "confidence": "user_verified",
+        "tax_rate_percent": null,
+        "food_service": {"role": "option", "applies_to_line_id": "line-1"}
+      },
+      {
+        "id": "line-3",
+        "type": "product",
+        "description": "Kimchi",
+        "source_line_references": [],
+        "identifiers": [],
+        "quantity": {"value": 1, "unit": "each"},
+        "unit_price_amount_minor": 1000,
+        "gross_amount_minor": 1000,
+        "discount_amount_minor": 0,
+        "tax_amount_minor": 0,
+        "net_amount_minor": 1000,
+        "confidence": "user_verified",
+        "tax_rate_percent": null,
+        "food_service": {"role": "side", "applies_to_line_id": null}
+      }
+    ],
+    "totals": {
+      "items_gross_amount_minor": 13000,
+      "discount_amount_minor": 0,
+      "tax_amount_minor": 0,
+      "fee_amount_minor": 0,
+      "tip_amount_minor": 0,
+      "rounding_amount_minor": 0,
+      "grand_total_amount_minor": 13000
+    },
+    "payments": [
+      {"method": "card", "amount_minor": 13000, "status": "paid", "reference": null}
+    ]
   },
-  "nutrition": [{"client_key": "food-1", "kind": "restaurant_estimate", "line_id": "line-1", "menu_name": "Noodles", "payload": null, "estimate": {"estimated": true, "confidence": "medium", "nutrients": {"calories_kcal": 500, "protein_grams": 20, "carbs_grams": 70, "fat_grams": 15, "sodium_mg": 800, "saturated_fat_grams": 3, "sugars_grams": 5, "fiber_grams": null, "added_sugars_grams": null, "trans_fat_grams": null, "cholesterol_mg": null}, "ranges": {}}}],
-  "classification_hints": {"cashos": {"category_hint": "식비", "account_hint": null, "payment_method_hint": null}},
-  "links": [{"receipt_line_id": "line-1", "nutrition_client_key": "food-1"}],
+  "nutrition": [
+    {
+      "client_key": "food-1",
+      "kind": "restaurant_estimate",
+      "line_id": "line-1",
+      "menu_name": "Noodles",
+      "payload": null,
+      "estimate": {
+        "estimated": true,
+        "confidence": "medium",
+        "nutrients": {
+          "calories_kcal": 500,
+          "protein_grams": 20,
+          "carbs_grams": 70,
+          "fat_grams": 15,
+          "sodium_mg": 800,
+          "saturated_fat_grams": 3,
+          "sugars_grams": 5,
+          "fiber_grams": null,
+          "added_sugars_grams": null,
+          "trans_fat_grams": null,
+          "cholesterol_mg": null
+        },
+        "ranges": {"calories_kcal": {"min": 400, "point": 500, "max": 600}}
+      }
+    },
+    {
+      "client_key": "food-2",
+      "kind": "restaurant_estimate",
+      "line_id": "line-2",
+      "menu_name": "Extra Egg",
+      "payload": null,
+      "estimate": {
+        "estimated": true,
+        "confidence": "low",
+        "nutrients": {
+          "calories_kcal": 80,
+          "protein_grams": 7,
+          "carbs_grams": 1,
+          "fat_grams": 5,
+          "sodium_mg": 70,
+          "saturated_fat_grams": 1.5,
+          "sugars_grams": 0.5,
+          "fiber_grams": null,
+          "added_sugars_grams": null,
+          "trans_fat_grams": null,
+          "cholesterol_mg": 186
+        },
+        "ranges": {}
+      }
+    },
+    {
+      "client_key": "food-3",
+      "kind": "restaurant_estimate",
+      "line_id": "line-3",
+      "menu_name": "Kimchi",
+      "payload": null,
+      "estimate": {
+        "estimated": true,
+        "confidence": "medium",
+        "nutrients": {
+          "calories_kcal": 30,
+          "protein_grams": 2,
+          "carbs_grams": 5,
+          "fat_grams": 0.2,
+          "sodium_mg": 500,
+          "saturated_fat_grams": 0,
+          "sugars_grams": 2,
+          "fiber_grams": 2,
+          "added_sugars_grams": null,
+          "trans_fat_grams": null,
+          "cholesterol_mg": 0
+        },
+        "ranges": {}
+      }
+    }
+  ],
+  "classification_hints": {
+    "cashos": {"category_hint": "식비", "account_hint": null, "payment_method_hint": "card"}
+  },
+  "links": [
+    {"receipt_line_id": "line-1", "nutrition_client_key": "food-1"},
+    {"receipt_line_id": "line-2", "nutrition_client_key": "food-2"},
+    {"receipt_line_id": "line-3", "nutrition_client_key": "food-3"}
+  ],
+  "projection_targets": [
+    "pricetrace_receipt",
+    "pricetrace_price_observation",
+    "fitness_nutrition",
+    "cashos_receipt"
+  ],
   "review": {"status": "ready", "blocking_issues": [], "warnings": []}
 }

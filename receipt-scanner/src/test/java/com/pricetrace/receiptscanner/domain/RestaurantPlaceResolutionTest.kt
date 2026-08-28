@@ -50,7 +50,7 @@ class RestaurantPlaceResolutionTest {
     fun `missing OCR merchant remains unresolved`() {
         val parsed = SyntheticFixtures.verifiedCandidate().let { receipt ->
             ParsedReceipt(
-                documentId = receipt.document.id,
+                documentId = requireNotNull(receipt.document.id),
                 sourceImages = receipt.document.source.sourceImages,
                 rawText = receipt.document.source.rawText,
             )
