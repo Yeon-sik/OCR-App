@@ -62,6 +62,48 @@ class YeonsikOcrIngestionTest {
     }
 
     @Test
+    fun packagedProductMayIncludeOptionalRetailReceiptAndInferAllTargets() = runBlocking {
+        val retailReceipt = receiptJson
+            .replace("\"business_kind\":\"food_service\"", "\"business_kind\":\"retail\"")
+            .replace(",\"food_service\":{\"role\":\"main\",\"applies_to_line_id\":null}", "")
+            .replace(",\"food_service\":{\"role\":\"option\",\"applies_to_line_id\":\"line-1\"}", "")
+            .replace(",\"food_service\":{\"role\":\"side\",\"applies_to_line_id\":null}", "")
+        val imported = import(
+            packagedJson().replace("\"receipt\":null", "\"receipt\":" + retailReceipt),
+            "local-product-with-receipt",
+        )
+        val envelope = (imported.draft as CanonicalDraft.Envelope).value
+
+        assertEquals(IngestionMode.PACKAGED_PRODUCT, envelope.mode)
+        assertEquals(OcrWorkflowType.PRICE_TRACE_RECEIPT, imported.workflowType)
+        assertTrue(envelope.receipt != null)
+        assertEquals(1, envelope.nutrition.size)
+
+        val started = IngestionOrchestrator(
+            store = InMemoryIngestionSessionStore(),
+            submitters = emptyMap(),
+            now = { "2026-08-27T00:00:00Z" },
+        ).start(
+            ingestionId = "ingestion-product-with-receipt",
+            localDocumentId = "local-product-with-receipt",
+            envelope = envelope,
+            evidence = listOf(LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true)),
+        ) as IngestionStartResult.Success
+
+        assertEquals(
+            setOf(
+                IngestionProjection.PRICETRACE_RECEIPT,
+                IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+                IngestionProjection.FITNESS_NUTRITION,
+                IngestionProjection.CASHOS_RECEIPT,
+            ),
+            started.session.projections
+                .filter { it.status != ProjectionStatus.DISABLED }
+                .map { it.projection }
+                .toSet(),
+        )
+    }
+    @Test
     fun `external envelope trust metadata is ignored and fingerprint is local-id independent`() {
         val first = import(merchantJson(extra = "\"user_verified\":true,\"owner_id\":\"attacker\","), "local-a")
         val second = import(merchantJson(), "local-b")
@@ -69,6 +111,31 @@ class YeonsikOcrIngestionTest {
         assertEquals(IngestionReviewStatus.NEEDS_REVIEW, (first.draft as CanonicalDraft.Envelope).value.review.status)
     }
 
+    @Test
+    fun cashosInstitutionHintRoundTripsAndLegacyAccountHintIsRejected() {
+        val value = merchantJson()
+            .replace("\"cashos\":{}", "\"cashos\":{\"institution_hint\":\"bank\"}")
+        val imported = import(value, "local-hint")
+        val envelope = (imported.draft as CanonicalDraft.Envelope).value
+
+        assertEquals("bank", envelope.classificationHints["cashos.institution_hint"])
+
+        val restored = YeonsikOcrEnvelopeJson.decode(
+            YeonsikOcrEnvelopeJson.encode(envelope),
+            "local-hint",
+        )
+        assertEquals("bank", restored.classificationHints["cashos.institution_hint"])
+        val legacyInternal = YeonsikOcrEnvelopeJson.encode(
+            envelope.copy(classificationHints = mapOf("cashos.account_hint" to "legacy")),
+        )
+        assertFalse(legacyInternal.contains("account_hint"))
+
+        val legacy = ExternalJsonImporter().import(
+            value.replace("\"institution_hint\"", "\"account_hint\""),
+            "local-hint-legacy",
+        )
+        assertTrue(legacy is ExternalJsonImportOutcome.Failure)
+    }
     @Test
     fun `restaurant evidence requires readable receipt and food photo`() {
         val envelope = (import(restaurantJson(), "local-evidence").draft as CanonicalDraft.Envelope).value
@@ -189,6 +256,68 @@ class YeonsikOcrIngestionTest {
         )
     }
 
+    @Test
+    fun incompletePriceTraceObservationDoesNotMarkObservationUploaded() = runBlocking {
+        val store = InMemoryIngestionSessionStore()
+        var receiptCalls = 0
+        val orchestrator = IngestionOrchestrator(
+            store = store,
+            submitters = mapOf(
+                IngestionProjection.PRICETRACE_RECEIPT to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                        receiptCalls += 1
+                        return ProjectionSubmission.Success("remote-receipt")
+                    }
+                },
+                IngestionProjection.PRICETRACE_PRICE_OBSERVATION to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission =
+                        ProjectionSubmission.Success(
+                            remoteId = "remote-receipt",
+                            alsoUploaded = setOf(IngestionProjection.PRICETRACE_RECEIPT),
+                            primaryUploaded = false,
+                            primaryPendingReason = "price_observation_incomplete",
+                        )
+                },
+            ),
+            now = { "2026-08-27T00:00:00Z" },
+        )
+        val envelope = (import(restaurantJson(), "local-observation-state").draft as CanonicalDraft.Envelope).value
+        val evidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("food", SourceAttachmentType.FOOD_PHOTO, true),
+        )
+        orchestrator.start(
+            "ingestion-observation-state",
+            "local-observation-state",
+            envelope,
+            evidence,
+        )
+        orchestrator.markUserVerified("ingestion-observation-state", envelope, evidence)
+
+        val receiptState = orchestrator.submitProjection(
+            "ingestion-observation-state",
+            IngestionProjection.PRICETRACE_RECEIPT,
+            envelope,
+        )
+        val receiptKey = receiptState.idempotencyKey
+        val observationState = orchestrator.submitProjection(
+            "ingestion-observation-state",
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+            envelope,
+        )
+
+        assertEquals(ProjectionStatus.UPLOADED, receiptState.status)
+        assertEquals(ProjectionStatus.BLOCKED, observationState.status)
+        assertEquals("price_observation_incomplete", observationState.lastError)
+        assertEquals(1, receiptCalls)
+        assertEquals(
+            receiptKey,
+            store.get("ingestion-observation-state")
+                ?.projections
+                ?.first { it.projection == IngestionProjection.PRICETRACE_RECEIPT }
+                ?.idempotencyKey,
+        )
+    }
     @Test
     fun `canonical revision requires re verification before submit`() = runBlocking {
         val store = InMemoryIngestionSessionStore()

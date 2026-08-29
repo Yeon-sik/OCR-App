@@ -190,7 +190,7 @@
     }
   ],
   "classification_hints": {
-    "cashos": {"category_hint": "식비", "account_hint": null, "payment_method_hint": "card"}
+    "cashos": {"category_hint": "식비", "institution_hint": null, "payment_method_hint": "card"}
   },
   "links": [
     {"receipt_line_id": "line-1", "nutrition_client_key": "food-1"},

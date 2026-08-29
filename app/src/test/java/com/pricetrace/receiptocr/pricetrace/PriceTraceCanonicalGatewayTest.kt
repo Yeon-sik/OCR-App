@@ -18,6 +18,7 @@ import com.pricetrace.receiptscanner.domain.ReceiptV2Payment
 import com.pricetrace.receiptscanner.domain.ReceiptV2Totals
 import com.pricetrace.receiptscanner.domain.RetailChannel
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
+import com.pricetrace.receiptscanner.ingestion.*
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -101,6 +102,65 @@ class PriceTraceCanonicalGatewayTest {
         assertTrue(body["p_user_verified"]!!.jsonPrimitive.content.toBoolean())
         assertEquals("retail", body["p_merchant"]!!.jsonObject["business_kind"]?.jsonPrimitive?.content)
         assertEquals("naver", body["p_merchant"]!!.jsonObject["source_namespace"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun canonicalProjectionSeparatesReceiptAndObservationResults() = runTest {
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(
+                200,
+                """{"receiptId":"receipt-1","observationIds":[],"lines":[{"sourceLineId":"line-1","observationId":null,"restaurantObservationId":null,"resolutionStatus":"unresolved_catalog"}]}""",
+            ),
+            PriceObservationHttpResponse(
+                200,
+                """{"receiptId":"receipt-1","observationIds":["observation-1"],"lines":[{"sourceLineId":"line-1","observationId":"observation-1","restaurantObservationId":null,"resolutionStatus":"resolved"}]}""",
+            ),
+            PriceObservationHttpResponse(
+                200,
+                """{"receiptId":"receipt-1","observationIds":[],"lines":[{"sourceLineId":"line-1","observationId":null,"restaurantObservationId":null,"resolutionStatus":"unresolved_catalog"}]}""",
+            ),
+        )
+        val submitter = PriceTraceCanonicalProjectionSubmitter(
+            PriceTraceCanonicalGateway(FakeStore(signedIn()), transport),
+        )
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.MERCHANT,
+            source = IngestionSource("ocr_app", emptyList()),
+            receipt = receipt(),
+        )
+        fun request(projection: IngestionProjection) = ProjectionRequest(
+            ingestionId = "ingestion-1",
+            projection = projection,
+            canonicalPayload = YeonsikOcrEnvelopeJson.encode(envelope),
+            resolvedIdentity = emptyMap(),
+            idempotencyKey = "projection-key-" + projection.wireValue,
+            envelope = envelope,
+            localDocumentId = "ocr-local-only",
+            revisionSeq = 1,
+            canonicalFingerprint = "a".repeat(64),
+        )
+
+        val receiptResult = submitter.submit(request(IngestionProjection.PRICETRACE_RECEIPT))
+            as ProjectionSubmission.Success
+        assertTrue(receiptResult.primaryUploaded)
+        assertTrue(receiptResult.alsoUploaded.isEmpty())
+
+        val completeObservationResult = submitter.submit(request(IngestionProjection.PRICETRACE_PRICE_OBSERVATION))
+            as ProjectionSubmission.Success
+        assertTrue(completeObservationResult.primaryUploaded)
+        assertEquals(
+            setOf(IngestionProjection.PRICETRACE_RECEIPT),
+            completeObservationResult.alsoUploaded,
+        )
+
+        val incompleteObservationResult = submitter.submit(request(IngestionProjection.PRICETRACE_PRICE_OBSERVATION))
+            as ProjectionSubmission.Success
+        assertFalse(incompleteObservationResult.primaryUploaded)
+        assertEquals(
+            setOf(IngestionProjection.PRICETRACE_RECEIPT),
+            incompleteObservationResult.alsoUploaded,
+        )
+        assertEquals("price_observation_incomplete", incompleteObservationResult.primaryPendingReason)
     }
 
     private fun receipt() = ReceiptV2(

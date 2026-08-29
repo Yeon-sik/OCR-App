@@ -35,6 +35,9 @@ sealed interface ProjectionSubmission {
         val metadataJson: String? = null,
         /** A single network sink may satisfy multiple durable projection targets. */
         val alsoUploaded: Set<IngestionProjection> = emptySet(),
+        /** False when the sink accepted the request but did not create this target yet. */
+        val primaryUploaded: Boolean = true,
+        val primaryPendingReason: String? = null,
     ) : ProjectionSubmission
     data class Failure(val message: String, val retryable: Boolean) : ProjectionSubmission
 }
@@ -315,8 +318,18 @@ class IngestionOrchestrator(
     ): ProjectionState {
         val nowValue = now()
         val targetStates = session.projections.map { state ->
-            if (state.status != ProjectionStatus.DISABLED && (state.projection == projection || state.projection in result.alsoUploaded)) {
-                state.copy(
+            when {
+                state.status == ProjectionStatus.DISABLED -> state
+                state.projection in result.alsoUploaded && state.status == ProjectionStatus.UPLOADED -> state
+                state.projection == projection && !result.primaryUploaded -> state.copy(
+                    status = ProjectionStatus.BLOCKED,
+                    idempotencyKey = key,
+                    remoteId = null,
+                    metadataJson = result.metadataJson,
+                    lastError = result.primaryPendingReason ?: "projection_incomplete",
+                    updatedAt = nowValue,
+                )
+                state.projection == projection || state.projection in result.alsoUploaded -> state.copy(
                     status = ProjectionStatus.UPLOADED,
                     idempotencyKey = key,
                     remoteId = result.remoteId,
@@ -324,7 +337,8 @@ class IngestionOrchestrator(
                     lastError = null,
                     updatedAt = nowValue,
                 )
-            } else state
+                else -> state
+            }
         }
         val updatedSession = session.copy(updatedAt = nowValue, projections = targetStates)
         store.save(updatedSession)

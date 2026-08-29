@@ -9,6 +9,7 @@ import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -201,14 +202,28 @@ internal class PriceTraceCanonicalProjectionSubmitter(
                 val receipt = envelope.receipt
                     ?: return ProjectionSubmission.Failure("receipt_artifact_missing", retryable = false)
                 when (val result = gateway.submitVerifiedReceipt(request.idempotencyKey, receipt)) {
-                    is PriceTraceCanonicalOutcome.Success -> ProjectionSubmission.Success(
-                        remoteId = result.response.requiredId("receiptId"),
-                        metadataJson = result.response.encode(),
-                        alsoUploaded = setOf(
-                            IngestionProjection.PRICETRACE_RECEIPT,
-                            IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
-                        ),
-                    )
+                    is PriceTraceCanonicalOutcome.Success -> {
+                        val observationUploaded = result.response.hasCompleteObservations(receipt)
+                        ProjectionSubmission.Success(
+                            remoteId = result.response.requiredId("receiptId"),
+                            metadataJson = result.response.encode(),
+                            alsoUploaded = when (request.projection) {
+                                IngestionProjection.PRICETRACE_RECEIPT -> if (observationUploaded) {
+                                    setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+                                } else {
+                                    emptySet()
+                                }
+                                IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> setOf(IngestionProjection.PRICETRACE_RECEIPT)
+                                else -> emptySet()
+                            },
+                            primaryUploaded = request.projection != IngestionProjection.PRICETRACE_PRICE_OBSERVATION || observationUploaded,
+                            primaryPendingReason = if (request.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION && !observationUploaded) {
+                                "price_observation_incomplete"
+                            } else {
+                                null
+                            },
+                        )
+                    }
                     is PriceTraceCanonicalOutcome.Failure -> ProjectionSubmission.Failure(
                         message = result.message ?: result.kind.name,
                         retryable = result.kind.retryable,
@@ -237,5 +252,29 @@ internal class PriceTraceCanonicalProjectionSubmitter(
         (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
             ?: error("PriceTrace response is missing $key")
 
+    private fun JsonObject.hasCompleteObservations(receipt: ReceiptV2): Boolean {
+        val observationIds = (this["observationIds"] as? JsonArray)
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank) }
+            ?.toSet()
+            .orEmpty()
+        if (observationIds.isEmpty()) return false
+
+        val lineResults = (this["lines"] as? JsonArray)
+            ?.mapNotNull { it as? JsonObject }
+            ?: return false
+        val expectedLineIds = receipt.lineItems.map { it.id }.toSet()
+        val returnedLineIds = lineResults.mapNotNull { it.stringField("sourceLineId") }.toSet()
+        if (lineResults.size != receipt.lineItems.size || returnedLineIds != expectedLineIds) return false
+
+        val observationLines = lineResults.filter { it.stringField("resolutionStatus") != "semantic_only" }
+        return observationLines.isNotEmpty() && observationLines.all { line ->
+            val observationId = line.stringField("observationId")
+                ?: line.stringField("restaurantObservationId")
+            observationId != null && observationId in observationIds
+        }
+    }
+
+    private fun JsonObject.stringField(key: String): String? =
+        (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
     private fun JsonObject.encode(): String = Json.encodeToString(JsonObject.serializer(), this)
 }

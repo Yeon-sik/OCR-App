@@ -140,6 +140,7 @@ class CashOsReceiptGatewayTest {
         val envelope = YeonsikOcrEnvelope(
             mode = IngestionMode.MERCHANT,
             source = IngestionSource("ocr_app", emptyList()),
+            classificationHints = mapOf("cashos.institution_hint" to "bank"),
             receipt = mapperReceipt(),
         )
         val request = ProjectionRequest(
@@ -162,6 +163,7 @@ class CashOsReceiptGatewayTest {
         assertEquals("receipt-1", success.remoteId)
         val body = Json.parseToJsonElement(requireNotNull(transport.requests.single().body)).jsonObject
         assertEquals("ocr-local-session", body["p_document_id"]?.jsonPrimitive?.content)
+        assertEquals("bank", body["p_institution_hint"]?.jsonPrimitive?.content)
         assertEquals(9, body["p_revision_seq"]?.jsonPrimitive?.intOrNull)
         assertEquals(45, body["p_grand_total_amount_krw"]?.jsonPrimitive?.intOrNull)
         val items = body["p_items"]!!.jsonArray.map { it.jsonObject }

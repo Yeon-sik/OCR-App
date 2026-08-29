@@ -1,5 +1,6 @@
 package com.pricetrace.receiptscanner.ingestion
 
+import com.pricetrace.receiptscanner.domain.BusinessKind
 import com.pricetrace.receiptscanner.domain.ConfidenceLevel
 import com.pricetrace.receiptscanner.domain.ReceiptStatus
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
@@ -27,6 +28,7 @@ import kotlinx.serialization.json.jsonPrimitive
 
 /** Strict codec for the integrated envelope. It deliberately delegates nested legacy contracts. */
 object YeonsikOcrEnvelopeJson {
+    private val cashosHintKeys = setOf("category_hint", "institution_hint", "payment_method_hint")
     private val json = Json { prettyPrint = true; explicitNulls = true; ignoreUnknownKeys = false }
 
     /**
@@ -262,7 +264,7 @@ object YeonsikOcrEnvelopeJson {
     private fun decodeHints(root: JsonObject): Map<String, String?> {
         require(root.keys subtract setOf("cashos") == emptySet<String>())
         val cashos = root.objectValue("cashos")
-        require(cashos.keys subtract setOf("category_hint", "account_hint", "payment_method_hint") == emptySet<String>())
+        require(cashos.keys subtract cashosHintKeys == emptySet<String>())
         return cashos.mapKeys { "cashos.${it.key}" }.mapValues { (_, value) -> value.takeUnless { it == JsonNull }?.jsonPrimitive?.contentOrNull }
     }
 
@@ -304,7 +306,7 @@ object YeonsikOcrEnvelopeJson {
             )
             IngestionMode.PACKAGED_PRODUCT -> require(
                 merchant == null &&
-                    receipt == null &&
+                    (receipt == null || receipt.merchant.businessKind != BusinessKind.FOOD_SERVICE) &&
                     nutrition.isNotEmpty() &&
                     nutrition.all { it is IngestionNutrition.ProductLabel } &&
                     links.isEmpty(),
@@ -332,7 +334,9 @@ object YeonsikOcrEnvelopeJson {
     }
     private fun classificationHintsJson(hints: Map<String, String?>): JsonObject = buildJsonObject {
         put("cashos", JsonObject(
-            hints.filterKeys { it.startsWith("cashos.") }
+            hints.filterKeys {
+                it.startsWith("cashos.") && it.removePrefix("cashos.") in cashosHintKeys
+            }
                 .mapKeys { (key, _) -> key.removePrefix("cashos.") }
                 .mapValues { (_, value) -> value?.let(::JsonPrimitive) ?: JsonNull },
         ))
