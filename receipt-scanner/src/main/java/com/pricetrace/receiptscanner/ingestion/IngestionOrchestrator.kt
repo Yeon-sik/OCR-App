@@ -230,7 +230,12 @@ class IngestionOrchestrator(
             invalidateVerification(current, envelope, "canonical_fingerprint_mismatch")
             return IngestionStartResult.Failure(listOf("canonical_fingerprint_mismatch"))
         }
-        val gate = IngestionEvidenceGate.evaluate(envelope, evidence, inputOrigin)
+        val gate = IngestionEvidenceGate.evaluate(
+            envelope = envelope,
+            evidence = evidence,
+            inputOrigin = inputOrigin,
+            artifactKeys = artifactKeys,
+        )
         if (!gate.isAllowed) return IngestionStartResult.Failure(gate.blockingIssues)
         val artifacts = artifactFingerprints(envelope)
         val missingArtifacts = artifactKeys - artifacts.keys

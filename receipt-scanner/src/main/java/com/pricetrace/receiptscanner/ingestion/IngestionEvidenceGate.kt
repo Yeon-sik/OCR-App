@@ -21,26 +21,46 @@ object IngestionEvidenceGate {
         envelope: YeonsikOcrEnvelope,
         evidence: List<LocalEvidence>,
         inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+        /**
+         * When present, evaluate only the evidence needed by these reviewed artifacts. The
+         * default remains the full-envelope gate for callers that intentionally verify the whole
+         * bundle at once.
+         */
+        artifactKeys: Set<String>? = null,
     ): IngestionEvidenceResult {
+        val requiredTypes = requiredEvidenceTypes(envelope, artifactKeys)
+        val scopedEvidence = if (artifactKeys == null) {
+            evidence
+        } else {
+            evidence.filter { it.type in requiredTypes }
+        }
         val base = VerifiedDraftGate.evaluate(
             inputOrigin = inputOrigin,
-            localPageCount = evidence.size,
-            allLocalPageFilesReadable = evidence.isNotEmpty() && evidence.all(LocalEvidence::fileReadable),
+            localPageCount = scopedEvidence.size,
+            allLocalPageFilesReadable = scopedEvidence.isNotEmpty() && scopedEvidence.all(LocalEvidence::fileReadable),
         )
         if (!base.isAllowed) {
             return IngestionEvidenceResult(false, listOf(base.failure!!.name.lowercase()))
         }
-        val types = evidence.filter(LocalEvidence::fileReadable).map(LocalEvidence::type).toSet()
-        val required = buildSet {
-            if (envelope.receipt != null) add(SourceAttachmentType.RECEIPT)
-            if (envelope.nutrition.any { it is IngestionNutrition.ProductLabel }) {
-                add(SourceAttachmentType.NUTRITION_LABEL)
-            }
-            if (envelope.nutrition.any { it is IngestionNutrition.RestaurantEstimate }) {
-                add(SourceAttachmentType.FOOD_PHOTO)
-            }
-        }
-        val missing = required - types
+        val types = scopedEvidence.filter(LocalEvidence::fileReadable).map(LocalEvidence::type).toSet()
+        val missing = requiredTypes - types
         return IngestionEvidenceResult(missing.isEmpty(), missing.map { "${it.wireValue}_image_required" })
+    }
+
+    private fun requiredEvidenceTypes(
+        envelope: YeonsikOcrEnvelope,
+        artifactKeys: Set<String>?,
+    ): Set<SourceAttachmentType> = buildSet {
+        if (artifactKeys == null || IngestionArtifactKeys.RECEIPT in artifactKeys) {
+            if (envelope.receipt != null) add(SourceAttachmentType.RECEIPT)
+        }
+        envelope.nutrition
+            .filter { artifactKeys == null || IngestionArtifactKeys.nutrition(it.clientKey) in artifactKeys }
+            .forEach { item ->
+                when (item) {
+                    is IngestionNutrition.ProductLabel -> add(SourceAttachmentType.NUTRITION_LABEL)
+                    is IngestionNutrition.RestaurantEstimate -> add(SourceAttachmentType.FOOD_PHOTO)
+                }
+            }
     }
 }

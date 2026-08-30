@@ -117,6 +117,7 @@ import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.nutrition.NutritionUnit
 import com.pricetrace.receiptscanner.ingestion.MerchantCandidate
+import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
 import com.pricetrace.receiptscanner.publisher.PriceObservationSource
 import com.pricetrace.receiptscanner.preflight.ReceiptAiReviewStatus
@@ -173,9 +174,15 @@ fun ReceiptOcrContent(
     onSubmitCashOsReceipt: () -> Unit = {},
     isCanonicalIngestion: Boolean = false,
     canonicalNutritionCount: Int = 0,
+    canonicalNutritionArtifacts: List<IngestionNutrition> = emptyList(),
+    canonicalNutritionVerifiedCount: Int = 0,
+    canonicalNutritionVerifiedKeys: Set<String> = emptySet(),
     nutritionSignedInEmail: String? = null,
     isSubmittingCanonicalNutrition: Boolean = false,
     onSubmitCanonicalNutrition: () -> Unit = {},
+    onShowCanonicalNutritionReview: () -> Unit = {},
+    onConfirmCanonicalNutritionReview: () -> Unit = {},
+    onConfirmCanonicalNutritionArtifact: (String) -> Unit = {},
     isSubmittingCanonicalPriceTrace: Boolean = false,
     canonicalPriceTraceReceiptId: String? = null,
     canonicalPriceTraceLastError: String? = null,
@@ -268,6 +275,22 @@ fun ReceiptOcrContent(
                 pages.isEmpty()
             ) {
                 ExternalSourceImageRequiredBanner(onAttach = onAppendPickImages)
+            }
+            if (
+                isCanonicalIngestion &&
+                uiState.receipt != null &&
+                canonicalNutritionCount > 0 &&
+                uiState.screen in setOf(
+                    AppScreen.FIELD_REVIEW,
+                    AppScreen.ITEM_REVIEW,
+                    AppScreen.RECONCILIATION,
+                )
+            ) {
+                CanonicalNutritionReviewEntry(
+                    verifiedCount = canonicalNutritionVerifiedCount,
+                    totalCount = canonicalNutritionCount,
+                    onOpen = onShowCanonicalNutritionReview,
+                )
             }
             when (uiState.screen) {
                 AppScreen.SESSION_LIST -> SessionListScreen(
@@ -454,9 +477,11 @@ fun ReceiptOcrContent(
                     priceTraceSignedInEmail = uiState.priceTraceSignedInEmail,
                     isCanonicalIngestion = uiState.isCanonicalIngestion,
                     canonicalNutritionCount = uiState.canonicalNutritionCount,
+                    canonicalNutritionVerifiedCount = uiState.canonicalNutritionVerifiedCount,
                     nutritionSignedInEmail = uiState.nutritionSignedInEmail,
                     isSubmittingCanonicalNutrition = uiState.isNutritionPublishing,
                     onSubmitCanonicalNutrition = onSubmitCanonicalNutrition,
+                    onShowCanonicalNutritionReview = onShowCanonicalNutritionReview,
                     isSubmittingCanonicalPriceTrace = uiState.isSubmittingCanonicalPriceTrace,
                     canonicalPriceTraceReceiptId = uiState.canonicalPriceTraceReceiptId,
                     canonicalPriceTraceLastError = uiState.canonicalPriceTraceLastError,
@@ -526,6 +551,7 @@ fun ReceiptOcrContent(
                         signedInEmail = uiState.nutritionSignedInEmail,
                         isSigningIn = uiState.isNutritionSigningIn,
                         isPublishing = uiState.isNutritionPublishing,
+                        isCanonicalReview = uiState.isCanonicalIngestion && uiState.receipt != null,
                         onBack = onBack,
                         onProductNameChanged = onNutritionProductNameChanged,
                         onBrandChanged = onNutritionBrandChanged,
@@ -536,6 +562,7 @@ fun ReceiptOcrContent(
                         onSaveConnection = onSaveNutritionConnection,
                         onSignIn = onSignInNutrition,
                         onConfirmAndPublish = onConfirmAndPublishNutrition,
+                        onConfirmCanonicalReview = onConfirmCanonicalNutritionReview,
                         aiProvider = uiState.nutritionAiProvider,
                         aiCandidates = uiState.nutritionAiCandidates,
                         aiRejectedCount = uiState.nutritionAiRejectedCount,
@@ -547,6 +574,18 @@ fun ReceiptOcrContent(
                         onApplyAi = onApplyNutritionAiCorrection,
                         onDismissAi = onDismissNutritionAiCorrection,
                     )
+                } ?: if (uiState.isCanonicalIngestion && uiState.receipt != null) {
+                    CanonicalRestaurantNutritionReviewScreen(
+                        artifacts = canonicalNutritionArtifacts.filterIsInstance<IngestionNutrition.RestaurantEstimate>(),
+                        verifiedClientKeys = canonicalNutritionVerifiedKeys,
+                        pages = pages,
+                        resolvePageFile = resolvePageFile,
+                        isPublishing = uiState.isNutritionPublishing,
+                        onBack = onBack,
+                        onConfirmArtifact = onConfirmCanonicalNutritionArtifact,
+                    )
+                } else {
+                    Unit
                 }
                 AppScreen.EVALUATION -> EvaluationScreen(
                     accuracySummary = uiState.accuracySummary,
@@ -1560,6 +1599,102 @@ private fun ImageConfirmationScreen(
 
 }
 @Composable
+private fun CanonicalNutritionReviewEntry(
+    verifiedCount: Int,
+    totalCount: Int,
+    onOpen: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+            .testTag("canonical_nutrition_review_entry"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("관련 nutrition artifact 검수", fontWeight = FontWeight.SemiBold)
+            Text("receipt 검수와 분리된 확인입니다. 현재 $verifiedCount/${totalCount}개를 검수했습니다.")
+            Button(
+                onClick = onOpen,
+                modifier = Modifier.fillMaxWidth().testTag("open_canonical_nutrition_review"),
+            ) {
+                Text("nutrition 원본 검수 열기")
+            }
+        }
+    }
+}
+
+@Composable
+private fun CanonicalRestaurantNutritionReviewScreen(
+    artifacts: List<IngestionNutrition.RestaurantEstimate>,
+    verifiedClientKeys: Set<String>,
+    pages: List<ReceiptPage>,
+    resolvePageFile: (String) -> File,
+    isPublishing: Boolean,
+    onBack: () -> Unit,
+    onConfirmArtifact: (String) -> Unit,
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().testTag("canonical_nutrition_review"),
+        contentPadding = PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            ScreenHeader(
+                "식당 nutrition 검수",
+                "각 음식 추정치를 원본 음식 사진과 대조하세요. 확인만 하고 Fitness 저장은 별도 단계에서 실행합니다.",
+                onBack,
+            )
+        }
+        pages.lastOrNull()?.let { page ->
+            item { EvidenceImage(page, resolvePageFile(page.storageKey), emptyList(), zoomEnabled = true) }
+        }
+        items(artifacts, key = { it.clientKey }) { artifact ->
+            val verified = artifact.clientKey in verifiedClientKeys
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("nutrition_artifact_${artifact.clientKey}"),
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(artifact.menuName, style = MaterialTheme.typography.titleMedium)
+                    Text("receipt line · ${artifact.lineId}")
+                    Text(
+                        "추정 confidence · ${artifact.estimate.confidenceScore?.toString() ?: artifact.estimate.confidence}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    NutritionField.entries.forEach { field ->
+                        val value = formatNutritionNumber(artifact.estimate.nutrients[field])
+                        val range = artifact.estimate.ranges[field]?.let { range ->
+                            " · 범위 ${formatNutritionNumber(range.min)}~${formatNutritionNumber(range.max)}"
+                        }.orEmpty()
+                        Text("${field.koreanLabel} · ${value.ifBlank { "모름" }} ${field.canonicalUnit}$range")
+                    }
+                    artifact.estimate.nutrientProvenance.values
+                        .flatMap { it.evidenceRefs }
+                        .distinct()
+                        .takeIf { it.isNotEmpty() }
+                        ?.let { refs ->
+                            Text(
+                                "근거 · ${refs.joinToString()}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    Button(
+                        onClick = { onConfirmArtifact(artifact.clientKey) },
+                        enabled = !verified && !isPublishing,
+                        modifier = Modifier.fillMaxWidth().testTag("confirm_nutrition_${artifact.clientKey}"),
+                    ) {
+                        if (isPublishing && !verified) BusyIndicator()
+                        Text(if (verified) "원본 대조 확인 완료" else "원본과 대조해 확인")
+                    }
+                }
+            }
+        }
+        if (artifacts.isEmpty()) {
+            item { Text("검수할 restaurant nutrition artifact가 없습니다.") }
+        }
+    }
+}
+
+@Composable
 private fun NutritionReviewScreen(
     draft: NutritionLabelDraft,
     validationErrors: List<String>,
@@ -1570,6 +1705,7 @@ private fun NutritionReviewScreen(
     signedInEmail: String?,
     isSigningIn: Boolean,
     isPublishing: Boolean,
+    isCanonicalReview: Boolean = false,
     onBack: () -> Unit,
     onProductNameChanged: (String) -> Unit,
     onBrandChanged: (String) -> Unit,
@@ -1580,6 +1716,7 @@ private fun NutritionReviewScreen(
     onSaveConnection: (String, String) -> Unit,
     onSignIn: (String, String) -> Unit,
     onConfirmAndPublish: () -> Unit,
+    onConfirmCanonicalReview: () -> Unit = {},
     aiProvider: ReceiptCorrectionProvider?,
     aiCandidates: List<NutritionCorrectionCandidate>,
     aiRejectedCount: Int,
@@ -1742,12 +1879,20 @@ private fun NutritionReviewScreen(
         }
         item {
             Button(
-                onClick = onConfirmAndPublish,
-                enabled = validationErrors.isEmpty() && signedInEmail != null && !isSigningIn && !isPublishing,
+                onClick = if (isCanonicalReview) onConfirmCanonicalReview else onConfirmAndPublish,
+                enabled = validationErrors.isEmpty() && (isCanonicalReview || signedInEmail != null) &&
+                    !isSigningIn && !isPublishing,
                 modifier = Modifier.fillMaxWidth().testTag("confirm_publish_nutrition"),
             ) {
                 if (isPublishing) BusyIndicator()
-                Text(if (draft.status.wireValue == "user_verified") "확정본 다시 저장" else "원본 대조 확정 후 DB 저장")
+                Text(
+                    when {
+                        isCanonicalReview && draft.status.wireValue == "user_verified" -> "검수 완료 · Fitness 저장은 다음 단계"
+                        isCanonicalReview -> "원본 대조 확정 · Fitness 저장 준비"
+                        draft.status.wireValue == "user_verified" -> "확정본 다시 저장"
+                        else -> "원본 대조 확정 후 DB 저장"
+                    },
+                )
             }
         }
         item {
@@ -2831,9 +2976,11 @@ fun JsonPreviewScreen(
     priceTraceSignedInEmail: String? = null,
     isCanonicalIngestion: Boolean = false,
     canonicalNutritionCount: Int = 0,
+    canonicalNutritionVerifiedCount: Int = 0,
     nutritionSignedInEmail: String? = null,
     isSubmittingCanonicalNutrition: Boolean = false,
     onSubmitCanonicalNutrition: () -> Unit = {},
+    onShowCanonicalNutritionReview: () -> Unit = {},
     isSubmittingCanonicalPriceTrace: Boolean = false,
     canonicalPriceTraceReceiptId: String? = null,
     canonicalPriceTraceLastError: String? = null,
@@ -2851,6 +2998,8 @@ fun JsonPreviewScreen(
     onSubmitCashOsReceipt: () -> Unit = {},
 ) {
     val verified = receipt?.document?.source?.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
+    val canonicalNutritionVerified = canonicalNutritionCount > 0 &&
+        canonicalNutritionVerifiedCount == canonicalNutritionCount
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("json_preview"),
         contentPadding = PaddingValues(20.dp),
@@ -2962,22 +3111,34 @@ fun JsonPreviewScreen(
         if (isCanonicalIngestion && canonicalNutritionCount > 0) {
             item {
                 OutlinedButton(
-                    onClick = onSubmitCanonicalNutrition,
-                    enabled = verified && nutritionSignedInEmail != null && !isExporting && !isSubmittingCanonicalNutrition,
-                    modifier = Modifier.fillMaxWidth().testTag("fitness_canonical_submit_button"),
+                    onClick = onShowCanonicalNutritionReview,
+                    enabled = !isExporting && !isSubmittingCanonicalNutrition,
+                    modifier = Modifier.fillMaxWidth().testTag("fitness_canonical_review_button"),
                 ) {
-                    if (isSubmittingCanonicalNutrition) BusyIndicator()
-                    Text("관련 nutrition을 Fitness에 저장")
+                    Text("관련 nutrition 원본 검수 열기")
                 }
                 Text(
-                    if (nutritionSignedInEmail == null) {
-                        "Fitness 연결 설정에서 별도 로그인 후 제출할 수 있습니다."
+                    if (canonicalNutritionVerifiedCount < canonicalNutritionCount) {
+                        "nutrition artifact 검수 ${canonicalNutritionVerifiedCount}/${canonicalNutritionCount}개 완료. 검수는 Fitness 저장과 분리됩니다."
+                    } else if (nutritionSignedInEmail == null) {
+                        "nutrition 검수가 완료되었습니다. Fitness 연결 설정에서 별도 로그인 후 저장하세요."
                     } else {
-                        "관련 nutrition " + canonicalNutritionCount + "개를 nutrition-label.v1/food-estimate.v1로 제출합니다."
+                        "nutrition 검수가 완료되었습니다. 아래 버튼으로 ${canonicalNutritionCount}개를 nutrition-label.v1/food-estimate.v1로 저장합니다."
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
+            }
+            item {
+                Button(
+                    onClick = onSubmitCanonicalNutrition,
+                    enabled = canonicalNutritionVerified &&
+                        nutritionSignedInEmail != null && !isExporting && !isSubmittingCanonicalNutrition,
+                    modifier = Modifier.fillMaxWidth().testTag("fitness_canonical_submit_button"),
+                ) {
+                    if (isSubmittingCanonicalNutrition) BusyIndicator()
+                    Text("검수된 nutrition을 Fitness에 저장")
+                }
             }
         }
         if (isCanonicalIngestion) {

@@ -374,57 +374,183 @@ class YeonsikOcrIngestionTest {
         assertEquals(started.session.ingestionId, revised.session.ingestionId)
     }
     @Test
-    fun `packaged receipt evidence follows artifacts and label only blocks receipt projection`() = runBlocking {
+    fun `packaged receipt verification only needs receipt evidence`() = runBlocking {
         val envelope = packagedReceiptEnvelope("local-packaged-evidence")
-        assertFalse(
-            IngestionEvidenceGate.evaluate(
-                envelope,
-                listOf(LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true)),
-            ).isAllowed,
+        val allEvidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true),
         )
-        assertFalse(
-            IngestionEvidenceGate.evaluate(
-                envelope,
-                listOf(LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true)),
-            ).isAllowed,
+        val receiptEvidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, false),
         )
+        assertFalse(IngestionEvidenceGate.evaluate(envelope, receiptEvidence).isAllowed)
         assertTrue(
             IngestionEvidenceGate.evaluate(
                 envelope,
-                listOf(
-                    LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
-                    LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true),
-                ),
+                receiptEvidence,
+                artifactKeys = setOf(IngestionArtifactKeys.RECEIPT, IngestionArtifactKeys.CASHOS_HINTS),
             ).isAllowed,
         )
 
-        var calls = 0
         val orchestrator = IngestionOrchestrator(
             store = InMemoryIngestionSessionStore(),
             submitters = mapOf(
                 IngestionProjection.PRICETRACE_RECEIPT to object : IngestionProjectionSubmitter {
-                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
-                        calls += 1
-                        return ProjectionSubmission.Success("receipt")
-                    }
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission =
+                        ProjectionSubmission.Success("receipt")
+                },
+                IngestionProjection.CASHOS_RECEIPT to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission =
+                        ProjectionSubmission.Success("cashos")
                 },
             ),
         )
-        val started = orchestrator.start(
+        orchestrator.start(
             "ingestion-packaged-evidence",
             "local-packaged-evidence",
             envelope,
-            listOf(LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true)),
+            allEvidence,
         )
-        assertTrue(started is IngestionStartResult.Failure)
-        val blocked = orchestrator.submitProjection(
-            "ingestion-packaged-evidence",
-            IngestionProjection.PRICETRACE_RECEIPT,
-            envelope,
+        assertTrue(
+            orchestrator.markReceiptVerified(
+                "ingestion-packaged-evidence",
+                envelope,
+                receiptEvidence,
+            ) is IngestionStartResult.Success,
         )
-        assertEquals(ProjectionStatus.BLOCKED, blocked.status)
-        assertEquals("projection_not_reverified", blocked.lastError)
-        assertEquals(0, calls)
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            orchestrator.submitProjection(
+                "ingestion-packaged-evidence",
+                IngestionProjection.PRICETRACE_RECEIPT,
+                envelope,
+            ).status,
+        )
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            orchestrator.submitProjection(
+                "ingestion-packaged-evidence",
+                IngestionProjection.CASHOS_RECEIPT,
+                envelope,
+            ).status,
+        )
+        assertEquals(
+            ProjectionStatus.BLOCKED,
+            orchestrator.submitProjection(
+                "ingestion-packaged-evidence",
+                IngestionProjection.FITNESS_NUTRITION,
+                envelope,
+            ).status,
+        )
+    }
+
+    @Test
+    fun `packaged product label verification only needs label evidence`() = runBlocking {
+        val parsed = packagedReceiptEnvelope("local-packaged-label-evidence")
+        val label = parsed.nutrition.single() as IngestionNutrition.ProductLabel
+        val envelope = parsed.copy(
+            nutrition = listOf(label.copy(draft = label.draft.asUserVerified("2026-08-30T10:00:00Z"))),
+        )
+        val allEvidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true),
+        )
+        val labelEvidence = listOf(
+            LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true),
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, false),
+        )
+        val orchestrator = IngestionOrchestrator(
+            store = InMemoryIngestionSessionStore(),
+            submitters = mapOf(
+                IngestionProjection.FITNESS_NUTRITION to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission =
+                        ProjectionSubmission.Success("fitness")
+                },
+            ),
+        )
+        orchestrator.start("ingestion-packaged-label-evidence", "local-packaged-label-evidence", envelope, allEvidence)
+        assertTrue(
+            orchestrator.markNutritionVerified(
+                "ingestion-packaged-label-evidence",
+                envelope,
+                labelEvidence,
+            ) is IngestionStartResult.Success,
+        )
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            orchestrator.submitProjection(
+                "ingestion-packaged-label-evidence",
+                IngestionProjection.FITNESS_NUTRITION,
+                envelope,
+            ).status,
+        )
+        assertEquals(
+            ProjectionStatus.BLOCKED,
+            orchestrator.submitProjection(
+                "ingestion-packaged-label-evidence",
+                IngestionProjection.PRICETRACE_RECEIPT,
+                envelope,
+            ).status,
+        )
+    }
+
+    @Test
+    fun `restaurant receipt verification only needs receipt evidence`() = runBlocking {
+        val envelope = (import(restaurantJson(), "local-restaurant-receipt-evidence").draft as CanonicalDraft.Envelope).value
+        val allEvidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("food", SourceAttachmentType.FOOD_PHOTO, true),
+        )
+        val receiptEvidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("food", SourceAttachmentType.FOOD_PHOTO, false),
+        )
+        val orchestrator = IngestionOrchestrator(
+            store = InMemoryIngestionSessionStore(),
+            submitters = mapOf(
+                IngestionProjection.PRICETRACE_RECEIPT to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission =
+                        ProjectionSubmission.Success("receipt")
+                },
+                IngestionProjection.CASHOS_RECEIPT to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission =
+                        ProjectionSubmission.Success("cashos")
+                },
+            ),
+        )
+        orchestrator.start("ingestion-restaurant-receipt-evidence", "local-restaurant-receipt-evidence", envelope, allEvidence)
+        assertTrue(
+            orchestrator.markReceiptVerified(
+                "ingestion-restaurant-receipt-evidence",
+                envelope,
+                receiptEvidence,
+            ) is IngestionStartResult.Success,
+        )
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            orchestrator.submitProjection(
+                "ingestion-restaurant-receipt-evidence",
+                IngestionProjection.PRICETRACE_RECEIPT,
+                envelope,
+            ).status,
+        )
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            orchestrator.submitProjection(
+                "ingestion-restaurant-receipt-evidence",
+                IngestionProjection.CASHOS_RECEIPT,
+                envelope,
+            ).status,
+        )
+        assertEquals(
+            ProjectionStatus.BLOCKED,
+            orchestrator.submitProjection(
+                "ingestion-restaurant-receipt-evidence",
+                IngestionProjection.FITNESS_NUTRITION,
+                envelope,
+            ).status,
+        )
     }
 
     @Test
