@@ -170,9 +170,10 @@ object CanonicalNutritionPayloadFactory {
         revisionSeq: Long,
         idempotencyKey: String,
         draft: NutritionLabelDraft,
-        envelopeVerified: Boolean = false,
+        @Suppress("UNUSED_PARAMETER") envelopeVerified: Boolean = false,
     ): CanonicalNutritionImportPayload {
-        require(envelopeVerified || draft.status == NutritionDraftStatus.USER_VERIFIED) {
+        // Kept for source compatibility; a session/envelope flag cannot authorize a parsed draft.
+        require(draft.status == NutritionDraftStatus.USER_VERIFIED) {
             "nutrition_label_not_verified"
         }
         require(NutritionLabelValidator.validate(draft).isReadyForUpload) { "nutrition_label_incomplete" }

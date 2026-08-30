@@ -5,6 +5,13 @@ import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 
 const val YEONSIK_OCR_SCHEMA = "yeonsik-ocr.v1"
+object IngestionArtifactKeys {
+    const val RECEIPT = "receipt"
+    const val MERCHANT_CANDIDATE = "merchant_candidate"
+    const val CASHOS_HINTS = "cashos_hints"
+
+    fun nutrition(clientKey: String): String = "nutrition:$clientKey"
+}
 
 enum class IngestionMode(val wireValue: String) {
     MERCHANT("merchant"),
@@ -185,6 +192,8 @@ data class IngestionSession(
     val revisionSeq: Long = 1,
     val verifiedCanonicalFingerprint: String? = null,
     val verifiedAt: String? = null,
+    /** Fingerprints of the artifacts explicitly reviewed by the user in this revision. */
+    val verifiedArtifactFingerprints: Map<String, String> = emptyMap(),
     /** Immutable import identity; it does not change when the user edits the draft. */
     val importFingerprint: String = canonicalFingerprint,
 )

@@ -11,6 +11,10 @@ import com.pricetrace.receiptscanner.ingestion.ProjectionState
 import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.LocalEvidence
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 
 @Entity(tableName = "ingestion_sessions", indices = [Index("local_document_id"), Index("canonical_fingerprint"), Index("import_fingerprint")])
 internal data class IngestionSessionEntity(
@@ -24,6 +28,7 @@ internal data class IngestionSessionEntity(
     @ColumnInfo(name = "revision_seq") val revisionSeq: Long,
     @ColumnInfo(name = "verified_canonical_fingerprint") val verifiedCanonicalFingerprint: String?,
     @ColumnInfo(name = "verified_at") val verifiedAt: String?,
+    @ColumnInfo(name = "verified_artifact_fingerprints_json") val verifiedArtifactFingerprintsJson: String = "{}",
     @ColumnInfo(name = "import_fingerprint") val importFingerprint: String?,
 )
 
@@ -65,6 +70,7 @@ internal fun IngestionSessionEntity.toDomain(
     revisionSeq = revisionSeq.coerceAtLeast(1),
     verifiedCanonicalFingerprint = verifiedCanonicalFingerprint,
     verifiedAt = verifiedAt,
+    verifiedArtifactFingerprints = decodeArtifactFingerprints(verifiedArtifactFingerprintsJson),
     importFingerprint = importFingerprint ?: canonicalFingerprint,
 )
 
@@ -104,5 +110,15 @@ internal fun IngestionSession.toEntity() = IngestionSessionEntity(
     revisionSeq = revisionSeq,
     verifiedCanonicalFingerprint = verifiedCanonicalFingerprint,
     verifiedAt = verifiedAt,
+    verifiedArtifactFingerprintsJson = encodeArtifactFingerprints(verifiedArtifactFingerprints),
     importFingerprint = importFingerprint,
 )
+
+private fun encodeArtifactFingerprints(value: Map<String, String>): String =
+    JsonObject(value.mapValues { (_, fingerprint) -> JsonPrimitive(fingerprint) }).toString()
+
+private fun decodeArtifactFingerprints(value: String): Map<String, String> = runCatching {
+    Json.parseToJsonElement(value).jsonObject.mapValues { (_, element) ->
+        (element as? JsonPrimitive)?.content ?: error("artifact fingerprint must be a string")
+    }
+}.getOrDefault(emptyMap())

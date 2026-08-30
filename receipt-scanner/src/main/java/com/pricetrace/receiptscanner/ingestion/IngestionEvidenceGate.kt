@@ -15,7 +15,7 @@ data class IngestionEvidenceResult(
     val blockingIssues: List<String> = emptyList(),
 )
 
-/** Keeps the existing gate and adds mode-specific evidence requirements for integrated imports. */
+/** Keeps the existing gate and derives evidence requirements from the artifacts actually present. */
 object IngestionEvidenceGate {
     fun evaluate(
         envelope: YeonsikOcrEnvelope,
@@ -31,10 +31,14 @@ object IngestionEvidenceGate {
             return IngestionEvidenceResult(false, listOf(base.failure!!.name.lowercase()))
         }
         val types = evidence.filter(LocalEvidence::fileReadable).map(LocalEvidence::type).toSet()
-        val required = when (envelope.mode) {
-            IngestionMode.MERCHANT -> emptySet()
-            IngestionMode.RESTAURANT -> setOf(SourceAttachmentType.RECEIPT, SourceAttachmentType.FOOD_PHOTO)
-            IngestionMode.PACKAGED_PRODUCT -> setOf(SourceAttachmentType.NUTRITION_LABEL)
+        val required = buildSet {
+            if (envelope.receipt != null) add(SourceAttachmentType.RECEIPT)
+            if (envelope.nutrition.any { it is IngestionNutrition.ProductLabel }) {
+                add(SourceAttachmentType.NUTRITION_LABEL)
+            }
+            if (envelope.nutrition.any { it is IngestionNutrition.RestaurantEstimate }) {
+                add(SourceAttachmentType.FOOD_PHOTO)
+            }
         }
         val missing = required - types
         return IngestionEvidenceResult(missing.isEmpty(), missing.map { "${it.wireValue}_image_required" })

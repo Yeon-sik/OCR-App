@@ -38,6 +38,7 @@ class IngestionPersistenceInstrumentedTest {
                     ProjectionState(IngestionProjection.FITNESS_NUTRITION, ProjectionStatus.FAILED, attemptCount = 1, lastError = "timeout", updatedAt = "2026-08-27T00:01:00Z"),
                 ),
                 attachments = listOf(LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true)),
+                verifiedArtifactFingerprints = mapOf("receipt" to "receipt-artifact-fingerprint"),
             )
             RoomIngestionSessionStore(database.receiptSessionDao()).save(session)
         } finally {
@@ -51,6 +52,7 @@ class IngestionPersistenceInstrumentedTest {
             val restarted = RoomIngestionSessionStore(restartedDatabase.receiptSessionDao()).get("ingestion-test")
             assertEquals(session, restarted)
             assertEquals("a".repeat(64), restarted?.canonicalFingerprint)
+            assertEquals(mapOf("receipt" to "receipt-artifact-fingerprint"), restarted?.verifiedArtifactFingerprints)
         } finally {
             restartedDatabase.close()
             context.deleteDatabase(TEST_DB)

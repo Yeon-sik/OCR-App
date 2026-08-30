@@ -50,6 +50,24 @@ class NutritionCanonicalModelsTest {
     }
 
     @Test
+    fun envelopeVerificationFlagCannotAuthorizeParsedNutritionDraft() {
+        val parsed = verifiedDraft().copy(
+            status = com.pricetrace.receiptscanner.nutrition.NutritionDraftStatus.PARSED,
+            confirmedAt = null,
+        )
+        assertFalse(
+            runCatching {
+                CanonicalNutritionPayloadFactory.fromProductLabel(
+                    localDocumentId = "ocr-label-session",
+                    revisionSeq = 1,
+                    idempotencyKey = "parsed-label-key",
+                    draft = parsed,
+                    envelopeVerified = true,
+                )
+            }.isSuccess,
+        )
+    }
+    @Test
     fun restaurantEstimateUsesFoodEstimateContractWithConfidenceRangeAndDeclaredEvidence() {
         val evidenceRefs = NutritionField.requiredFields.associate { field ->
             field to NutritionNutrientProvenance(

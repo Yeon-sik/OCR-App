@@ -38,7 +38,7 @@ internal class FitnessCanonicalProjectionSubmitter(
                         idempotencyKey = itemKey,
                         draft = item.draft,
                         // submitProjection() verifies the persisted envelope fingerprint first.
-                        envelopeVerified = true,
+                        envelopeVerified = false,
                     )
                     is IngestionNutrition.RestaurantEstimate -> {
                         val restaurantName = envelope.receipt?.merchant?.name

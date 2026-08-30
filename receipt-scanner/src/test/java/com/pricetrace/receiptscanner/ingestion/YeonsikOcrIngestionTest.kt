@@ -5,6 +5,7 @@ import com.pricetrace.receiptscanner.importer.CanonicalDraft
 import com.pricetrace.receiptscanner.importer.ExternalJsonImportErrorCode
 import com.pricetrace.receiptscanner.importer.ExternalJsonImportOutcome
 import com.pricetrace.receiptscanner.importer.ExternalJsonImporter
+import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -87,7 +88,7 @@ class YeonsikOcrIngestionTest {
             ingestionId = "ingestion-product-with-receipt",
             localDocumentId = "local-product-with-receipt",
             envelope = envelope,
-            evidence = listOf(LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true)),
+            evidence = listOf(LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true), LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true)),
         ) as IngestionStartResult.Success
 
         assertEquals(
@@ -173,6 +174,7 @@ class YeonsikOcrIngestionTest {
         )) as IngestionStartResult.Success
         assertEquals(IngestionReviewStatus.NEEDS_REVIEW, started.session.reviewStatus)
         orchestrator.markUserVerified("ingestion-1", envelope, started.session.attachments)
+        orchestrator.markNutritionVerified("ingestion-1", envelope, started.session.attachments)
         val price = orchestrator.submitProjection("ingestion-1", IngestionProjection.PRICETRACE_RECEIPT, envelope)
         val fitness = orchestrator.submitProjection("ingestion-1", IngestionProjection.FITNESS_NUTRITION, envelope)
         assertEquals(ProjectionStatus.UPLOADED, price.status)
@@ -347,7 +349,9 @@ class YeonsikOcrIngestionTest {
         )
 
         val revisedEnvelope = envelope.copy(
-            classificationHints = envelope.classificationHints + ("cashos.category_hint" to "updated"),
+            receipt = requireNotNull(envelope.receipt).copy(
+                merchant = requireNotNull(envelope.receipt).merchant.copy(name = "Updated Restaurant"),
+            ),
         )
         val revised = orchestrator.reviseCanonicalDraft("ingestion-revision", revisedEnvelope) as IngestionStartResult.Success
         assertEquals(2L, revised.session.revisionSeq)
@@ -368,6 +372,221 @@ class YeonsikOcrIngestionTest {
         assertEquals(2L, requests[1].revisionSeq)
         assertEquals(revised.session.canonicalFingerprint, requests[1].canonicalFingerprint)
         assertEquals(started.session.ingestionId, revised.session.ingestionId)
+    }
+    @Test
+    fun `packaged receipt evidence follows artifacts and label only blocks receipt projection`() = runBlocking {
+        val envelope = packagedReceiptEnvelope("local-packaged-evidence")
+        assertFalse(
+            IngestionEvidenceGate.evaluate(
+                envelope,
+                listOf(LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true)),
+            ).isAllowed,
+        )
+        assertFalse(
+            IngestionEvidenceGate.evaluate(
+                envelope,
+                listOf(LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true)),
+            ).isAllowed,
+        )
+        assertTrue(
+            IngestionEvidenceGate.evaluate(
+                envelope,
+                listOf(
+                    LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+                    LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true),
+                ),
+            ).isAllowed,
+        )
+
+        var calls = 0
+        val orchestrator = IngestionOrchestrator(
+            store = InMemoryIngestionSessionStore(),
+            submitters = mapOf(
+                IngestionProjection.PRICETRACE_RECEIPT to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                        calls += 1
+                        return ProjectionSubmission.Success("receipt")
+                    }
+                },
+            ),
+        )
+        val started = orchestrator.start(
+            "ingestion-packaged-evidence",
+            "local-packaged-evidence",
+            envelope,
+            listOf(LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true)),
+        )
+        assertTrue(started is IngestionStartResult.Failure)
+        val blocked = orchestrator.submitProjection(
+            "ingestion-packaged-evidence",
+            IngestionProjection.PRICETRACE_RECEIPT,
+            envelope,
+        )
+        assertEquals(ProjectionStatus.BLOCKED, blocked.status)
+        assertEquals("projection_not_reverified", blocked.lastError)
+        assertEquals(0, calls)
+    }
+
+    @Test
+    fun `receipt verification does not unlock restaurant nutrition until nutrition is reviewed`() = runBlocking {
+        val envelope = (import(restaurantJson(), "local-artifact-separation").draft as CanonicalDraft.Envelope).value
+        val evidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("food", SourceAttachmentType.FOOD_PHOTO, true),
+        )
+        val calls = mutableMapOf<IngestionProjection, Int>()
+        val submitters = mapOf(
+            IngestionProjection.PRICETRACE_RECEIPT to object : IngestionProjectionSubmitter {
+                override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                    calls[request.projection] = (calls[request.projection] ?: 0) + 1
+                    return ProjectionSubmission.Success("receipt")
+                }
+            },
+            IngestionProjection.FITNESS_NUTRITION to object : IngestionProjectionSubmitter {
+                override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                    calls[request.projection] = (calls[request.projection] ?: 0) + 1
+                    return ProjectionSubmission.Success("food")
+                }
+            },
+        )
+        val orchestrator = IngestionOrchestrator(
+            store = InMemoryIngestionSessionStore(),
+            submitters = submitters,
+        )
+        orchestrator.start("ingestion-artifact-separation", "local-artifact-separation", envelope, evidence)
+        orchestrator.markReceiptVerified("ingestion-artifact-separation", envelope, evidence)
+
+        val blockedFitness = orchestrator.submitProjection(
+            "ingestion-artifact-separation",
+            IngestionProjection.FITNESS_NUTRITION,
+            envelope,
+        )
+        assertEquals(ProjectionStatus.BLOCKED, blockedFitness.status)
+        assertEquals("projection_not_reverified", blockedFitness.lastError)
+        assertEquals(null, calls[IngestionProjection.FITNESS_NUTRITION])
+
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            orchestrator.submitProjection(
+                "ingestion-artifact-separation",
+                IngestionProjection.PRICETRACE_RECEIPT,
+                envelope,
+            ).status,
+        )
+
+        orchestrator.markNutritionVerified("ingestion-artifact-separation", envelope, evidence)
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            orchestrator.submitProjection(
+                "ingestion-artifact-separation",
+                IngestionProjection.FITNESS_NUTRITION,
+                envelope,
+            ).status,
+        )
+        assertEquals(1, calls[IngestionProjection.PRICETRACE_RECEIPT])
+        assertEquals(1, calls[IngestionProjection.FITNESS_NUTRITION])
+    }
+
+    @Test
+    fun `receipt and product label must be reviewed independently before both projections`() = runBlocking {
+        val parsed = packagedReceiptEnvelope("local-packaged-review")
+        val label = parsed.nutrition.single() as IngestionNutrition.ProductLabel
+        val envelope = parsed.copy(
+            nutrition = listOf(label.copy(draft = label.draft.asUserVerified("2026-08-30T10:00:00Z"))),
+        )
+        val evidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true),
+        )
+        val orchestrator = IngestionOrchestrator(
+            store = InMemoryIngestionSessionStore(),
+            submitters = mapOf(
+                IngestionProjection.PRICETRACE_RECEIPT to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission = ProjectionSubmission.Success("receipt")
+                },
+                IngestionProjection.FITNESS_NUTRITION to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission = ProjectionSubmission.Success("food")
+                },
+            ),
+        )
+        orchestrator.start("ingestion-packaged-review", "local-packaged-review", envelope, evidence)
+        orchestrator.markReceiptVerified("ingestion-packaged-review", envelope, evidence)
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            orchestrator.submitProjection("ingestion-packaged-review", IngestionProjection.PRICETRACE_RECEIPT, envelope).status,
+        )
+        assertEquals(
+            ProjectionStatus.BLOCKED,
+            orchestrator.submitProjection("ingestion-packaged-review", IngestionProjection.FITNESS_NUTRITION, envelope).status,
+        )
+
+        orchestrator.markNutritionVerified("ingestion-packaged-review", envelope, evidence)
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            orchestrator.submitProjection("ingestion-packaged-review", IngestionProjection.FITNESS_NUTRITION, envelope).status,
+        )
+    }
+    @Test
+    fun `changing nutrition invalidates only fitness projection verification`() = runBlocking {
+        val parsed = packagedReceiptEnvelope("local-selective-revision")
+        val parsedLabel = parsed.nutrition.single() as IngestionNutrition.ProductLabel
+        val envelope = parsed.copy(
+            nutrition = listOf(parsedLabel.copy(draft = parsedLabel.draft.asUserVerified("2026-08-30T10:00:00Z"))),
+        )
+        val evidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true),
+        )
+        val orchestrator = IngestionOrchestrator(
+            store = InMemoryIngestionSessionStore(),
+            submitters = mapOf(
+                IngestionProjection.PRICETRACE_RECEIPT to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission = ProjectionSubmission.Success("receipt")
+                },
+                IngestionProjection.FITNESS_NUTRITION to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission = ProjectionSubmission.Success("food")
+                },
+            ),
+        )
+        orchestrator.start("ingestion-selective-revision", "local-selective-revision", envelope, evidence)
+        orchestrator.markReceiptVerified("ingestion-selective-revision", envelope, evidence)
+        orchestrator.markNutritionVerified("ingestion-selective-revision", envelope, evidence)
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            orchestrator.submitProjection("ingestion-selective-revision", IngestionProjection.PRICETRACE_RECEIPT, envelope).status,
+        )
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            orchestrator.submitProjection("ingestion-selective-revision", IngestionProjection.FITNESS_NUTRITION, envelope).status,
+        )
+
+        val changed = envelope.copy(
+            nutrition = listOf(
+                parsedLabel.copy(
+                    draft = parsedLabel.draft.asUserVerified("2026-08-30T10:00:00Z")
+                        .withNutrient(NutritionField.CALORIES_KCAL, 381.0),
+                ),
+            ),
+        )
+        val revised = orchestrator.reviseCanonicalDraft("ingestion-selective-revision", changed) as IngestionStartResult.Success
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            revised.session.projections.first { it.projection == IngestionProjection.PRICETRACE_RECEIPT }.status,
+        )
+        assertEquals(
+            ProjectionStatus.PENDING,
+            revised.session.projections.first { it.projection == IngestionProjection.FITNESS_NUTRITION }.status,
+        )
+        assertTrue(revised.session.verifiedArtifactFingerprints.containsKey(IngestionArtifactKeys.RECEIPT))
+        assertFalse(revised.session.verifiedArtifactFingerprints.keys.any { it.startsWith("nutrition:") })
+    }
+    private fun packagedReceiptEnvelope(localId: String): YeonsikOcrEnvelope {
+        val retailReceipt = receiptJson
+            .replace("\"business_kind\":\"food_service\"", "\"business_kind\":\"retail\"")
+            .replace(",\"food_service\":{\"role\":\"main\",\"applies_to_line_id\":null}", "")
+            .replace(",\"food_service\":{\"role\":\"option\",\"applies_to_line_id\":\"line-1\"}", "")
+            .replace(",\"food_service\":{\"role\":\"side\",\"applies_to_line_id\":null}", "")
+        return (import(packagedJson().replace("\"receipt\":null", "\"receipt\":" + retailReceipt), localId).draft as CanonicalDraft.Envelope).value
     }
     private fun import(
         value: String,

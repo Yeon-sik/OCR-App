@@ -1,7 +1,9 @@
 package com.pricetrace.receiptscanner.ingestion
 
 import com.pricetrace.receiptscanner.domain.StableIds
+import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.input.InputOrigin
+import com.pricetrace.receiptscanner.nutrition.NutritionDraftStatus
 import java.time.OffsetDateTime
 
 enum class IdentityResolutionStatus { RESOLVED, AMBIGUOUS, NOT_FOUND }
@@ -115,7 +117,7 @@ class IngestionOrchestrator(
         else IngestionStartResult.Failure(evidenceResult.blockingIssues)
     }
 
-    /** Regenerates the persisted canonical revision and invalidates all prior verification/projections. */
+    /** Regenerates the persisted canonical revision and invalidates only affected artifact projections. */
     suspend fun reviseCanonicalDraft(
         ingestionId: String,
         envelope: YeonsikOcrEnvelope,
@@ -124,60 +126,138 @@ class IngestionOrchestrator(
         val nextFingerprint = fingerprint(envelope)
         if (current.canonicalFingerprint == nextFingerprint) return IngestionStartResult.Success(current)
         val nowValue = now()
+        val previousArtifacts = current.verifiedArtifactFingerprints
+        val nextArtifacts = artifactFingerprints(envelope)
+        val affectedArtifactKeys = changedArtifactKeys(previousArtifacts, nextArtifacts)
+        val resetAll = previousArtifacts.isEmpty() && current.projections.any { it.status != ProjectionStatus.DISABLED }
         val revised = current.copy(
             canonicalFingerprint = nextFingerprint,
             revisionSeq = current.revisionSeq + 1,
             reviewStatus = IngestionReviewStatus.NEEDS_REVIEW,
             verifiedCanonicalFingerprint = null,
             verifiedAt = null,
+            verifiedArtifactFingerprints = previousArtifacts.filter { (key, value) -> nextArtifacts[key] == value },
             updatedAt = nowValue,
             projections = current.projections.map { state ->
-                if (state.status == ProjectionStatus.DISABLED) state.copy(updatedAt = nowValue)
-                else state.copy(
-                    status = ProjectionStatus.PENDING,
-                    idempotencyKey = null,
-                    remoteId = null,
-                    attemptCount = 0,
-                    lastError = null,
-                    metadataJson = null,
-                    updatedAt = nowValue,
-                )
+                when {
+                    state.status == ProjectionStatus.DISABLED -> state.copy(updatedAt = nowValue)
+                    resetAll || projectionIsAffected(state.projection, affectedArtifactKeys) -> resetPending(state, nowValue)
+                    else -> state.copy(updatedAt = nowValue)
+                }
             },
         )
         store.save(revised)
         return IngestionStartResult.Success(revised)
     }
 
+    /** Compatibility entry point: receipt imports verify receipt only; nutrition-only imports verify nutrition. */
     suspend fun markUserVerified(
         ingestionId: String,
         envelope: YeonsikOcrEnvelope,
         evidence: List<LocalEvidence>,
         inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+    ): IngestionStartResult = when {
+        envelope.receipt != null -> markReceiptVerified(ingestionId, envelope, evidence, inputOrigin)
+        envelope.nutrition.isNotEmpty() -> markNutritionVerified(ingestionId, envelope, evidence, inputOrigin = inputOrigin)
+        envelope.merchantCandidate != null -> markMerchantCandidateVerified(ingestionId, envelope, evidence, inputOrigin)
+        else -> IngestionStartResult.Failure(listOf("no_reviewable_artifact"))
+    }
+
+    suspend fun markReceiptVerified(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+        evidence: List<LocalEvidence>,
+        inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+    ): IngestionStartResult = markArtifactsVerified(
+        ingestionId = ingestionId,
+        envelope = envelope,
+        evidence = evidence,
+        artifactKeys = buildSet {
+            add(IngestionArtifactKeys.RECEIPT)
+            if (envelope.receipt != null) add(IngestionArtifactKeys.CASHOS_HINTS)
+        },
+        inputOrigin = inputOrigin,
+    )
+
+    suspend fun markNutritionVerified(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+        evidence: List<LocalEvidence>,
+        nutritionClientKeys: Set<String> = envelope.nutrition.map { it.clientKey }.toSet(),
+        inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+    ): IngestionStartResult {
+        val requestedKeys = nutritionClientKeys.map(IngestionArtifactKeys::nutrition).toSet()
+        if (requestedKeys.isEmpty()) return IngestionStartResult.Failure(listOf("nutrition_artifact_missing"))
+        val unreviewedProductLabel = envelope.nutrition
+            .filter { IngestionArtifactKeys.nutrition(it.clientKey) in requestedKeys }
+            .filterIsInstance<IngestionNutrition.ProductLabel>()
+            .any { it.draft.status != NutritionDraftStatus.USER_VERIFIED }
+        if (unreviewedProductLabel) {
+            return IngestionStartResult.Failure(listOf("nutrition_artifact_not_user_verified"))
+        }
+        return markArtifactsVerified(
+            ingestionId = ingestionId,
+            envelope = envelope,
+            evidence = evidence,
+            artifactKeys = requestedKeys,
+            inputOrigin = inputOrigin,
+        )
+    }
+
+    private suspend fun markMerchantCandidateVerified(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+        evidence: List<LocalEvidence>,
+        inputOrigin: InputOrigin,
+    ): IngestionStartResult = markArtifactsVerified(
+        ingestionId = ingestionId,
+        envelope = envelope,
+        evidence = evidence,
+        artifactKeys = setOf(IngestionArtifactKeys.MERCHANT_CANDIDATE),
+        inputOrigin = inputOrigin,
+    )
+
+    private suspend fun markArtifactsVerified(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+        evidence: List<LocalEvidence>,
+        artifactKeys: Set<String>,
+        inputOrigin: InputOrigin,
     ): IngestionStartResult {
         val current = store.get(ingestionId) ?: return IngestionStartResult.Failure(listOf("ingestion_not_found"))
         val currentFingerprint = fingerprint(envelope)
         if (current.canonicalFingerprint != currentFingerprint) {
-            invalidateVerification(current, "canonical_fingerprint_mismatch")
+            invalidateVerification(current, envelope, "canonical_fingerprint_mismatch")
             return IngestionStartResult.Failure(listOf("canonical_fingerprint_mismatch"))
         }
         val gate = IngestionEvidenceGate.evaluate(envelope, evidence, inputOrigin)
         if (!gate.isAllowed) return IngestionStartResult.Failure(gate.blockingIssues)
+        val artifacts = artifactFingerprints(envelope)
+        val missingArtifacts = artifactKeys - artifacts.keys
+        if (missingArtifacts.isNotEmpty()) {
+            return IngestionStartResult.Failure(listOf("verification_artifact_missing"))
+        }
         val nowValue = now()
+        val mergedArtifactFingerprints = current.verifiedArtifactFingerprints + artifactKeys.associateWith { artifacts.getValue(it) }
+        val envelopeFullyVerified = artifacts.keys.all { mergedArtifactFingerprints[it] == artifacts[it] }
         val updated = current.copy(
             reviewStatus = IngestionReviewStatus.READY,
             attachments = evidence,
-            verifiedCanonicalFingerprint = currentFingerprint,
-            verifiedAt = nowValue,
+            verifiedCanonicalFingerprint = currentFingerprint.takeIf { envelopeFullyVerified },
+            verifiedAt = nowValue.takeIf { envelopeFullyVerified },
+            verifiedArtifactFingerprints = mergedArtifactFingerprints,
             updatedAt = nowValue,
             projections = current.projections.map { state ->
-                if (state.status == ProjectionStatus.DISABLED || state.status == ProjectionStatus.UPLOADED) state
-                else state.copy(status = ProjectionStatus.PENDING, lastError = null, updatedAt = nowValue)
+                when {
+                    state.status == ProjectionStatus.DISABLED || state.status == ProjectionStatus.UPLOADED -> state
+                    projectionIsAffected(state.projection, artifactKeys) -> state.copy(status = ProjectionStatus.PENDING, lastError = null, updatedAt = nowValue)
+                    else -> state
+                }
             },
         )
         store.save(updated)
         return IngestionStartResult.Success(updated)
     }
-
     suspend fun submitProjection(
         ingestionId: String,
         projection: IngestionProjection,
@@ -187,11 +267,14 @@ class IngestionOrchestrator(
         val current = requireNotNull(session.projections.firstOrNull { it.projection == projection }) { "projection_not_configured" }
         if (current.status == ProjectionStatus.DISABLED || current.status == ProjectionStatus.UPLOADED) return current
         if (fingerprint(envelope) != session.canonicalFingerprint) {
-            val invalidated = invalidateVerification(session, "canonical_fingerprint_mismatch")
+            val invalidated = invalidateVerification(session, envelope, "canonical_fingerprint_mismatch")
             return invalidated.projections.first { it.projection == projection }
         }
-        if (session.reviewStatus != IngestionReviewStatus.READY ||
-            session.verifiedCanonicalFingerprint != session.canonicalFingerprint) {
+        val requiredArtifacts = requiredArtifactKeys(projection, envelope)
+        val currentArtifacts = artifactFingerprints(envelope)
+        if (requiredArtifacts.isEmpty() || requiredArtifacts.any {
+                session.verifiedArtifactFingerprints[it] != currentArtifacts[it]
+            }) {
             return persistBlocked(session, projection, current, "projection_not_reverified")
         }
         require(current.status in setOf(ProjectionStatus.PENDING, ProjectionStatus.BLOCKED, ProjectionStatus.FAILED)) {
@@ -230,7 +313,6 @@ class IngestionOrchestrator(
             }
         }
     }
-
     suspend fun retryFailed(ingestionId: String, envelope: YeonsikOcrEnvelope): List<ProjectionState> {
         val session = requireNotNull(store.get(ingestionId)) { "ingestion_not_found" }
         return session.projections.filter { it.status == ProjectionStatus.FAILED || it.status == ProjectionStatus.BLOCKED }.map {
@@ -293,22 +375,138 @@ class IngestionOrchestrator(
     private fun fingerprint(envelope: YeonsikOcrEnvelope): String =
         StableIds.sha256("ingestion|${YeonsikOcrEnvelopeJson.canonicalize(envelope)}")
 
-    private suspend fun invalidateVerification(session: IngestionSession, reason: String): IngestionSession {
+    private fun artifactFingerprints(envelope: YeonsikOcrEnvelope): Map<String, String> = buildMap {
+        envelope.receipt?.let { receipt ->
+            put(
+                IngestionArtifactKeys.RECEIPT,
+                StableIds.sha256("ingestion-artifact|receipt|${ReceiptV2Json.encodeCanonical(receipt)}"),
+            )
+        }
+
+        if (envelope.receipt != null) {
+            val hints = envelope.classificationHints
+                .filterKeys {
+                    it in setOf(
+                        "cashos.category_hint",
+                        "cashos.institution_hint",
+                        "cashos.payment_method_hint",
+                    )
+                }
+                .toSortedMap()
+                .entries
+                .joinToString("|") { (key, value) -> "$key=${value ?: "<null>"}" }
+            put(
+                IngestionArtifactKeys.CASHOS_HINTS,
+                StableIds.sha256("ingestion-artifact|cashos-hints|$hints"),
+            )
+        }
+        envelope.nutrition.forEach { item ->
+            val artifactEnvelope = envelope.copy(
+                merchantCandidate = null,
+                receipt = null,
+                nutrition = listOf(item),
+                classificationHints = emptyMap(),
+                links = envelope.links.filter { it.nutritionClientKey == item.clientKey },
+                targets = emptySet(),
+                review = IngestionReview(IngestionReviewStatus.NEEDS_REVIEW),
+            )
+            put(
+                IngestionArtifactKeys.nutrition(item.clientKey),
+                StableIds.sha256("ingestion-artifact|nutrition|${YeonsikOcrEnvelopeJson.canonicalize(artifactEnvelope)}"),
+            )
+        }
+        envelope.merchantCandidate?.let {
+            val artifactEnvelope = envelope.copy(
+                merchantCandidate = it,
+                receipt = null,
+                nutrition = emptyList(),
+                classificationHints = emptyMap(),
+                links = emptyList(),
+                targets = emptySet(),
+                review = IngestionReview(IngestionReviewStatus.NEEDS_REVIEW),
+            )
+            put(
+                IngestionArtifactKeys.MERCHANT_CANDIDATE,
+                StableIds.sha256("ingestion-artifact|merchant|${YeonsikOcrEnvelopeJson.canonicalize(artifactEnvelope)}"),
+            )
+        }
+    }
+
+    private fun requiredArtifactKeys(
+        projection: IngestionProjection,
+        envelope: YeonsikOcrEnvelope,
+    ): Set<String> = when (projection) {
+        IngestionProjection.PRICETRACE_RECEIPT,
+        IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> if (envelope.receipt != null) {
+            setOf(IngestionArtifactKeys.RECEIPT)
+        } else emptySet()
+        IngestionProjection.CASHOS_RECEIPT -> if (envelope.receipt != null) {
+            setOf(IngestionArtifactKeys.RECEIPT, IngestionArtifactKeys.CASHOS_HINTS)
+        } else emptySet()
+        IngestionProjection.FITNESS_NUTRITION -> envelope.nutrition.map { IngestionArtifactKeys.nutrition(it.clientKey) }.toSet()
+        IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> if (envelope.merchantCandidate != null && envelope.receipt == null) {
+            setOf(IngestionArtifactKeys.MERCHANT_CANDIDATE)
+        } else emptySet()
+    }
+
+    private fun projectionIsAffected(
+        projection: IngestionProjection,
+        artifactKeys: Set<String>,
+    ): Boolean = when (projection) {
+        IngestionProjection.PRICETRACE_RECEIPT,
+        IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> IngestionArtifactKeys.RECEIPT in artifactKeys
+        IngestionProjection.CASHOS_RECEIPT -> IngestionArtifactKeys.RECEIPT in artifactKeys || IngestionArtifactKeys.CASHOS_HINTS in artifactKeys
+        IngestionProjection.FITNESS_NUTRITION -> artifactKeys.any { it.startsWith("nutrition:") }
+        IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> IngestionArtifactKeys.MERCHANT_CANDIDATE in artifactKeys
+    }
+
+    private fun changedArtifactKeys(
+        previous: Map<String, String>,
+        next: Map<String, String>,
+    ): Set<String> = (previous.keys + next.keys).filter { previous[it] != next[it] }.toSet()
+
+    private fun resetPending(state: ProjectionState, updatedAt: String): ProjectionState = state.copy(
+        status = ProjectionStatus.PENDING,
+        idempotencyKey = null,
+        remoteId = null,
+        attemptCount = 0,
+        lastError = null,
+        metadataJson = null,
+        updatedAt = updatedAt,
+    )
+
+    private fun resetBlocked(state: ProjectionState, updatedAt: String, reason: String): ProjectionState = resetPending(state, updatedAt).copy(
+        status = ProjectionStatus.BLOCKED,
+        lastError = reason,
+    )
+
+    private suspend fun invalidateVerification(
+        session: IngestionSession,
+        envelope: YeonsikOcrEnvelope,
+        reason: String,
+    ): IngestionSession {
         val nowValue = now()
+        val nextArtifacts = artifactFingerprints(envelope)
+        val preserved = session.verifiedArtifactFingerprints.filter { (key, value) -> nextArtifacts[key] == value }
+        val affectedArtifactKeys = changedArtifactKeys(session.verifiedArtifactFingerprints, nextArtifacts)
+        val resetAll = session.verifiedArtifactFingerprints.isEmpty() && session.projections.any { it.status != ProjectionStatus.DISABLED }
         val updated = session.copy(
             reviewStatus = IngestionReviewStatus.NEEDS_REVIEW,
             verifiedCanonicalFingerprint = null,
             verifiedAt = null,
+            verifiedArtifactFingerprints = preserved,
             updatedAt = nowValue,
             projections = session.projections.map { state ->
-                if (state.status == ProjectionStatus.DISABLED) state
-                else state.copy(status = ProjectionStatus.BLOCKED, lastError = reason, updatedAt = nowValue)
+                when {
+                    state.status == ProjectionStatus.DISABLED -> state
+                    resetAll || projectionIsAffected(state.projection, affectedArtifactKeys) -> resetBlocked(state, nowValue, reason)
+                    else -> state
+                }
             },
         )
         store.save(updated)
         return updated
     }
-
     private suspend fun persistSuccess(
         session: IngestionSession,
         projection: IngestionProjection,

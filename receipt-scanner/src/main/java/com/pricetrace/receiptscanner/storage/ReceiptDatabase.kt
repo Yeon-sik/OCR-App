@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [ScanSessionEntity::class, ReceiptPageEntity::class, ReviewEditEntity::class, PriceObservationQueueEntity::class, IngestionSessionEntity::class, IngestionProjectionEntity::class, IngestionAttachmentEntity::class],
-    version = 9,
+    version = 10,
     exportSchema = false,
 )
 internal abstract class ReceiptDatabase : RoomDatabase() {
@@ -123,6 +123,12 @@ internal abstract class ReceiptDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_ingestion_sessions_import_fingerprint` ON `ingestion_sessions` (`import_fingerprint`)")
             }
         }
+        /** Persist per-artifact verification so receipt and nutrition approvals remain independent. */
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE ingestion_sessions ADD COLUMN verified_artifact_fingerprints_json TEXT NOT NULL DEFAULT '{}'")
+            }
+        }
         val MIGRATION_7_8 = object : Migration(7, 8) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("UPDATE ingestion_projections SET status = 'pending' WHERE status IN ('ready', 'user_verified')")
@@ -134,7 +140,7 @@ internal abstract class ReceiptDatabase : RoomDatabase() {
                 context.applicationContext,
                 ReceiptDatabase::class.java,
                 "receipt-scanner.db",
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                 .build().also { database -> instance = database }
         }
     }

@@ -1496,10 +1496,6 @@ class ReceiptAppViewModel(
             return
         }
         val receipt = state.receipt
-        if (receipt != null && receipt.document.source.transcriptionStatus != TranscriptionStatus.USER_VERIFIED) {
-            mutableUiState.value = state.copy(message = "관련 receipt 검수 완료 후 Fitness에 제출할 수 있습니다.")
-            return
-        }
         val documentId = state.currentDocumentId ?: receipt?.document?.requireLocalDocumentId() ?: return
         viewModelScope.launch {
             val envelope = loadIngestionEnvelope(documentId)
@@ -1754,13 +1750,18 @@ class ReceiptAppViewModel(
         this[key]?.let { element ->
             runCatching { element.jsonArray.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } }.getOrDefault(emptyList())
         } ?: emptyList()
-    private fun fallbackEvidenceType(envelope: YeonsikOcrEnvelope, pageIndex: Int): SourceAttachmentType = when {
-        envelope.mode == com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT && pageIndex == 0 -> SourceAttachmentType.RECEIPT
-        envelope.mode == com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT -> SourceAttachmentType.FOOD_PHOTO
-        envelope.nutrition.isNotEmpty() && envelope.receipt == null -> SourceAttachmentType.NUTRITION_LABEL
-        else -> SourceAttachmentType.RECEIPT
+    private fun fallbackEvidenceType(envelope: YeonsikOcrEnvelope, pageIndex: Int): SourceAttachmentType {
+        val artifactTypes = buildList {
+            if (envelope.receipt != null) add(SourceAttachmentType.RECEIPT)
+            if (envelope.nutrition.any { it is IngestionNutrition.ProductLabel }) {
+                add(SourceAttachmentType.NUTRITION_LABEL)
+            }
+            if (envelope.nutrition.any { it is IngestionNutrition.RestaurantEstimate }) {
+                add(SourceAttachmentType.FOOD_PHOTO)
+            }
+        }
+        return artifactTypes.getOrElse(pageIndex) { artifactTypes.lastOrNull() ?: SourceAttachmentType.RECEIPT }
     }
-
     private suspend fun localIngestionEvidence(documentId: String, envelope: YeonsikOcrEnvelope): List<LocalEvidence> =
         repository.getPages(documentId).mapIndexed { index, page ->
             val type = envelope.source.sourceFiles.getOrNull(index)?.type ?: fallbackEvidenceType(envelope, index)
@@ -1788,10 +1789,30 @@ class ReceiptAppViewModel(
         val evidence = localIngestionEvidence(documentId, envelope)
         container.ingestionSessionStore.save(current.copy(attachments = evidence, updatedAt = OffsetDateTime.now().toString()))
         val inputOrigin = repository.getSession(documentId)?.inputOrigin ?: InputOrigin.EXTERNAL_JSON
-        val result = ingestionOrchestrator.markUserVerified(ingestionIdFor(documentId), envelope, evidence, inputOrigin)
-        return result
+        return when {
+            envelope.receipt != null -> ingestionOrchestrator.markReceiptVerified(
+                ingestionIdFor(documentId), envelope, evidence, inputOrigin,
+            )
+            envelope.nutrition.isNotEmpty() -> ingestionOrchestrator.markNutritionVerified(
+                ingestionIdFor(documentId), envelope, evidence, inputOrigin = inputOrigin,
+            )
+            else -> ingestionOrchestrator.markUserVerified(
+                ingestionIdFor(documentId), envelope, evidence, inputOrigin,
+            )
+        }
     }
 
+    private suspend fun markIngestionNutritionVerified(documentId: String): IngestionStartResult? {
+        val current = container.ingestionSessionStore.get(ingestionIdFor(documentId)) ?: return null
+        val envelope = loadIngestionEnvelope(documentId) ?: return null
+        if (envelope.nutrition.isEmpty()) return IngestionStartResult.Failure(listOf("nutrition_artifact_missing"))
+        val evidence = localIngestionEvidence(documentId, envelope)
+        container.ingestionSessionStore.save(current.copy(attachments = evidence, updatedAt = OffsetDateTime.now().toString()))
+        val inputOrigin = repository.getSession(documentId)?.inputOrigin ?: InputOrigin.EXTERNAL_JSON
+        return ingestionOrchestrator.markNutritionVerified(
+            ingestionIdFor(documentId), envelope, evidence, inputOrigin = inputOrigin,
+        )
+    }
     private suspend fun recordProjectionUploaded(
         documentId: String,
         projection: IngestionProjection,
@@ -1897,7 +1918,7 @@ class ReceiptAppViewModel(
                         )
                         return@launch
                     }
-                    val ingestionVerification = markIngestionVerified(sessionDocumentId)
+                    val ingestionVerification = markIngestionNutritionVerified(sessionDocumentId)
                     if (ingestionVerification is IngestionStartResult.Failure) {
                         persistNutritionDraftNow(latestDraft, uploadStatus = "local_only")
                         mutableUiState.value = nutritionState(
