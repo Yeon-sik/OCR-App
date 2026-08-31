@@ -1,9 +1,12 @@
 package com.pricetrace.receiptscanner.ingestion
 
+import com.pricetrace.receiptscanner.domain.PlaceResolutionStatus
+import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.domain.StableIds
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.input.InputOrigin
 import com.pricetrace.receiptscanner.nutrition.NutritionDraftStatus
+import com.pricetrace.receiptscanner.nutrition.NutritionLabelJson
 import java.time.OffsetDateTime
 
 enum class IdentityResolutionStatus { RESOLVED, AMBIGUOUS, NOT_FOUND }
@@ -27,6 +30,7 @@ data class ProjectionRequest(
     val idempotencyKey: String,
     val envelope: YeonsikOcrEnvelope? = null,
     val localDocumentId: String? = null,
+    /** Projection/domain revision, not the envelope's canonical revision. */
     val revisionSeq: Long = 1,
     val canonicalFingerprint: String? = null,
 )
@@ -95,6 +99,7 @@ class IngestionOrchestrator(
             return IngestionStartResult.Duplicate(existing)
         }
         val nowValue = now()
+        val enabled = enabledProjections(envelope)
         val session = IngestionSession(
             ingestionId = ingestionId,
             localDocumentId = localDocumentId,
@@ -106,8 +111,14 @@ class IngestionOrchestrator(
             attachments = evidence,
             revisionSeq = 1,
             importFingerprint = fingerprint,
-            projections = enabledProjections(envelope).map { projection ->
-                ProjectionState(projection = projection, status = ProjectionStatus.PENDING, updatedAt = nowValue)
+            projections = enabled.map { projection ->
+                ProjectionState(
+                    projection = projection,
+                    status = ProjectionStatus.PENDING,
+                    updatedAt = nowValue,
+                    projectionRevisionSeq = 1,
+                    projectionPayloadFingerprint = projectionPayloadFingerprint(projection, envelope),
+                )
             } + disabledProjections(envelope).map { projection ->
                 ProjectionState(projection = projection, status = ProjectionStatus.DISABLED, updatedAt = nowValue)
             },
@@ -129,7 +140,6 @@ class IngestionOrchestrator(
         val previousArtifacts = current.verifiedArtifactFingerprints
         val nextArtifacts = artifactFingerprints(envelope)
         val affectedArtifactKeys = changedArtifactKeys(previousArtifacts, nextArtifacts)
-        val resetAll = previousArtifacts.isEmpty() && current.projections.any { it.status != ProjectionStatus.DISABLED }
         val revised = current.copy(
             canonicalFingerprint = nextFingerprint,
             revisionSeq = current.revisionSeq + 1,
@@ -141,8 +151,22 @@ class IngestionOrchestrator(
             projections = current.projections.map { state ->
                 when {
                     state.status == ProjectionStatus.DISABLED -> state.copy(updatedAt = nowValue)
-                    resetAll || projectionIsAffected(state.projection, affectedArtifactKeys) -> resetPending(state, nowValue)
-                    else -> state.copy(updatedAt = nowValue)
+                    else -> {
+                        val nextProjectionFingerprint = projectionPayloadFingerprint(state.projection, envelope)
+                        val payloadChanged = state.projectionPayloadFingerprint?.let {
+                            it != nextProjectionFingerprint
+                        } ?: (state.idempotencyKey != null &&
+                            projectionIsAffected(state.projection, affectedArtifactKeys))
+                        if (payloadChanged) {
+                            resetForPayloadChange(state, nowValue, nextProjectionFingerprint)
+                        } else {
+                            state.copy(
+                                projectionPayloadFingerprint = state.projectionPayloadFingerprint
+                                    ?: nextProjectionFingerprint,
+                                updatedAt = nowValue,
+                            )
+                        }
+                    }
                 }
             },
         )
@@ -287,11 +311,26 @@ class IngestionOrchestrator(
         }
         val submitter = submitters[projection]
             ?: return persistBlocked(session, projection, current, "projection_not_configured")
+        val payloadFingerprint = projectionPayloadFingerprint(projection, envelope)
+        if (current.projectionPayloadFingerprint != null &&
+            current.projectionPayloadFingerprint != payloadFingerprint
+        ) {
+            val invalidated = resetForPayloadChange(current, now(), payloadFingerprint).copy(
+                status = ProjectionStatus.BLOCKED,
+                lastError = "projection_payload_changed",
+            )
+            store.save(session.copy(updatedAt = now(), projections = session.projections.replace(invalidated)))
+            return invalidated
+        }
+        val projectionRevisionSeq = current.projectionRevisionSeq.coerceAtLeast(1)
         val key = current.idempotencyKey ?: StableIds.sha256(
-            "projection|${projection.wireValue}|${session.localDocumentId}|revision=${session.revisionSeq}|${session.canonicalFingerprint}",
+            "projection|${projection.wireValue}|${session.localDocumentId}|" +
+                "projection_revision=${projectionRevisionSeq}|payload=${payloadFingerprint}",
         )
         val attempted = current.copy(
             idempotencyKey = key,
+            projectionRevisionSeq = projectionRevisionSeq,
+            projectionPayloadFingerprint = payloadFingerprint,
             attemptCount = current.attemptCount + 1,
             lastError = null,
             updatedAt = now(),
@@ -306,11 +345,11 @@ class IngestionOrchestrator(
             idempotencyKey = key,
             envelope = envelope,
             localDocumentId = session.localDocumentId,
-            revisionSeq = session.revisionSeq,
+            revisionSeq = projectionRevisionSeq,
             canonicalFingerprint = session.canonicalFingerprint,
         )
         return when (val result = submitter.submit(request)) {
-            is ProjectionSubmission.Success -> persistSuccess(session, projection, attempted, key, result)
+            is ProjectionSubmission.Success -> persistSuccess(session, projection, attempted, key, result, envelope)
             is ProjectionSubmission.Failure -> if (result.retryable) {
                 persistFailure(session, projection, attempted, result.message, key)
             } else {
@@ -389,35 +428,15 @@ class IngestionOrchestrator(
         }
 
         if (envelope.receipt != null) {
-            val hints = envelope.classificationHints
-                .filterKeys {
-                    it in setOf(
-                        "cashos.category_hint",
-                        "cashos.institution_hint",
-                        "cashos.payment_method_hint",
-                    )
-                }
-                .toSortedMap()
-                .entries
-                .joinToString("|") { (key, value) -> "$key=${value ?: "<null>"}" }
             put(
                 IngestionArtifactKeys.CASHOS_HINTS,
-                StableIds.sha256("ingestion-artifact|cashos-hints|$hints"),
+                StableIds.sha256("ingestion-artifact|cashos-hints|" + cashosHintsInput(envelope)),
             )
         }
         envelope.nutrition.forEach { item ->
-            val artifactEnvelope = envelope.copy(
-                merchantCandidate = null,
-                receipt = null,
-                nutrition = listOf(item),
-                classificationHints = emptyMap(),
-                links = envelope.links.filter { it.nutritionClientKey == item.clientKey },
-                targets = emptySet(),
-                review = IngestionReview(IngestionReviewStatus.NEEDS_REVIEW),
-            )
             put(
                 IngestionArtifactKeys.nutrition(item.clientKey),
-                StableIds.sha256("ingestion-artifact|nutrition|${YeonsikOcrEnvelopeJson.canonicalize(artifactEnvelope)}"),
+                nutritionArtifactFingerprint(envelope, item),
             )
         }
         envelope.merchantCandidate?.let {
@@ -436,6 +455,107 @@ class IngestionOrchestrator(
             )
         }
     }
+
+    /**
+     * Keep this dependency list aligned with the data used by
+     * FitnessCanonicalProjectionSubmitter. In particular, a restaurant estimate uses the
+     * receipt merchant name (or merchant candidate when there is no receipt).
+     */
+    private fun nutritionPayloadDependency(
+        envelope: YeonsikOcrEnvelope,
+        item: IngestionNutrition,
+    ): String = when (item) {
+        is IngestionNutrition.ProductLabel ->
+            "product_label|client_key=" + item.clientKey + "|" + NutritionLabelJson.encode(item.draft)
+        is IngestionNutrition.RestaurantEstimate -> {
+            val artifactEnvelope = YeonsikOcrEnvelope(
+                mode = IngestionMode.RESTAURANT,
+                source = IngestionSource(producer = "fitness", sourceFiles = emptyList()),
+                nutrition = listOf(item),
+            )
+            "restaurant_estimate|client_key=" + item.clientKey +
+                "|restaurant_name=" + (fitnessRestaurantName(envelope) ?: "<null>") +
+                "|" + YeonsikOcrEnvelopeJson.encode(artifactEnvelope, canonicalIds = true)
+        }
+    }
+
+    private fun nutritionArtifactFingerprint(
+        envelope: YeonsikOcrEnvelope,
+        item: IngestionNutrition,
+    ): String = StableIds.sha256(
+        "ingestion-artifact|nutrition|" + nutritionPayloadDependency(envelope, item),
+    )
+
+    private fun fitnessRestaurantName(envelope: YeonsikOcrEnvelope): String? =
+        envelope.receipt?.merchant?.name ?: envelope.merchantCandidate?.name
+
+    private fun projectionPayloadFingerprint(
+        projection: IngestionProjection,
+        envelope: YeonsikOcrEnvelope,
+    ): String = StableIds.sha256(
+        when (projection) {
+            IngestionProjection.PRICETRACE_RECEIPT,
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION ->
+                "pricetrace-receipt|" + priceTraceReceiptPayload(envelope.receipt)
+            IngestionProjection.CASHOS_RECEIPT ->
+                "cashos-receipt|" +
+                    (envelope.receipt?.let { ReceiptV2Json.encodeCanonical(it) } ?: "<none>") +
+                    "|hints=" + cashosHintsInput(envelope) +
+                    "|place=" + cashosPlaceDependency(envelope.receipt)
+            IngestionProjection.FITNESS_NUTRITION ->
+                "fitness|" + envelope.nutrition.joinToString("|") { item ->
+                    nutritionPayloadDependency(envelope, item)
+                }
+            IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE ->
+                "merchant|" + merchantPayloadDependency(envelope.merchantCandidate)
+        },
+    )
+
+    private fun priceTraceReceiptPayload(receipt: ReceiptV2?): String =
+        receipt?.let { value ->
+            val sanitized = value.copy(
+                document = value.document.copy(
+                    source = value.document.source.copy(sourceImages = emptyList(), rawText = null),
+                ),
+                payments = value.payments.map { payment -> payment.copy(reference = null) },
+            )
+            ReceiptV2Json.encodeCanonical(sanitized)
+        } ?: "<none>"
+
+    private fun cashosHintsInput(envelope: YeonsikOcrEnvelope): String =
+        envelope.classificationHints
+            .filterKeys {
+                it in setOf(
+                    "cashos.category_hint",
+                    "cashos.institution_hint",
+                    "cashos.payment_method_hint",
+                )
+            }
+            .toSortedMap()
+            .entries
+            .joinToString("|") { (key, value) -> key + "=" + (value ?: "<null>") }
+
+    private fun cashosPlaceDependency(receipt: ReceiptV2?): String {
+        val selected = receipt?.placeResolution?.selectedCandidate
+            ?.takeIf { receipt.placeResolution.status == PlaceResolutionStatus.USER_CONFIRMED }
+        return selected?.let {
+            (it.restaurantId ?: "<null>") + "|" + (it.restaurantLocationId ?: "<null>")
+        } ?: "<none>"
+    }
+
+    private fun merchantPayloadDependency(merchant: MerchantCandidate?): String =
+        merchant?.let {
+            listOf(
+                it.name,
+                it.branchName,
+                it.businessKind.wireValue,
+                it.businessRegistrationNumber,
+                it.address,
+                it.phone,
+                it.sourceNamespace,
+                it.sourceLocationCode,
+            ).joinToString("|") { value -> value ?: "<null>" }
+        } ?: "<none>"
 
     private fun requiredArtifactKeys(
         projection: IngestionProjection,
@@ -480,9 +600,13 @@ class IngestionOrchestrator(
         updatedAt = updatedAt,
     )
 
-    private fun resetBlocked(state: ProjectionState, updatedAt: String, reason: String): ProjectionState = resetPending(state, updatedAt).copy(
-        status = ProjectionStatus.BLOCKED,
-        lastError = reason,
+    private fun resetForPayloadChange(
+        state: ProjectionState,
+        updatedAt: String,
+        payloadFingerprint: String,
+    ): ProjectionState = resetPending(state, updatedAt).copy(
+        projectionRevisionSeq = state.projectionRevisionSeq.coerceAtLeast(1) + 1,
+        projectionPayloadFingerprint = payloadFingerprint,
     )
 
     private suspend fun invalidateVerification(
@@ -494,7 +618,6 @@ class IngestionOrchestrator(
         val nextArtifacts = artifactFingerprints(envelope)
         val preserved = session.verifiedArtifactFingerprints.filter { (key, value) -> nextArtifacts[key] == value }
         val affectedArtifactKeys = changedArtifactKeys(session.verifiedArtifactFingerprints, nextArtifacts)
-        val resetAll = session.verifiedArtifactFingerprints.isEmpty() && session.projections.any { it.status != ProjectionStatus.DISABLED }
         val updated = session.copy(
             reviewStatus = IngestionReviewStatus.NEEDS_REVIEW,
             verifiedCanonicalFingerprint = null,
@@ -504,8 +627,24 @@ class IngestionOrchestrator(
             projections = session.projections.map { state ->
                 when {
                     state.status == ProjectionStatus.DISABLED -> state
-                    resetAll || projectionIsAffected(state.projection, affectedArtifactKeys) -> resetBlocked(state, nowValue, reason)
-                    else -> state
+                    else -> {
+                        val nextProjectionFingerprint = projectionPayloadFingerprint(state.projection, envelope)
+                        val payloadChanged = state.projectionPayloadFingerprint?.let {
+                            it != nextProjectionFingerprint
+                        } ?: (state.idempotencyKey != null &&
+                            projectionIsAffected(state.projection, affectedArtifactKeys))
+                        if (payloadChanged) {
+                            resetForPayloadChange(state, nowValue, nextProjectionFingerprint).copy(
+                                status = ProjectionStatus.BLOCKED,
+                                lastError = reason,
+                            )
+                        } else {
+                            state.copy(
+                                projectionPayloadFingerprint = state.projectionPayloadFingerprint
+                                    ?: nextProjectionFingerprint,
+                            )
+                        }
+                    }
                 }
             },
         )
@@ -518,6 +657,7 @@ class IngestionOrchestrator(
         previous: ProjectionState,
         key: String,
         result: ProjectionSubmission.Success,
+        envelope: YeonsikOcrEnvelope,
     ): ProjectionState {
         val nowValue = now()
         val targetStates = session.projections.map { state ->
@@ -528,18 +668,34 @@ class IngestionOrchestrator(
                     status = ProjectionStatus.BLOCKED,
                     idempotencyKey = key,
                     remoteId = null,
+                    projectionRevisionSeq = previous.projectionRevisionSeq,
+                    projectionPayloadFingerprint = previous.projectionPayloadFingerprint,
                     metadataJson = result.metadataJson,
                     lastError = result.primaryPendingReason ?: "projection_incomplete",
                     updatedAt = nowValue,
                 )
-                state.projection == projection || state.projection in result.alsoUploaded -> state.copy(
-                    status = ProjectionStatus.UPLOADED,
-                    idempotencyKey = key,
-                    remoteId = result.remoteId,
-                    metadataJson = result.metadataJson,
-                    lastError = null,
-                    updatedAt = nowValue,
-                )
+                state.projection == projection || state.projection in result.alsoUploaded -> {
+                    val targetPayloadFingerprint = if (state.projection == projection) {
+                        previous.projectionPayloadFingerprint
+                    } else {
+                        projectionPayloadFingerprint(state.projection, envelope)
+                    }
+                    val targetRevisionSeq = if (state.projection == projection) {
+                        previous.projectionRevisionSeq
+                    } else {
+                        state.projectionRevisionSeq.coerceAtLeast(1)
+                    }
+                    state.copy(
+                        status = ProjectionStatus.UPLOADED,
+                        idempotencyKey = key,
+                        remoteId = result.remoteId,
+                        projectionRevisionSeq = targetRevisionSeq,
+                        projectionPayloadFingerprint = targetPayloadFingerprint,
+                        metadataJson = result.metadataJson,
+                        lastError = null,
+                        updatedAt = nowValue,
+                    )
+                }
                 else -> state
             }
         }

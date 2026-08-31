@@ -43,6 +43,8 @@ internal data class IngestionProjectionEntity(
     @ColumnInfo(name = "last_error") val lastError: String?,
     @ColumnInfo(name = "updated_at") val updatedAt: String,
     @ColumnInfo(name = "metadata_json") val metadataJson: String?,
+    @ColumnInfo(name = "projection_revision_seq") val projectionRevisionSeq: Long = 1,
+    @ColumnInfo(name = "projection_payload_fingerprint") val projectionPayloadFingerprint: String? = null,
 )
 
 @Entity(tableName = "ingestion_attachments", primaryKeys = ["ingestion_id", "attachment_id"], indices = [Index("ingestion_id"), Index("page_id")])
@@ -83,6 +85,8 @@ internal fun IngestionProjectionEntity.toDomain() = ProjectionState(
     lastError = lastError,
     updatedAt = updatedAt,
     metadataJson = metadataJson,
+    projectionRevisionSeq = projectionRevisionSeq.coerceAtLeast(1),
+    projectionPayloadFingerprint = projectionPayloadFingerprint,
 )
 
 internal fun ProjectionState.toEntity(ingestionId: String) = IngestionProjectionEntity(
@@ -95,6 +99,8 @@ internal fun ProjectionState.toEntity(ingestionId: String) = IngestionProjection
     lastError = lastError,
     updatedAt = updatedAt,
     metadataJson = metadataJson,
+    projectionRevisionSeq = projectionRevisionSeq.coerceAtLeast(1),
+    projectionPayloadFingerprint = projectionPayloadFingerprint,
 )
 
 internal fun LocalEvidence.toEntity(ingestionId: String) = IngestionAttachmentEntity(ingestionId, attachmentId, type.wireValue, pageId, fileReadable)

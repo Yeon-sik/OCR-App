@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [ScanSessionEntity::class, ReceiptPageEntity::class, ReviewEditEntity::class, PriceObservationQueueEntity::class, IngestionSessionEntity::class, IngestionProjectionEntity::class, IngestionAttachmentEntity::class],
-    version = 10,
+    version = 11,
     exportSchema = false,
 )
 internal abstract class ReceiptDatabase : RoomDatabase() {
@@ -129,6 +129,13 @@ internal abstract class ReceiptDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE ingestion_sessions ADD COLUMN verified_artifact_fingerprints_json TEXT NOT NULL DEFAULT '{}'")
             }
         }
+        /** Persist the projection/domain identity independently from envelope revisions. */
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE ingestion_projections ADD COLUMN projection_revision_seq INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE ingestion_projections ADD COLUMN projection_payload_fingerprint TEXT")
+            }
+        }
         val MIGRATION_7_8 = object : Migration(7, 8) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("UPDATE ingestion_projections SET status = 'pending' WHERE status IN ('ready', 'user_verified')")
@@ -140,7 +147,7 @@ internal abstract class ReceiptDatabase : RoomDatabase() {
                 context.applicationContext,
                 ReceiptDatabase::class.java,
                 "receipt-scanner.db",
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
                 .build().also { database -> instance = database }
         }
     }

@@ -706,6 +706,240 @@ class YeonsikOcrIngestionTest {
         assertTrue(revised.session.verifiedArtifactFingerprints.containsKey(IngestionArtifactKeys.RECEIPT))
         assertFalse(revised.session.verifiedArtifactFingerprints.keys.any { it.startsWith("nutrition:") })
     }
+
+    @Test
+    fun cashosRetryKeepsProjectionIdentityAcrossNutritionOnlyEditAndRotatesOnReceiptEdit() = runBlocking {
+        val store = InMemoryIngestionSessionStore()
+        val requests = mutableListOf<ProjectionRequest>()
+        val orchestrator = IngestionOrchestrator(
+            store = store,
+            submitters = mapOf(
+                IngestionProjection.CASHOS_RECEIPT to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                        requests += request
+                        return if (requests.size == 1) {
+                            ProjectionSubmission.Failure("temporary", retryable = true)
+                        } else {
+                            ProjectionSubmission.Success("cashos")
+                        }
+                    }
+                },
+            ),
+        )
+        val envelope = (import(restaurantJson(), "cashos-identity").draft as CanonicalDraft.Envelope).value
+        val evidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("food", SourceAttachmentType.FOOD_PHOTO, true),
+        )
+        val receiptEvidence = listOf(LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true))
+        orchestrator.start("ingestion-cashos-identity", "cashos-identity", envelope, evidence)
+        orchestrator.markReceiptVerified("ingestion-cashos-identity", envelope, receiptEvidence)
+
+        val first = orchestrator.submitProjection(
+            "ingestion-cashos-identity",
+            IngestionProjection.CASHOS_RECEIPT,
+            envelope,
+        )
+        assertEquals(ProjectionStatus.FAILED, first.status)
+        assertEquals(1L, first.projectionRevisionSeq)
+        assertTrue(first.idempotencyKey != null)
+
+        val changedNutrition = envelope.copy(
+            nutrition = listOf(
+                (envelope.nutrition.first() as IngestionNutrition.RestaurantEstimate)
+                    .copy(menuName = "Updated Noodles"),
+            ) + envelope.nutrition.drop(1),
+        )
+        val nutritionRevision = orchestrator.reviseCanonicalDraft(
+            "ingestion-cashos-identity",
+            changedNutrition,
+        ) as IngestionStartResult.Success
+        val retained = nutritionRevision.session.projections.first {
+            it.projection == IngestionProjection.CASHOS_RECEIPT
+        }
+        assertEquals(ProjectionStatus.FAILED, retained.status)
+        assertEquals(first.idempotencyKey, retained.idempotencyKey)
+        assertEquals(1L, retained.projectionRevisionSeq)
+
+        val retried = orchestrator.submitProjection(
+            "ingestion-cashos-identity",
+            IngestionProjection.CASHOS_RECEIPT,
+            changedNutrition,
+        )
+        assertEquals(ProjectionStatus.UPLOADED, retried.status)
+        assertEquals(first.idempotencyKey, requests[1].idempotencyKey)
+        assertEquals(1L, requests[1].revisionSeq)
+
+        val receipt = requireNotNull(changedNutrition.receipt)
+        val changedReceipt = changedNutrition.copy(
+            receipt = receipt.copy(
+                totals = receipt.totals.copy(grandTotalAmountMinor = 14000),
+            ),
+        )
+        val receiptRevision = orchestrator.reviseCanonicalDraft(
+            "ingestion-cashos-identity",
+            changedReceipt,
+        ) as IngestionStartResult.Success
+        val rotated = receiptRevision.session.projections.first {
+            it.projection == IngestionProjection.CASHOS_RECEIPT
+        }
+        assertEquals(ProjectionStatus.PENDING, rotated.status)
+        assertEquals(null, rotated.idempotencyKey)
+        assertEquals(2L, rotated.projectionRevisionSeq)
+
+        orchestrator.markReceiptVerified("ingestion-cashos-identity", changedReceipt, receiptEvidence)
+        val receiptRetry = orchestrator.submitProjection(
+            "ingestion-cashos-identity",
+            IngestionProjection.CASHOS_RECEIPT,
+            changedReceipt,
+        )
+        assertEquals(ProjectionStatus.UPLOADED, receiptRetry.status)
+        assertFalse(requests[2].idempotencyKey == requests[0].idempotencyKey)
+        assertEquals(2L, requests[2].revisionSeq)
+    }
+
+    @Test
+    fun productLabelFitnessRetryKeepsIdentityAcrossUnrelatedReceiptEdit() = runBlocking {
+        val parsed = packagedReceiptEnvelope("fitness-identity")
+        val label = parsed.nutrition.single() as IngestionNutrition.ProductLabel
+        val envelope = parsed.copy(
+            nutrition = listOf(label.copy(draft = label.draft.asUserVerified("2026-08-30T10:00:00Z"))),
+        )
+        val evidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true),
+        )
+        val labelEvidence = listOf(LocalEvidence("label", SourceAttachmentType.NUTRITION_LABEL, true))
+        val requests = mutableListOf<ProjectionRequest>()
+        val orchestrator = IngestionOrchestrator(
+            store = InMemoryIngestionSessionStore(),
+            submitters = mapOf(
+                IngestionProjection.FITNESS_NUTRITION to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                        requests += request
+                        return if (requests.size == 1) {
+                            ProjectionSubmission.Failure("temporary", retryable = true)
+                        } else {
+                            ProjectionSubmission.Success("fitness")
+                        }
+                    }
+                },
+            ),
+        )
+        orchestrator.start("ingestion-fitness-identity", "fitness-identity", envelope, evidence)
+        orchestrator.markNutritionVerified("ingestion-fitness-identity", envelope, labelEvidence)
+        val first = orchestrator.submitProjection(
+            "ingestion-fitness-identity",
+            IngestionProjection.FITNESS_NUTRITION,
+            envelope,
+        )
+        assertEquals(ProjectionStatus.FAILED, first.status)
+        assertEquals(1L, first.projectionRevisionSeq)
+
+        val receipt = requireNotNull(envelope.receipt)
+        val changedReceipt = envelope.copy(
+            receipt = receipt.copy(
+                totals = receipt.totals.copy(grandTotalAmountMinor = 14000),
+            ),
+        )
+        val revised = orchestrator.reviseCanonicalDraft(
+            "ingestion-fitness-identity",
+            changedReceipt,
+        ) as IngestionStartResult.Success
+        val retained = revised.session.projections.first {
+            it.projection == IngestionProjection.FITNESS_NUTRITION
+        }
+        assertEquals(ProjectionStatus.FAILED, retained.status)
+        assertEquals(first.idempotencyKey, retained.idempotencyKey)
+        assertEquals(1L, retained.projectionRevisionSeq)
+
+        val retried = orchestrator.submitProjection(
+            "ingestion-fitness-identity",
+            IngestionProjection.FITNESS_NUTRITION,
+            changedReceipt,
+        )
+        assertEquals(ProjectionStatus.UPLOADED, retried.status)
+        assertEquals(first.idempotencyKey, requests[1].idempotencyKey)
+        assertEquals(1L, requests[1].revisionSeq)
+    }
+
+    @Test
+    fun restaurantEstimateIdentityEditRequiresFitnessReverificationButTotalEditDoesNot() = runBlocking {
+        val envelope = (import(restaurantJson(), "restaurant-identity").draft as CanonicalDraft.Envelope).value
+        val evidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("food", SourceAttachmentType.FOOD_PHOTO, true),
+        )
+        val foodEvidence = listOf(LocalEvidence("food", SourceAttachmentType.FOOD_PHOTO, true))
+        val requests = mutableListOf<ProjectionRequest>()
+        val orchestrator = IngestionOrchestrator(
+            store = InMemoryIngestionSessionStore(),
+            submitters = mapOf(
+                IngestionProjection.FITNESS_NUTRITION to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                        requests += request
+                        return ProjectionSubmission.Success("fitness")
+                    }
+                },
+            ),
+        )
+        orchestrator.start("ingestion-restaurant-identity", "restaurant-identity", envelope, evidence)
+        orchestrator.markNutritionVerified("ingestion-restaurant-identity", envelope, foodEvidence)
+        val first = orchestrator.submitProjection(
+            "ingestion-restaurant-identity",
+            IngestionProjection.FITNESS_NUTRITION,
+            envelope,
+        )
+        assertEquals(ProjectionStatus.UPLOADED, first.status)
+
+        val receipt = requireNotNull(envelope.receipt)
+        val renamed = envelope.copy(
+            receipt = receipt.copy(
+                merchant = receipt.merchant.copy(name = "Renamed Restaurant"),
+            ),
+        )
+        val renamedRevision = orchestrator.reviseCanonicalDraft(
+            "ingestion-restaurant-identity",
+            renamed,
+        ) as IngestionStartResult.Success
+        val invalidated = renamedRevision.session.projections.first {
+            it.projection == IngestionProjection.FITNESS_NUTRITION
+        }
+        assertEquals(ProjectionStatus.PENDING, invalidated.status)
+        assertEquals(null, invalidated.idempotencyKey)
+        assertEquals(2L, invalidated.projectionRevisionSeq)
+
+        orchestrator.markNutritionVerified("ingestion-restaurant-identity", renamed, foodEvidence)
+        val renamedUpload = orchestrator.submitProjection(
+            "ingestion-restaurant-identity",
+            IngestionProjection.FITNESS_NUTRITION,
+            renamed,
+        )
+        assertEquals(ProjectionStatus.UPLOADED, renamedUpload.status)
+        assertEquals("Renamed Restaurant", requests[1].envelope?.receipt?.merchant?.name)
+
+        val renamedReceipt = requireNotNull(renamed.receipt)
+        val totalOnly = renamed.copy(
+            receipt = renamedReceipt.copy(
+                totals = renamedReceipt.totals.copy(grandTotalAmountMinor = 14000),
+            ),
+        )
+        val totalRevision = orchestrator.reviseCanonicalDraft(
+            "ingestion-restaurant-identity",
+            totalOnly,
+        ) as IngestionStartResult.Success
+        val afterTotalEdit = totalRevision.session.projections.first {
+            it.projection == IngestionProjection.FITNESS_NUTRITION
+        }
+        assertEquals(ProjectionStatus.UPLOADED, afterTotalEdit.status)
+        assertEquals(renamedUpload.idempotencyKey, afterTotalEdit.idempotencyKey)
+        assertEquals(renamedUpload.projectionRevisionSeq, afterTotalEdit.projectionRevisionSeq)
+        assertEquals(
+            renamedUpload.projectionPayloadFingerprint,
+            afterTotalEdit.projectionPayloadFingerprint,
+        )
+    }
+
     private fun packagedReceiptEnvelope(localId: String): YeonsikOcrEnvelope {
         val retailReceipt = receiptJson
             .replace("\"business_kind\":\"food_service\"", "\"business_kind\":\"retail\"")

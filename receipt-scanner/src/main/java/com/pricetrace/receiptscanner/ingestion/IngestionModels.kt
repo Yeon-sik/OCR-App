@@ -176,6 +176,10 @@ data class ProjectionState(
     val updatedAt: String,
     /** Sanitized response metadata, e.g. CashOS ledger/category/account resolution. */
     val metadataJson: String? = null,
+    /** Domain revision for this projection; independent from the envelope revision. */
+    val projectionRevisionSeq: Long = 1,
+    /** Payload identity associated with the projection idempotency key/revision. */
+    val projectionPayloadFingerprint: String? = null,
 )
 
 data class IngestionSession(
