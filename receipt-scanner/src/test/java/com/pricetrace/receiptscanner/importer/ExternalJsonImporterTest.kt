@@ -20,7 +20,8 @@ class ExternalJsonImporterTest {
         val result = success(receiptJson())
         val draft = (result.draft as CanonicalDraft.Receipt).value
 
-        assertEquals("local-document-1", draft.document.id)
+        assertEquals("upstream-receipt-1", draft.document.id)
+        assertEquals("local-document-1", draft.document.localDocumentId)
         assertEquals("upstream-receipt-1", result.upstreamDocumentId)
         assertEquals(ReceiptStatus.DRAFT, draft.document.status)
         assertEquals(TranscriptionStatus.PARSED, draft.document.source.transcriptionStatus)
@@ -29,7 +30,7 @@ class ExternalJsonImporterTest {
         assertEquals("external_json", result.inputOrigin.wireValue)
         assertEquals(
             draft,
-            ReceiptV2Json.decode(ReceiptV2Json.encodeCanonical(draft)),
+            ReceiptV2Json.decode(ReceiptV2Json.encodeCanonical(draft), draft.document.localDocumentId),
         )
     }
 
@@ -90,8 +91,23 @@ class ExternalJsonImporterTest {
 
         assertEquals("upstream-receipt-1", first.upstreamDocumentId)
         assertEquals("upstream-receipt-1", second.upstreamDocumentId)
-        assertEquals("local-a", (first.draft as CanonicalDraft.Receipt).value.document.id)
-        assertEquals("local-b", (second.draft as CanonicalDraft.Receipt).value.document.id)
+        assertEquals("upstream-receipt-1", (first.draft as CanonicalDraft.Receipt).value.document.id)
+        assertEquals("upstream-receipt-1", (second.draft as CanonicalDraft.Receipt).value.document.id)
+        assertEquals("local-a", (first.draft as CanonicalDraft.Receipt).value.document.localDocumentId)
+        assertEquals("local-b", (second.draft as CanonicalDraft.Receipt).value.document.localDocumentId)
+        assertEquals(first.importFingerprint, second.importFingerprint)
+    }
+
+    @Test
+    fun `null upstream document id receives a local id without changing fingerprint`() {
+        val first = success(receiptJson(documentId = "null"), localDocumentId = "local-a")
+        val second = success(receiptJson(documentId = "null"), localDocumentId = "local-b")
+
+        assertNull(first.upstreamDocumentId)
+        assertNull((first.draft as CanonicalDraft.Receipt).value.document.id)
+        assertNull((second.draft as CanonicalDraft.Receipt).value.document.id)
+        assertEquals("local-a", (first.draft as CanonicalDraft.Receipt).value.document.localDocumentId)
+        assertEquals("local-b", (second.draft as CanonicalDraft.Receipt).value.document.localDocumentId)
         assertEquals(first.importFingerprint, second.importFingerprint)
     }
 
@@ -175,18 +191,17 @@ class ExternalJsonImporterTest {
         description: String = "Milk",
         extra: String = "",
         sourceImages: String = "\"source_images\":[],",
+        documentId: String = "upstream-receipt-1",
     ): String = """
         {
           $extra
           "schema_version":"receipt.v2",
           "document":{
-            "id":"upstream-receipt-1",
+            "id":${if (documentId == "null") "null" else "\"$documentId\""},
             "type":"receipt",
             "status":"final",
             "issued_on":"2026-08-26",
-            "issued_at":"12:30:00",
-            "currency":"KRW",
-            "source":{
+            "issued_at":null,"currency":"KRW","fulfillment":{"type":"unknown","evidence":"unknown"},"source":{
               "capture_method":"ocr",
               "original_document_id":"remote-original",
               $sourceImages
@@ -209,9 +224,7 @@ class ExternalJsonImporterTest {
             "tax_amount_minor":0,
             "net_amount_minor":1000,
             "confidence":"user_verified",
-            "tax_rate_percent":null
-          }],
-          "totals":{"subtotal_amount_minor":1000,"discount_amount_minor":0,"tax_amount_minor":0,"fee_amount_minor":0,"grand_total_amount_minor":1000},
+            "tax_rate_percent":null,"food_service":null}],"totals":{"items_gross_amount_minor":1000,"discount_amount_minor":0,"tax_amount_minor":0,"fee_amount_minor":0,"tip_amount_minor":0,"rounding_amount_minor":0,"grand_total_amount_minor":1000},
           "payments":[]
         }
     """.trimIndent()

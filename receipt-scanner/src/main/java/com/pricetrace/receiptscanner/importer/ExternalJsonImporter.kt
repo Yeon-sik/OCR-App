@@ -1,5 +1,6 @@
 package com.pricetrace.receiptscanner.importer
 
+import com.pricetrace.receiptscanner.domain.BusinessKind
 import com.pricetrace.receiptscanner.domain.ConfidenceLevel
 import com.pricetrace.receiptscanner.domain.ReceiptStatus
 import com.pricetrace.receiptscanner.domain.ReceiptV2
@@ -15,6 +16,16 @@ import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelJson
 import com.pricetrace.receiptscanner.nutrition.NutritionContract
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
+import com.pricetrace.receiptscanner.ingestion.IngestionMode
+import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
+import com.pricetrace.receiptscanner.ingestion.IngestionProjection
+import com.pricetrace.receiptscanner.ingestion.IngestionReview
+import com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus
+import com.pricetrace.receiptscanner.ingestion.IngestionSource
+import com.pricetrace.receiptscanner.ingestion.MerchantCandidate
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_SCHEMA
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeJson
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -32,6 +43,7 @@ import kotlinx.serialization.json.jsonPrimitive
 sealed interface CanonicalDraft {
     data class Receipt(val value: ReceiptV2) : CanonicalDraft
     data class Nutrition(val value: NutritionLabelDraft) : CanonicalDraft
+    data class Envelope(val value: YeonsikOcrEnvelope) : CanonicalDraft
 }
 
 enum class ExternalJsonImportErrorCode {
@@ -59,9 +71,42 @@ data class ExternalJsonImportResult(
     val workflowType: OcrWorkflowType,
     val inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
     val localDocumentId: String,
-    val upstreamDocumentId: String,
+    val upstreamDocumentId: String?,
     val importFingerprint: String,
-)
+) {
+
+    /** Legacy receipt.v2/nutrition imports are adapted into the same canonical envelope. */
+    val canonicalEnvelope: YeonsikOcrEnvelope
+        get() = when (val value = draft) {
+            is CanonicalDraft.Envelope -> value.value
+            is CanonicalDraft.Receipt -> YeonsikOcrEnvelope(
+                mode = if (value.value.merchant.businessKind == BusinessKind.FOOD_SERVICE) IngestionMode.RESTAURANT else IngestionMode.MERCHANT,
+                source = IngestionSource("chatgpt", emptyList()),
+                merchantCandidate = value.value.merchant.name?.let { name -> MerchantCandidate(
+                    name = name,
+                    branchName = value.value.merchant.branchName,
+                    address = value.value.merchant.address,
+                    phone = value.value.merchant.phone,
+                    businessRegistrationNumber = value.value.merchant.businessRegistrationNumber,
+                    businessKind = value.value.merchant.businessKind,
+                ) },
+                receipt = value.value,
+                targets = setOf(
+                    IngestionProjection.PRICETRACE_RECEIPT,
+                    IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+                    IngestionProjection.CASHOS_RECEIPT,
+                ),
+                review = IngestionReview(IngestionReviewStatus.NEEDS_REVIEW),
+            )
+            is CanonicalDraft.Nutrition -> YeonsikOcrEnvelope(
+                mode = IngestionMode.PACKAGED_PRODUCT,
+                source = IngestionSource("chatgpt", emptyList()),
+                nutrition = listOf(IngestionNutrition.ProductLabel(value.value.documentId, value.value)),
+                targets = setOf(IngestionProjection.FITNESS_NUTRITION),
+                review = IngestionReview(IngestionReviewStatus.NEEDS_REVIEW),
+            )
+        }
+}
 
 /**
  * Converts only the two app-owned canonical JSON contracts into existing domain drafts.
@@ -76,7 +121,7 @@ class ExternalJsonImporter(
     fun import(
         value: String,
         localDocumentId: String,
-        workflowType: OcrWorkflowType,
+        workflowType: OcrWorkflowType? = null,
     ): ExternalJsonImportOutcome {
         if (localDocumentId.isBlank()) {
             return ExternalJsonImportOutcome.Failure(
@@ -108,6 +153,7 @@ class ExternalJsonImporter(
             when (schema) {
                 ReceiptV2.SCHEMA_VERSION -> importReceipt(root, localDocumentId, workflowType)
                 FITNESS_NUTRITION_DRAFT_SCHEMA -> importNutrition(root, localDocumentId, workflowType)
+                YEONSIK_OCR_SCHEMA -> importEnvelope(value, localDocumentId, workflowType)
                 else -> ExternalJsonImportOutcome.Failure(
                     ExternalJsonImportError(
                         ExternalJsonImportErrorCode.UNSUPPORTED_SCHEMA,
@@ -125,21 +171,45 @@ class ExternalJsonImporter(
         }
     }
 
+
+    private fun importEnvelope(
+        value: String,
+        localDocumentId: String,
+        workflowType: OcrWorkflowType?,
+    ): ExternalJsonImportOutcome {
+        val envelope = YeonsikOcrEnvelopeJson.decode(value, localDocumentId)
+        val expectedWorkflow = envelope.receipt?.let {
+            if (it.merchant.businessKind == BusinessKind.FOOD_SERVICE) OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT
+            else OcrWorkflowType.PRICE_TRACE_RECEIPT
+        } ?: if (envelope.nutrition.isNotEmpty()) OcrWorkflowType.FITNESS_NUTRITION else OcrWorkflowType.PRICE_TRACE_MERCHANT
+        if (workflowType != null && workflowType != expectedWorkflow) return workflowMismatch(YEONSIK_OCR_SCHEMA, workflowType)
+        val fingerprint = StableIds.sha256("external-json|$YEONSIK_OCR_SCHEMA|${YeonsikOcrEnvelopeJson.canonicalize(envelope)}")
+        return ExternalJsonImportOutcome.Success(ExternalJsonImportResult(
+            draft = CanonicalDraft.Envelope(envelope),
+            workflowType = expectedWorkflow,
+            localDocumentId = localDocumentId,
+            upstreamDocumentId = "envelope-${fingerprint.take(24)}",
+            importFingerprint = fingerprint,
+        ))
+    }
     private fun importReceipt(
         root: JsonObject,
         localDocumentId: String,
-        workflowType: OcrWorkflowType,
+        workflowType: OcrWorkflowType?,
     ): ExternalJsonImportOutcome {
-        if (workflowType !in RECEIPT_WORKFLOWS) return workflowMismatch(ReceiptV2.SCHEMA_VERSION, workflowType)
         requireKeysAllowingDiscarded(root, RECEIPT_KEYS, EXTERNAL_TRUST_KEYS)
 
         // ReceiptV2Json remains the source of truth for the existing receipt.v2 wire contract.
         // Only explicitly listed top-level trust metadata is removed before that strict decoder.
-        val decoded = ReceiptV2Json.decode(encode(root.withoutKeys(EXTERNAL_TRUST_KEYS)))
-        val upstreamDocumentId = decoded.document.id.requireNonBlank("document.id")
+        val decoded = ReceiptV2Json.decode(encode(root.withoutKeys(EXTERNAL_TRUST_KEYS)), localDocumentId)
+        val inferredWorkflow = if (decoded.merchant.businessKind == BusinessKind.FOOD_SERVICE) OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT else OcrWorkflowType.PRICE_TRACE_RECEIPT
+        if (workflowType != null && workflowType != inferredWorkflow) return workflowMismatch(ReceiptV2.SCHEMA_VERSION, workflowType)
+        val upstreamDocumentId = decoded.document.id
         val sanitized = decoded.copy(
             document = decoded.document.copy(
-                id = localDocumentId,
+                // Preserve the upstream receipt.v2 source ID; localDocumentId is stored separately.
+                id = decoded.document.id,
+                localDocumentId = localDocumentId,
                 status = ReceiptStatus.DRAFT,
                 source = decoded.document.source.copy(
                     transcriptionStatus = TranscriptionStatus.PARSED,
@@ -156,17 +226,18 @@ class ExternalJsonImporter(
         val fingerprintDraft = sanitized.copy(
             document = sanitized.document.copy(
                 id = upstreamDocumentId,
+                localDocumentId = null,
             ),
         )
         return ExternalJsonImportOutcome.Success(
             ExternalJsonImportResult(
                 draft = CanonicalDraft.Receipt(sanitized),
-                workflowType = workflowType,
+                workflowType = inferredWorkflow,
                 localDocumentId = localDocumentId,
                 upstreamDocumentId = upstreamDocumentId,
                 importFingerprint = fingerprint(
                     schema = ReceiptV2.SCHEMA_VERSION,
-                    workflowType = workflowType,
+                    workflowType = inferredWorkflow,
                     canonicalJson = ReceiptV2Json.encodeCanonical(fingerprintDraft),
                 ),
             ),
@@ -176,9 +247,9 @@ class ExternalJsonImporter(
     private fun importNutrition(
         root: JsonObject,
         localDocumentId: String,
-        workflowType: OcrWorkflowType,
+        workflowType: OcrWorkflowType?,
     ): ExternalJsonImportOutcome {
-        if (workflowType != OcrWorkflowType.FITNESS_NUTRITION) {
+        if (workflowType != null && workflowType != OcrWorkflowType.FITNESS_NUTRITION) {
             return workflowMismatch(FITNESS_NUTRITION_DRAFT_SCHEMA, workflowType)
         }
         validateNutritionShape(root)
@@ -193,12 +264,12 @@ class ExternalJsonImporter(
         return ExternalJsonImportOutcome.Success(
             ExternalJsonImportResult(
                 draft = CanonicalDraft.Nutrition(sanitized),
-                workflowType = workflowType,
+                workflowType = OcrWorkflowType.FITNESS_NUTRITION,
                 localDocumentId = localDocumentId,
                 upstreamDocumentId = upstreamDocumentId,
                 importFingerprint = fingerprint(
                     schema = FITNESS_NUTRITION_DRAFT_SCHEMA,
-                    workflowType = workflowType,
+                    workflowType = OcrWorkflowType.FITNESS_NUTRITION,
                     canonicalJson = canonicalizeJson(json.parseToJsonElement(NutritionLabelJson.encode(fingerprintDraft))),
                 ),
             ),

@@ -79,6 +79,57 @@ internal class NutritionSupabaseGateway(
         }
     }
 
+    suspend fun importCanonical(payload: CanonicalNutritionImportPayload): NutritionCanonicalImportOutcome {
+        val initial = store.read()
+        if (!initial.isSignedIn) {
+            return NutritionCanonicalImportOutcome.Failure(NutritionGatewayFailure.NOT_CONFIGURED)
+        }
+        val first = importCanonicalOnce(payload, initial)
+        if (first !is NutritionCanonicalImportOutcome.Failure ||
+            first.reason != NutritionGatewayFailure.AUTHENTICATION
+        ) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return importCanonicalOnce(payload, refreshed)
+    }
+
+    private suspend fun importCanonicalOnce(
+        payload: CanonicalNutritionImportPayload,
+        config: NutritionSupabaseConfig,
+    ): NutritionCanonicalImportOutcome = try {
+        val response = transport.execute(
+            request(
+                config = config,
+                method = "POST",
+                path = "/rest/v1/rpc/import_canonical_nutrition_v2",
+                body = payload.toRpcJson(),
+            ),
+        )
+        when {
+            response.statusCode == 401 || response.statusCode == 403 ->
+                NutritionCanonicalImportOutcome.Failure(NutritionGatewayFailure.AUTHENTICATION)
+            response.statusCode == 409 ->
+                NutritionCanonicalImportOutcome.Failure(NutritionGatewayFailure.CONFLICT, response.body.takeIf(String::isNotBlank))
+            response.statusCode == 429 ->
+                NutritionCanonicalImportOutcome.Failure(NutritionGatewayFailure.RATE_LIMITED, response.body.takeIf(String::isNotBlank))
+            response.statusCode in 500..599 ->
+                NutritionCanonicalImportOutcome.Failure(NutritionGatewayFailure.SERVER, response.body.takeIf(String::isNotBlank))
+            response.statusCode !in 200..299 ->
+                NutritionCanonicalImportOutcome.Failure(NutritionGatewayFailure.CONTRACT, response.body.takeIf(String::isNotBlank))
+            else -> NutritionCanonicalImportOutcome.Success(
+                response = CanonicalNutritionImportJson.decodeResponse(response.body),
+                rawResponse = response.body,
+            )
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: IOException) {
+        NutritionCanonicalImportOutcome.Failure(NutritionGatewayFailure.NETWORK)
+    } catch (error: Exception) {
+        NutritionCanonicalImportOutcome.Failure(NutritionGatewayFailure.CONTRACT, error.message)
+    }
+
     suspend fun publish(draft: NutritionLabelDraft): NutritionPublishOutcome {
         if (draft.status != NutritionDraftStatus.USER_VERIFIED ||
             !NutritionLabelValidator.validate(draft).isReadyForUpload

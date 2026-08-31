@@ -22,17 +22,49 @@ data class ReceiptV2(
 }
 
 data class ReceiptDocument(
-    val id: String,
+    /** Upstream receipt.v2 document ID. External producers may legitimately leave this null. */
+    val id: String?,
+    /**
+     * OCR App-only stable session identity. This is deliberately not part of receipt.v2 JSON and
+     * must never be sent as receipt.document.id to an external service.
+     */
+    val localDocumentId: String? = null,
     val type: String = "receipt",
     val status: ReceiptStatus = ReceiptStatus.DRAFT,
     val issuedOn: String?,
     val issuedAt: String?,
     val currency: String?,
+    val fulfillment: ReceiptFulfillment = ReceiptFulfillment(),
     val source: ReceiptSource,
-) {
-    init {
-        require(type == "receipt") { "Receipt document type must be receipt" }
-    }
+)
+
+/** Mirrors the business-agnostic fulfillment fact in PriceTrace receipt.v2. */
+data class ReceiptFulfillment(
+    val type: ReceiptFulfillmentType = ReceiptFulfillmentType.UNKNOWN,
+    val evidence: ReceiptFulfillmentEvidence = ReceiptFulfillmentEvidence.UNKNOWN,
+)
+
+enum class ReceiptFulfillmentType(val wireValue: String) {
+    DELIVERY("delivery"), TAKEOUT("takeout"), DINE_IN("dine_in"), UNKNOWN("unknown"),
+}
+
+enum class ReceiptFulfillmentEvidence(val wireValue: String) {
+    PRINTED("printed"), USER_CONFIRMED("user_confirmed"), UNKNOWN("unknown"),
+}
+
+enum class FoodServiceRole(val wireValue: String) {
+    MAIN("main"), OPTION("option"), SIDE("side"),
+}
+
+/** A separately priced menu line. Its amount is never folded into its parent main menu. */
+data class ReceiptFoodService(
+    val role: FoodServiceRole,
+    val appliesToLineId: String? = null,
+)
+
+/** OCR-created or imported drafts must receive a separate local ID before they enter editable storage. */
+fun ReceiptDocument.requireLocalDocumentId(): String = requireNotNull(localDocumentId ?: id) {
+    "OCR App localDocumentId is required for local persistence and projection idempotency."
 }
 
 data class ReceiptSource(
@@ -42,11 +74,7 @@ data class ReceiptSource(
     val transcriptionStatus: TranscriptionStatus,
     val notes: List<String> = emptyList(),
     val rawText: String?,
-) {
-    init {
-        require(captureMethod == "ocr") { "Receipt capture method must be ocr" }
-    }
-}
+)
 
 const val PURCHASE_LOCAL_TIME_NOTE_PREFIX = "purchase_local_time="
 const val PARSER_VERSION_NOTE_PREFIX = "parser_version="
@@ -109,20 +137,27 @@ data class ReceiptV2LineItem(
     val netAmountMinor: Long?,
     val confidence: ConfidenceLevel,
     val taxRatePercent: String?,
+    val foodService: ReceiptFoodService? = null,
 )
 
 data class ReceiptV2Totals(
-    val subtotalAmountMinor: Long?,
+    val itemsGrossAmountMinor: Long?,
     val discountAmountMinor: Long?,
     val taxAmountMinor: Long?,
     val feeAmountMinor: Long?,
+    val tipAmountMinor: Long?,
+    val roundingAmountMinor: Long?,
     val grandTotalAmountMinor: Long?,
-)
+) {
+    /** Compatibility accessor for pre-fulfillment review code; JSON uses items_gross_amount_minor only. */
+    val subtotalAmountMinor: Long? get() = itemsGrossAmountMinor
+}
 
 data class ReceiptV2Payment(
-    val method: String?,
+    val method: String,
     val amountMinor: Long?,
-    val sourceLineReferences: List<String>,
+    val status: String,
+    val reference: String?,
 )
 
 fun ParsedReceipt.toReceiptV2(
@@ -131,11 +166,13 @@ fun ParsedReceipt.toReceiptV2(
     includePrivateRawText: Boolean = true,
 ): ReceiptV2 = ReceiptV2(
     document = ReceiptDocument(
-        id = documentId,
+        id = originalDocumentId.value,
+        localDocumentId = documentId,
         status = status,
         issuedOn = issuedOn.value,
         issuedAt = issuedAt.value,
         currency = currency.value,
+        fulfillment = ReceiptFulfillment(),
         source = ReceiptSource(
             originalDocumentId = originalDocumentId.value,
             sourceImages = sourceImages,
@@ -166,20 +203,24 @@ fun ParsedReceipt.toReceiptV2(
             netAmountMinor = item.netAmountMinor.value,
             confidence = item.confidence,
             taxRatePercent = item.taxRatePercent,
+            foodService = null,
         )
     },
     totals = ReceiptV2Totals(
-        subtotalAmountMinor = totals.subtotalAmountMinor.value,
+        itemsGrossAmountMinor = totals.subtotalAmountMinor.value,
         discountAmountMinor = totals.discountAmountMinor.value,
         taxAmountMinor = totals.taxAmountMinor.value,
         feeAmountMinor = totals.feeAmountMinor.value,
+        tipAmountMinor = null,
+        roundingAmountMinor = null,
         grandTotalAmountMinor = totals.grandTotalAmountMinor.value,
     ),
     payments = payments.map { payment ->
         ReceiptV2Payment(
-            method = payment.method,
+            method = payment.method?.takeIf(String::isNotBlank) ?: "unknown",
             amountMinor = payment.amountMinor,
-            sourceLineReferences = payment.sourceLineReferences,
+            status = "unknown",
+            reference = null,
         )
     },
     placeResolution = placeResolution,

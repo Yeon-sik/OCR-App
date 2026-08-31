@@ -207,7 +207,7 @@ class ReviewAccuracyCalculatorTest {
         ocrCompletedAt: String? = "2026-08-09T10:00:00+09:00",
         reviewedAt: String? = "2026-08-09T10:05:00+09:00",
     ) = ReviewedReceiptSample(
-        documentId = receipt.document.id,
+        documentId = requireNotNull(receipt.document.id),
         parserVersion = "generic-parser.v15",
         receipt = receipt,
         corrections = corrections,

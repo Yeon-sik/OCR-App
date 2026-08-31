@@ -74,4 +74,54 @@ internal interface ReceiptSessionDao {
 
     @Upsert
     suspend fun upsertPriceObservationQueue(entry: PriceObservationQueueEntity)
+
+    @Query("SELECT * FROM ingestion_sessions WHERE canonical_fingerprint = :fingerprint ORDER BY created_at LIMIT 1")
+    suspend fun getIngestionSessionByFingerprint(fingerprint: String): IngestionSessionEntity?
+
+    @Query("SELECT * FROM ingestion_sessions WHERE import_fingerprint = :fingerprint ORDER BY created_at LIMIT 1")
+    suspend fun getIngestionSessionByImportFingerprint(fingerprint: String): IngestionSessionEntity?
+
+    @Query("SELECT * FROM ingestion_sessions WHERE ingestion_id = :ingestionId")
+    suspend fun getIngestionSession(ingestionId: String): IngestionSessionEntity?
+
+    @Query("SELECT * FROM ingestion_projections WHERE ingestion_id = :ingestionId ORDER BY projection")
+    suspend fun getIngestionProjections(ingestionId: String): List<IngestionProjectionEntity>
+
+    @Query("SELECT * FROM ingestion_attachments WHERE ingestion_id = :ingestionId ORDER BY attachment_id")
+    suspend fun getIngestionAttachments(ingestionId: String): List<IngestionAttachmentEntity>
+
+    @Upsert
+    suspend fun upsertIngestionSession(session: IngestionSessionEntity)
+
+    @Upsert
+    suspend fun upsertIngestionProjections(projections: List<IngestionProjectionEntity>)
+
+    @Upsert
+    suspend fun upsertIngestionAttachments(attachments: List<IngestionAttachmentEntity>)
+
+    @Query("DELETE FROM ingestion_attachments WHERE ingestion_id = :ingestionId")
+    suspend fun deleteIngestionAttachments(ingestionId: String)
+
+    @Query("DELETE FROM ingestion_projections WHERE ingestion_id = :ingestionId")
+    suspend fun deleteIngestionProjections(ingestionId: String)
+
+    @Query("DELETE FROM ingestion_sessions WHERE ingestion_id = :ingestionId")
+    suspend fun deleteIngestionSession(ingestionId: String)
+
+    @Transaction
+    suspend fun deleteIngestionSnapshot(ingestionId: String) {
+        deleteIngestionAttachments(ingestionId)
+        deleteIngestionProjections(ingestionId)
+        deleteIngestionSession(ingestionId)
+    }
+
+    @Transaction
+    suspend fun upsertIngestionSnapshot(session: IngestionSessionEntity, projections: List<IngestionProjectionEntity>, attachments: List<IngestionAttachmentEntity>) {
+        // Replace child snapshots so removed pages or projections cannot survive a retry.
+        deleteIngestionAttachments(session.ingestionId)
+        deleteIngestionProjections(session.ingestionId)
+        upsertIngestionSession(session)
+        upsertIngestionProjections(projections)
+        upsertIngestionAttachments(attachments)
+    }
 }

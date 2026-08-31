@@ -132,7 +132,7 @@ class ReceiptPreflightEvaluatorTest {
 
     private fun page() = ReceiptPage(
         id = "page_fixture_001",
-        documentId = receipt.document.id,
+        documentId = requireNotNull(receipt.document.id),
         storageKey = "fixture/page.jpg",
         sha256 = "fixture",
         mimeType = "image/jpeg",

@@ -2,6 +2,7 @@ package com.pricetrace.receiptscanner.export
 
 import com.pricetrace.receiptscanner.domain.ReceiptPage
 import com.pricetrace.receiptscanner.domain.ReceiptV2
+import com.pricetrace.receiptscanner.domain.requireLocalDocumentId
 import com.pricetrace.receiptscanner.ocr.OcrDocument
 import com.pricetrace.receiptscanner.ocr.OcrEngineInfo
 import com.pricetrace.receiptscanner.storage.ReceiptFileStore
@@ -64,7 +65,7 @@ class ReceiptExportService(
         val canonicalReceipt = ReceiptV2Json.encodeCanonical(receipt)
         val revision = ReceiptV2Json.revisionHash(receipt)
         val idempotencyKey = ReceiptV2Json.idempotencyKey(receipt)
-        val exportRoot = "${receipt.document.id}/exports/$revision"
+        val exportRoot = "${receipt.document.requireLocalDocumentId()}/exports/$revision"
         val receiptKey = "$exportRoot/receipt.json"
         val debugKey = ocrDocument?.let { "$exportRoot/ocr-debug.json" }
         val receiptArtifact = fileStore.writeText(receiptKey, canonicalReceipt)
@@ -72,7 +73,7 @@ class ReceiptExportService(
             fileStore.writeText(requireNotNull(debugKey), OcrDebugJson.encode(document))
         }
         val manifest = ReceiptExportManifest(
-            documentId = receipt.document.id,
+            documentId = receipt.document.requireLocalDocumentId(),
             pages = pages.sortedBy { it.pageIndex }.map { page ->
                 ExportPageManifest(
                     pageId = page.id,

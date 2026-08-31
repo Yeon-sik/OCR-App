@@ -43,7 +43,7 @@ data class ReceiptSession(
         get() = if (workflowType == OcrWorkflowType.FITNESS_NUTRITION) {
             workflowDraftStorageKey != null
         } else {
-            receiptStorageKey != null
+            receiptStorageKey != null || workflowDraftStorageKey != null
         }
 
     /** External JSON may be restored without pages only when its canonical draft is persisted. */

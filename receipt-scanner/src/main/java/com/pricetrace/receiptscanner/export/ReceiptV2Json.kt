@@ -2,6 +2,11 @@ package com.pricetrace.receiptscanner.export
 
 import com.pricetrace.receiptscanner.domain.BusinessKind
 import com.pricetrace.receiptscanner.domain.ConfidenceLevel
+import com.pricetrace.receiptscanner.domain.FoodServiceRole
+import com.pricetrace.receiptscanner.domain.ReceiptFoodService
+import com.pricetrace.receiptscanner.domain.ReceiptFulfillment
+import com.pricetrace.receiptscanner.domain.ReceiptFulfillmentEvidence
+import com.pricetrace.receiptscanner.domain.ReceiptFulfillmentType
 import com.pricetrace.receiptscanner.domain.QuantityUnit
 import com.pricetrace.receiptscanner.domain.ReceiptDocument
 import com.pricetrace.receiptscanner.domain.ReceiptIdentifier
@@ -28,6 +33,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import java.math.BigDecimal
+import java.time.LocalDate
+import java.time.OffsetDateTime
 
 object ReceiptV2Json {
     private val compactJson = Json {
@@ -59,18 +66,18 @@ object ReceiptV2Json {
 
     fun revisionHash(receipt: ReceiptV2): String = StableIds.sha256(encodeCanonical(receipt))
 
-    fun idempotencyKey(receipt: ReceiptV2): String = "receipt:${receipt.document.id}:${revisionHash(receipt)}"
+    fun idempotencyKey(receipt: ReceiptV2): String = "receipt:${receipt.document.id ?: "unassigned"}:${revisionHash(receipt)}"
 
-    fun decode(value: String): ReceiptV2 {
+    fun decode(value: String, localDocumentId: String? = null): ReceiptV2 {
         val root = compactJson.parseToJsonElement(value).jsonObject
         root.requireOnlyKeys("schema_version", "document", "merchant", "line_items", "totals", "payments")
         val schemaVersion = root.requiredString("schema_version")
-        val document = root.requiredObject("document").toDocument()
+        val document = root.requiredObject("document").toDocument(localDocumentId)
         val merchant = root.requiredObject("merchant").toMerchant()
         val lineItems = root.requiredArray("line_items").map { it.jsonObject.toLineItem() }
         val totals = root.requiredObject("totals").toTotals()
         val payments = root.requiredArray("payments").map { it.jsonObject.toPayment() }
-        return ReceiptV2(schemaVersion, document, merchant, lineItems, totals, payments)
+        return ReceiptV2(schemaVersion, document, merchant, lineItems, totals, payments).also(::validateFoodServiceLinks)
     }
 
     private fun ReceiptV2.toJsonElement() = objectOf(
@@ -83,13 +90,19 @@ object ReceiptV2Json {
     )
 
     private fun ReceiptDocument.toJsonElement() = objectOf(
-        "id" to JsonPrimitive(id),
+        "id" to id.jsonStringOrNull(),
         "type" to JsonPrimitive(type),
         "status" to JsonPrimitive(status.wireValue),
         "issued_on" to issuedOn.jsonStringOrNull(),
         "issued_at" to issuedAt.jsonStringOrNull(),
         "currency" to currency.jsonStringOrNull(),
+        "fulfillment" to fulfillment.toJsonElement(),
         "source" to source.toJsonElement(),
+    )
+
+    private fun ReceiptFulfillment.toJsonElement() = objectOf(
+        "type" to JsonPrimitive(type.wireValue),
+        "evidence" to JsonPrimitive(evidence.wireValue),
     )
 
     private fun ReceiptSource.toJsonElement() = objectOf(
@@ -127,7 +140,7 @@ object ReceiptV2Json {
         "quantity" to quantity?.let { value ->
             objectOf(
                 "value" to JsonPrimitive(BigDecimal(value.value)),
-                "unit" to JsonPrimitive(value.unit.wireValue),
+                "unit" to JsonPrimitive(value.wireUnit),
             )
         }.orJsonNull(),
         "unit_price_amount_minor" to unitPriceAmountMinor.jsonLongOrNull(),
@@ -137,47 +150,65 @@ object ReceiptV2Json {
         "net_amount_minor" to netAmountMinor.jsonLongOrNull(),
         "confidence" to JsonPrimitive(confidence.wireValue),
         "tax_rate_percent" to taxRatePercent?.let { JsonPrimitive(BigDecimal(it)) }.orJsonNull(),
+        "food_service" to foodService?.toJsonElement().orJsonNull(),
+    )
+
+    private fun ReceiptFoodService.toJsonElement() = objectOf(
+        "role" to JsonPrimitive(role.wireValue),
+        "applies_to_line_id" to appliesToLineId.jsonStringOrNull(),
     )
 
     private fun ReceiptV2Totals.toJsonElement() = objectOf(
-        "subtotal_amount_minor" to subtotalAmountMinor.jsonLongOrNull(),
+        "items_gross_amount_minor" to itemsGrossAmountMinor.jsonLongOrNull(),
         "discount_amount_minor" to discountAmountMinor.jsonLongOrNull(),
         "tax_amount_minor" to taxAmountMinor.jsonLongOrNull(),
         "fee_amount_minor" to feeAmountMinor.jsonLongOrNull(),
+        "tip_amount_minor" to tipAmountMinor.jsonLongOrNull(),
+        "rounding_amount_minor" to roundingAmountMinor.jsonLongOrNull(),
         "grand_total_amount_minor" to grandTotalAmountMinor.jsonLongOrNull(),
     )
 
     private fun ReceiptV2Payment.toJsonElement() = objectOf(
-        "method" to method.jsonStringOrNull(),
+        "method" to JsonPrimitive(method),
         "amount_minor" to amountMinor.jsonLongOrNull(),
-        "source_line_references" to JsonArray(sourceLineReferences.map(::JsonPrimitive)),
+        "status" to JsonPrimitive(status),
+        "reference" to reference.jsonStringOrNull(),
     )
 
-    private fun JsonObject.toDocument(): ReceiptDocument {
-        requireOnlyKeys("id", "type", "status", "issued_on", "issued_at", "currency", "source")
+    private fun JsonObject.toDocument(localDocumentId: String? = null): ReceiptDocument {
+        requireOneOfKeySets(
+            setOf("id", "type", "status", "issued_on", "issued_at", "currency", "fulfillment", "source"),
+            setOf("id", "type", "status", "issued_on", "issued_at", "currency", "source"),
+        )
         return ReceiptDocument(
-            id = requiredString("id"),
-            type = requiredString("type"),
+            id = nullableNonEmptyString("id"),
+            localDocumentId = localDocumentId,
+            type = requiredEnumString("type", DOCUMENT_TYPES),
             status = enumValue(requiredString("status"), ReceiptStatus.entries, ReceiptStatus::wireValue),
-            issuedOn = nullableString("issued_on"),
-            issuedAt = nullableString("issued_at"),
-            currency = nullableString("currency"),
+            issuedOn = nullableIsoDate("issued_on"),
+            issuedAt = nullableIsoOffsetDateTime("issued_at"),
+            currency = nullableCurrencyCode("currency"),
+            fulfillment = if (containsKey("fulfillment")) requiredObject("fulfillment").toFulfillment() else ReceiptFulfillment(),
             source = requiredObject("source").toSource(),
         )
     }
 
+    private fun JsonObject.toFulfillment(): ReceiptFulfillment {
+        requireOnlyKeys("type", "evidence")
+        return ReceiptFulfillment(
+            type = enumValue(requiredString("type"), ReceiptFulfillmentType.entries, ReceiptFulfillmentType::wireValue),
+            evidence = enumValue(requiredString("evidence"), ReceiptFulfillmentEvidence.entries, ReceiptFulfillmentEvidence::wireValue),
+        )
+    }
+
     private fun JsonObject.toSource(): ReceiptSource {
-        requireOnlyKeys(
-            "capture_method",
-            "original_document_id",
-            "source_images",
-            "transcription_status",
-            "notes",
-            "raw_text",
+        requireKeysWithOptional(
+            required = setOf("capture_method", "original_document_id", "source_images", "transcription_status", "notes"),
+            optional = setOf("raw_text"),
         )
         return ReceiptSource(
-            captureMethod = requiredString("capture_method"),
-            originalDocumentId = nullableString("original_document_id"),
+            captureMethod = requiredEnumString("capture_method", CAPTURE_METHODS),
+            originalDocumentId = nullableNonEmptyString("original_document_id"),
             sourceImages = requiredArray("source_images").map { it.jsonPrimitive.content },
             transcriptionStatus = enumValue(
                 requiredString("transcription_status"),
@@ -185,55 +216,39 @@ object ReceiptV2Json {
                 TranscriptionStatus::wireValue,
             ),
             notes = requiredArray("notes").map { it.jsonPrimitive.content },
-            rawText = nullableString("raw_text"),
+            rawText = if (containsKey("raw_text")) nullableString("raw_text") else null,
         )
     }
-
     private fun JsonObject.toMerchant(): ReceiptMerchant {
-        requireOnlyKeys(
-            "name",
-            "branch_name",
-            "business_kind",
-            "retail_channel",
-            "catalog_namespace",
-            "merchant_id",
-            "business_registration_number",
-            "address",
-            "phone",
+        requireKeysWithOptional(
+            required = setOf("name", "branch_name", "merchant_id", "business_registration_number", "address", "phone"),
+            optional = setOf("business_kind", "retail_channel", "catalog_namespace"),
         )
         return ReceiptMerchant(
-            name = nullableString("name"),
-            branchName = nullableString("branch_name"),
-            businessKind = enumValue(requiredString("business_kind"), BusinessKind.entries, BusinessKind::wireValue),
-            retailChannel = enumValue(requiredString("retail_channel"), RetailChannel.entries, RetailChannel::wireValue),
-            catalogNamespace = nullableString("catalog_namespace"),
-            merchantId = nullableString("merchant_id"),
-            businessRegistrationNumber = nullableString("business_registration_number"),
-            address = nullableString("address"),
-            phone = nullableString("phone"),
+            name = nullableNonEmptyString("name"),
+            branchName = nullableNonEmptyString("branch_name"),
+            businessKind = if (containsKey("business_kind")) enumValue(requiredString("business_kind"), BusinessKind.entries, BusinessKind::wireValue) else BusinessKind.UNKNOWN,
+            retailChannel = if (containsKey("retail_channel")) enumValue(requiredString("retail_channel"), RetailChannel.entries, RetailChannel::wireValue) else RetailChannel.UNKNOWN,
+            catalogNamespace = if (containsKey("catalog_namespace")) nullableTrimmedNonEmptyString("catalog_namespace") else null,
+            merchantId = nullableNonEmptyString("merchant_id"),
+            businessRegistrationNumber = nullableNonEmptyString("business_registration_number"),
+            address = nullableNonEmptyString("address"),
+            phone = nullableNonEmptyString("phone"),
         )
     }
-
     private fun JsonObject.toLineItem(): ReceiptV2LineItem {
-        requireOnlyKeys(
-            "id",
-            "type",
-            "description",
-            "source_line_references",
-            "identifiers",
-            "quantity",
-            "unit_price_amount_minor",
-            "gross_amount_minor",
-            "discount_amount_minor",
-            "tax_amount_minor",
-            "net_amount_minor",
-            "confidence",
-            "tax_rate_percent",
+        requireKeysWithOptional(
+            required = setOf(
+                "id", "type", "description", "source_line_references", "identifiers", "quantity",
+                "unit_price_amount_minor", "gross_amount_minor", "discount_amount_minor", "tax_amount_minor",
+                "net_amount_minor", "confidence", "tax_rate_percent",
+            ),
+            optional = setOf("food_service"),
         )
         return ReceiptV2LineItem(
             id = requiredString("id"),
             type = enumValue(requiredString("type"), ReceiptLineType.entries, ReceiptLineType::wireValue),
-            description = nullableString("description"),
+            description = nullableNonEmptyString("description"),
             sourceLineReferences = requiredArray("source_line_references").map { it.jsonPrimitive.content },
             identifiers = requiredArray("identifiers").map { identifier ->
                 identifier.jsonObject.let { value ->
@@ -244,43 +259,55 @@ object ReceiptV2Json {
             quantity = optionalObject("quantity")?.let { quantity ->
                 quantity.requireOnlyKeys("value", "unit")
                 ReceiptQuantity(
-                    value = quantity.requiredNumberText("value"),
-                    unit = enumValue(quantity.requiredString("unit"), QuantityUnit.entries, QuantityUnit::wireValue),
-                )
+                    value = quantity.requiredPositiveNumberText("value"),
+                    unit = quantity.requiredString("unit").let { raw ->
+                        QuantityUnit.entries.firstOrNull { it.wireValue == raw } ?: QuantityUnit.UNKNOWN
+                    },
+                    rawUnit = quantity.requiredString("unit").takeUnless { raw ->
+                        QuantityUnit.entries.any { it.wireValue == raw }
+                    },                )
             },
-            unitPriceAmountMinor = nullableLong("unit_price_amount_minor"),
-            grossAmountMinor = nullableLong("gross_amount_minor"),
-            discountAmountMinor = nullableLong("discount_amount_minor"),
-            taxAmountMinor = nullableLong("tax_amount_minor"),
+            unitPriceAmountMinor = nullableNonNegativeLong("unit_price_amount_minor"),
+            grossAmountMinor = nullableNonNegativeLong("gross_amount_minor"),
+            discountAmountMinor = nullableNonNegativeLong("discount_amount_minor"),
+            taxAmountMinor = nullableNonNegativeLong("tax_amount_minor"),
             netAmountMinor = nullableLong("net_amount_minor"),
             confidence = enumValue(requiredString("confidence"), ConfidenceLevel.entries, ConfidenceLevel::wireValue),
-            taxRatePercent = nullableNumberText("tax_rate_percent"),
+            taxRatePercent = nullableNonNegativeNumberText("tax_rate_percent"),
+            foodService = if (containsKey("food_service")) optionalObject("food_service")?.toFoodService() else null,
+        )
+    }
+    private fun JsonObject.toFoodService(): ReceiptFoodService {
+        requireOnlyKeys("role", "applies_to_line_id")
+        return ReceiptFoodService(
+            role = enumValue(requiredString("role"), FoodServiceRole.entries, FoodServiceRole::wireValue),
+            appliesToLineId = nullableNonEmptyString("applies_to_line_id"),
         )
     }
 
     private fun JsonObject.toTotals(): ReceiptV2Totals {
         requireOnlyKeys(
-            "subtotal_amount_minor",
-            "discount_amount_minor",
-            "tax_amount_minor",
-            "fee_amount_minor",
-            "grand_total_amount_minor",
+            "items_gross_amount_minor", "discount_amount_minor", "tax_amount_minor", "fee_amount_minor",
+            "tip_amount_minor", "rounding_amount_minor", "grand_total_amount_minor",
         )
         return ReceiptV2Totals(
-            subtotalAmountMinor = nullableLong("subtotal_amount_minor"),
-            discountAmountMinor = nullableLong("discount_amount_minor"),
-            taxAmountMinor = nullableLong("tax_amount_minor"),
+            itemsGrossAmountMinor = nullableNonNegativeLong("items_gross_amount_minor"),
+            discountAmountMinor = nullableNonNegativeLong("discount_amount_minor"),
+            taxAmountMinor = nullableNonNegativeLong("tax_amount_minor"),
             feeAmountMinor = nullableLong("fee_amount_minor"),
+            tipAmountMinor = nullableLong("tip_amount_minor"),
+            roundingAmountMinor = nullableLong("rounding_amount_minor"),
             grandTotalAmountMinor = nullableLong("grand_total_amount_minor"),
         )
     }
 
     private fun JsonObject.toPayment(): ReceiptV2Payment {
-        requireOnlyKeys("method", "amount_minor", "source_line_references")
+        requireOnlyKeys("method", "amount_minor", "status", "reference")
         return ReceiptV2Payment(
-            method = nullableString("method"),
+            method = requiredEnumString("method", PAYMENT_METHODS),
             amountMinor = nullableLong("amount_minor"),
-            sourceLineReferences = requiredArray("source_line_references").map { it.jsonPrimitive.content },
+            status = requiredEnumString("status", PAYMENT_STATUSES),
+            reference = nullableNonEmptyString("reference"),
         )
     }
 
@@ -298,6 +325,18 @@ object ReceiptV2Json {
     private fun Long?.jsonLongOrNull(): JsonElement = this?.let(::JsonPrimitive) ?: JsonNull
     private fun JsonElement?.orJsonNull(): JsonElement = this ?: JsonNull
 
+    private fun JsonObject.requireOneOfKeySets(vararg expectedSets: Set<String>) {
+        require(expectedSets.any { this.keys == it }) {
+            "Unexpected or missing keys. Expected one of=$expectedSets actual=${this.keys}"
+        }
+    }
+
+    private fun JsonObject.requireKeysWithOptional(required: Set<String>, optional: Set<String> = emptySet()) {
+        require(this.keys.containsAll(required) && this.keys subtract (required + optional) == emptySet<String>()) {
+            "Unexpected or missing keys. Required=$required optional=$optional actual=${this.keys}"
+        }
+    }
+
     private fun JsonObject.requireOnlyKeys(vararg keys: String) {
         val expected = keys.toSet()
         require(this.keys == expected) {
@@ -305,13 +344,33 @@ object ReceiptV2Json {
         }
     }
 
+    private fun JsonObject.nullableNonEmptyString(key: String): String? =
+        nullableString(key)?.also { require(it.isNotEmpty()) { "$key must not be empty" } }
+
+    private fun JsonObject.nullableTrimmedNonEmptyString(key: String): String? =
+        nullableString(key)?.trim()?.also { require(it.isNotEmpty()) { "$key must not be empty" } }
+
+    private fun JsonObject.nullableIsoDate(key: String): String? =
+        nullableNonEmptyString(key)?.also {
+            require(runCatching { LocalDate.parse(it) }.isSuccess) { "$key must be an ISO date" }
+        }
+
+    private fun JsonObject.nullableIsoOffsetDateTime(key: String): String? =
+        nullableNonEmptyString(key)?.also {
+            require(runCatching { OffsetDateTime.parse(it) }.isSuccess) { "$key must be an offset datetime" }
+        }
+
+    private fun JsonObject.nullableCurrencyCode(key: String): String? =
+        nullableNonEmptyString(key)?.also {
+            require(it.matches(Regex("[A-Z]{3}"))) { "$key must be an uppercase ISO currency code" }
+        }
     private fun JsonObject.requiredString(key: String): String {
         require(containsKey(key)) { "Missing key: $key" }
         val primitive = requireNotNull(get(key)).jsonPrimitive
         require(primitive.isString) { "Expected string: $key" }
+        require(primitive.content.isNotEmpty()) { "Expected a non-empty string: $key" }
         return primitive.content
     }
-
     private fun JsonObject.nullableString(key: String): String? {
         require(containsKey(key)) { "Missing key: $key" }
         val value = get(key)
@@ -328,6 +387,12 @@ object ReceiptV2Json {
         BigDecimal(primitive.content)
         return primitive.content
     }
+
+    private fun JsonObject.requiredPositiveNumberText(key: String): String =
+        requiredNumberText(key).also { require(BigDecimal(it) > BigDecimal.ZERO) { "$key must be greater than zero" } }
+
+    private fun JsonObject.nullableNonNegativeNumberText(key: String): String? =
+        nullableNumberText(key)?.also { require(BigDecimal(it) >= BigDecimal.ZERO) { "$key must be non-negative" } }
 
     private fun JsonObject.nullableNumberText(key: String): String? {
         require(containsKey(key)) { "Missing key: $key" }
@@ -359,6 +424,41 @@ object ReceiptV2Json {
         return requireNotNull(get(key)).jsonArray
     }
 
+    private fun JsonObject.nullableNonNegativeLong(key: String): Long? =
+        nullableLong(key)?.also { require(it >= 0) { "$key must be non-negative" } }
+
+    private fun JsonObject.requiredEnumString(key: String, allowed: Set<String>): String =
+        requiredString(key).also { require(it in allowed) { "Unsupported enum value for $key: $it" } }
+
+    private fun validateFoodServiceLinks(receipt: ReceiptV2) {
+        val byId = receipt.lineItems.associateBy { it.id }
+        receipt.lineItems.forEachIndexed { index, line ->
+            val foodService = line.foodService ?: return@forEachIndexed
+            require(receipt.merchant.businessKind == BusinessKind.FOOD_SERVICE) {
+                "line_items[$index].food_service requires merchant.business_kind=food_service"
+            }
+            require(line.type == ReceiptLineType.PRODUCT) {
+                "line_items[$index].food_service requires a product line"
+            }
+            if (foodService.role != FoodServiceRole.OPTION) {
+                require(foodService.appliesToLineId == null) {
+                    "only food_service option lines may reference applies_to_line_id"
+                }
+            }
+            foodService.appliesToLineId?.let { parentId ->
+                val parent = byId[parentId]
+                require(parent != null && parent.id != line.id && parent.foodService?.role == FoodServiceRole.MAIN) {
+                    "food_service option must reference another main line in the same receipt"
+                }
+            }
+        }
+    }
+
     private fun <T> enumValue(value: String, entries: List<T>, wireValue: (T) -> String): T =
         requireNotNull(entries.firstOrNull { wireValue(it) == value }) { "Unsupported enum value: $value" }
+
+    private val DOCUMENT_TYPES = setOf("receipt", "invoice", "order_confirmation", "credit_note", "statement", "voucher", "other")
+    private val CAPTURE_METHODS = setOf("pos_export", "e_receipt", "ocr", "manual_transcription", "manual_entry", "unknown")
+    private val PAYMENT_METHODS = setOf("cash", "card", "bank_transfer", "mobile_payment", "gift_card", "points", "mixed", "unknown")
+    private val PAYMENT_STATUSES = setOf("authorized", "paid", "refunded", "voided", "unknown")
 }
