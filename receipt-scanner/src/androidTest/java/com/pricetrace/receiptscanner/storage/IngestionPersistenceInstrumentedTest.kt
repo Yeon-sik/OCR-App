@@ -34,8 +34,24 @@ class IngestionPersistenceInstrumentedTest {
                 createdAt = "2026-08-27T00:00:00Z",
                 updatedAt = "2026-08-27T00:01:00Z",
                 projections = listOf(
-                    ProjectionState(IngestionProjection.PRICETRACE_RECEIPT, ProjectionStatus.UPLOADED, "k", "remote", updatedAt = "2026-08-27T00:01:00Z"),
-                    ProjectionState(IngestionProjection.FITNESS_NUTRITION, ProjectionStatus.FAILED, attemptCount = 1, lastError = "timeout", updatedAt = "2026-08-27T00:01:00Z"),
+                    ProjectionState(
+                        projection = IngestionProjection.PRICETRACE_RECEIPT,
+                        status = ProjectionStatus.UPLOADED,
+                        idempotencyKey = "k",
+                        remoteId = "remote",
+                        updatedAt = "2026-08-27T00:01:00Z",
+                        projectionRevisionSeq = 7,
+                        projectionPayloadFingerprint = "receipt-projection-fingerprint",
+                    ),
+                    ProjectionState(
+                        projection = IngestionProjection.FITNESS_NUTRITION,
+                        status = ProjectionStatus.FAILED,
+                        attemptCount = 1,
+                        lastError = "timeout",
+                        updatedAt = "2026-08-27T00:01:00Z",
+                        projectionRevisionSeq = 4,
+                        projectionPayloadFingerprint = "fitness-projection-fingerprint",
+                    ),
                 ),
                 attachments = listOf(LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true)),
                 verifiedArtifactFingerprints = mapOf("receipt" to "receipt-artifact-fingerprint"),
@@ -50,9 +66,28 @@ class IngestionPersistenceInstrumentedTest {
             .build()
         try {
             val restarted = RoomIngestionSessionStore(restartedDatabase.receiptSessionDao()).get("ingestion-test")
-            assertEquals(session, restarted)
+            assertEquals(
+                session.copy(projections = session.projections.sortedBy { it.projection.name }),
+                restarted?.copy(projections = restarted.projections.sortedBy { it.projection.name }),
+            )
             assertEquals("a".repeat(64), restarted?.canonicalFingerprint)
             assertEquals(mapOf("receipt" to "receipt-artifact-fingerprint"), restarted?.verifiedArtifactFingerprints)
+            assertEquals(
+                7L,
+                restarted?.projections?.first { it.projection == IngestionProjection.PRICETRACE_RECEIPT }?.projectionRevisionSeq,
+            )
+            assertEquals(
+                "receipt-projection-fingerprint",
+                restarted?.projections?.first { it.projection == IngestionProjection.PRICETRACE_RECEIPT }?.projectionPayloadFingerprint,
+            )
+            assertEquals(
+                4L,
+                restarted?.projections?.first { it.projection == IngestionProjection.FITNESS_NUTRITION }?.projectionRevisionSeq,
+            )
+            assertEquals(
+                "fitness-projection-fingerprint",
+                restarted?.projections?.first { it.projection == IngestionProjection.FITNESS_NUTRITION }?.projectionPayloadFingerprint,
+            )
         } finally {
             restartedDatabase.close()
             context.deleteDatabase(TEST_DB)

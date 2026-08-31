@@ -1,30 +1,42 @@
 package com.pricetrace.receiptscanner.storage
 
-import androidx.room.testing.MigrationTestHelper
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SimpleSQLiteQuery
+import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class ReceiptDatabaseMigrationTest {
-    @get:Rule
-    val migrationHelper = MigrationTestHelper(
-        InstrumentationRegistry.getInstrumentation(),
-        ReceiptDatabase::class.java,
-        emptyList(),
-        FrameworkSQLiteOpenHelperFactory(),
-    )
-
     @Test
     fun migrateFromV1AddsReviewTimestampsWithoutLosingSessions() {
-        migrationHelper.createDatabase(TEST_DB, 1).apply {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        context.deleteDatabase(TEST_DB)
+        val helper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(TEST_DB)
+                .callback(
+                    object : SupportSQLiteOpenHelper.Callback(1) {
+                        override fun onCreate(db: SupportSQLiteDatabase) = Unit
+
+                        override fun onUpgrade(
+                            db: SupportSQLiteDatabase,
+                            oldVersion: Int,
+                            newVersion: Int,
+                        ) = Unit
+                    },
+                )
+                .build(),
+        )
+        val database = helper.writableDatabase
+        database.apply {
             execSQL(
                 """
                 CREATE TABLE IF NOT EXISTS `scan_sessions` (
@@ -120,23 +132,42 @@ class ReceiptDatabaseMigrationTest {
                 )
                 """.trimIndent(),
             )
-            close()
         }
 
-        val migrated = migrationHelper.runMigrationsAndValidate(
-            TEST_DB,
-            10,
-            true,
-            ReceiptDatabase.MIGRATION_1_2,
-            ReceiptDatabase.MIGRATION_2_3,
-            ReceiptDatabase.MIGRATION_3_4,
-            ReceiptDatabase.MIGRATION_4_5,
-            ReceiptDatabase.MIGRATION_5_6,
-            ReceiptDatabase.MIGRATION_6_7,
-            ReceiptDatabase.MIGRATION_7_8,
-            ReceiptDatabase.MIGRATION_8_9,
-            ReceiptDatabase.MIGRATION_9_10,
+        applyMigration(database, 2, ReceiptDatabase.MIGRATION_1_2)
+        applyMigration(database, 3, ReceiptDatabase.MIGRATION_2_3)
+        applyMigration(database, 4, ReceiptDatabase.MIGRATION_3_4)
+        applyMigration(database, 5, ReceiptDatabase.MIGRATION_4_5)
+        applyMigration(database, 6, ReceiptDatabase.MIGRATION_5_6)
+        applyMigration(database, 7, ReceiptDatabase.MIGRATION_6_7)
+        applyMigration(database, 8, ReceiptDatabase.MIGRATION_7_8)
+        applyMigration(database, 9, ReceiptDatabase.MIGRATION_8_9)
+        applyMigration(database, 10, ReceiptDatabase.MIGRATION_9_10)
+
+        database.execSQL(
+            "INSERT INTO ingestion_projections (" +
+                "ingestion_id, projection, status, idempotency_key, remote_id, " +
+                "attempt_count, last_error, updated_at, metadata_json" +
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            arrayOf<Any?>(
+                "ingestion-migrate",
+                "cashos_receipt",
+                "failed",
+                "legacy-key",
+                null,
+                2,
+                "timeout",
+                "2026-08-03T09:30:00+09:00",
+                null,
+            ),
         )
+        applyMigration(database, 11, ReceiptDatabase.MIGRATION_10_11)
+        val migrated = database
+
+        migrated.query("PRAGMA user_version").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(11, cursor.getInt(0))
+        }
 
         migrated.query(
             SimpleSQLiteQuery(
@@ -168,6 +199,46 @@ class ReceiptDatabaseMigrationTest {
             assertTrue(cursor.moveToFirst())
             assertEquals("price_observation_queue", cursor.getString(0))
         }
+
+        migrated.query("PRAGMA table_info(ingestion_projections)").use { cursor ->
+            val nameIndex = cursor.getColumnIndexOrThrow("name")
+            val columns = mutableSetOf<String>()
+            while (cursor.moveToNext()) {
+                columns += cursor.getString(nameIndex)
+            }
+            assertTrue(columns.contains("projection_revision_seq"))
+            assertTrue(columns.contains("projection_payload_fingerprint"))
+        }
+
+        migrated.query(
+            SimpleSQLiteQuery(
+                "SELECT status, idempotency_key, attempt_count, last_error, " +
+                    "projection_revision_seq, projection_payload_fingerprint " +
+                    "FROM ingestion_projections WHERE ingestion_id = ? AND projection = ?",
+                arrayOf("ingestion-migrate", "cashos_receipt"),
+            ),
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("failed", cursor.getString(0))
+            assertEquals("legacy-key", cursor.getString(1))
+            assertEquals(2, cursor.getInt(2))
+            assertEquals("timeout", cursor.getString(3))
+            assertEquals(1L, cursor.getLong(4))
+            assertNull(cursor.getString(5))
+        }
+
+        migrated.close()
+        helper.close()
+        context.deleteDatabase(TEST_DB)
+    }
+
+    private fun applyMigration(
+        database: SupportSQLiteDatabase,
+        targetVersion: Int,
+        migration: Migration,
+    ) {
+        migration.migrate(database)
+        database.execSQL("PRAGMA user_version = " + targetVersion)
     }
 
     companion object {
