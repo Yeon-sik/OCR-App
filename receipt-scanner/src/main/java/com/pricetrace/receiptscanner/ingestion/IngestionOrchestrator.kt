@@ -26,8 +26,9 @@ data class ProjectionRequest(
     val ingestionId: String,
     val projection: IngestionProjection,
     val canonicalPayload: String,
-    val resolvedIdentity: Map<String, String>,
     val idempotencyKey: String,
+    /** Nullable until the PriceTrace authority projection has returned server-owned identity. */
+    val resolvedIdentity: ProjectionIdentity? = null,
     val envelope: YeonsikOcrEnvelope? = null,
     val localDocumentId: String? = null,
     /** Projection/domain revision, not the envelope's canonical revision. */
@@ -228,6 +229,28 @@ class IngestionOrchestrator(
         )
     }
 
+    suspend fun markConsumptionVerified(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+        evidence: List<LocalEvidence>,
+        consumptionClientKeys: Set<String> = envelope.consumption.map { it.clientKey }.toSet(),
+        inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+    ): IngestionStartResult {
+        val selected = envelope.consumption.filter { it.clientKey in consumptionClientKeys }
+        if (selected.isEmpty()) return IngestionStartResult.Failure(listOf("consumption_artifact_missing"))
+        if (selected.any { it.status != ConsumptionVerificationStatus.USER_VERIFIED }) {
+            return IngestionStartResult.Failure(listOf("consumption_artifact_not_user_verified"))
+        }
+        val nutritionKeys = selected.flatMap { it.nutritionClientKeys }.map(IngestionArtifactKeys::nutrition).toSet()
+        return markArtifactsVerified(
+            ingestionId = ingestionId,
+            envelope = envelope,
+            evidence = evidence,
+            artifactKeys = selected.map { IngestionArtifactKeys.consumption(it.clientKey) }.toSet() + nutritionKeys,
+            inputOrigin = inputOrigin,
+        )
+    }
+
     private suspend fun markMerchantCandidateVerified(
         ingestionId: String,
         envelope: YeonsikOcrEnvelope,
@@ -306,6 +329,22 @@ class IngestionOrchestrator(
             }) {
             return persistBlocked(session, projection, current, "projection_not_reverified")
         }
+        val dependencies = projectionDependencies(projection, envelope)
+        val missingDependencies = dependencies.filter { dependency ->
+            session.projections.firstOrNull { it.projection == dependency }?.status != ProjectionStatus.UPLOADED
+        }
+        if (missingDependencies.isNotEmpty()) {
+            return persistBlocked(
+                session,
+                projection,
+                current,
+                "dependency_pending:" + missingDependencies.joinToString(",") { it.wireValue },
+            )
+        }
+        val resolvedIdentity = resolvedIdentity(session)
+        if (requiresPriceTraceIdentity(projection, envelope) && resolvedIdentity?.priceTrace == null) {
+            return persistBlocked(session, projection, current, "pricetrace_identity_missing")
+        }
         require(current.status in setOf(ProjectionStatus.PENDING, ProjectionStatus.BLOCKED, ProjectionStatus.FAILED)) {
             "projection_not_retryable"
         }
@@ -341,7 +380,7 @@ class IngestionOrchestrator(
             ingestionId = ingestionId,
             projection = projection,
             canonicalPayload = YeonsikOcrEnvelopeJson.encode(envelope),
-            resolvedIdentity = emptyMap(),
+            resolvedIdentity = resolvedIdentity,
             idempotencyKey = key,
             envelope = envelope,
             localDocumentId = session.localDocumentId,
@@ -357,6 +396,27 @@ class IngestionOrchestrator(
             }
         }
     }
+
+    /** Submits retryable/ready projections in dependency order in one user action. */
+    suspend fun submitAllReadyProjections(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+    ): List<ProjectionState> {
+        val initial = requireNotNull(store.get(ingestionId)) { "ingestion_not_found" }
+        val ordered = initial.projections
+            .map(ProjectionState::projection)
+            .sortedWith(compareBy({ projectionDependencyRank(it) }, { it.wireValue }))
+        ordered.forEach { projection ->
+            val current = store.get(ingestionId)?.projections?.firstOrNull { it.projection == projection }
+                ?: return@forEach
+            val retryable = current.status == ProjectionStatus.PENDING ||
+                current.status == ProjectionStatus.FAILED ||
+                (current.status == ProjectionStatus.BLOCKED && current.lastError.isDependencyRetryable())
+            if (retryable) submitProjection(ingestionId, projection, envelope)
+        }
+        return requireNotNull(store.get(ingestionId)).projections
+    }
+
     suspend fun retryFailed(ingestionId: String, envelope: YeonsikOcrEnvelope): List<ProjectionState> {
         val session = requireNotNull(store.get(ingestionId)) { "ingestion_not_found" }
         return session.projections.filter { it.status == ProjectionStatus.FAILED || it.status == ProjectionStatus.BLOCKED }.map {
@@ -439,6 +499,12 @@ class IngestionOrchestrator(
                 nutritionArtifactFingerprint(envelope, item),
             )
         }
+        envelope.consumption.forEach { item ->
+            put(
+                IngestionArtifactKeys.consumption(item.clientKey),
+                StableIds.sha256("ingestion-artifact|consumption|" + consumptionPayloadDependency(item)),
+            )
+        }
         envelope.merchantCandidate?.let {
             val artifactEnvelope = envelope.copy(
                 merchantCandidate = it,
@@ -506,6 +572,10 @@ class IngestionOrchestrator(
                 "fitness|" + envelope.nutrition.joinToString("|") { item ->
                     nutritionPayloadDependency(envelope, item)
                 }
+            IngestionProjection.FITNESS_MEAL ->
+                "fitness-meal|" + envelope.nutrition.joinToString("|") { item ->
+                    nutritionPayloadDependency(envelope, item)
+                } + "|consumption=" + envelope.consumption.joinToString("|", transform = ::consumptionPayloadDependency)
             IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE ->
                 "merchant|" + merchantPayloadDependency(envelope.merchantCandidate)
         },
@@ -557,6 +627,12 @@ class IngestionOrchestrator(
             ).joinToString("|") { value -> value ?: "<null>" }
         } ?: "<none>"
 
+    private fun consumptionPayloadDependency(consumption: IngestionConsumption): String = listOf(
+        consumption.clientKey,
+        consumption.nutritionClientKeys.toSortedSet().joinToString(","),
+        consumption.consumedAt ?: "<null>",
+    ).joinToString("|")
+
     private fun requiredArtifactKeys(
         projection: IngestionProjection,
         envelope: YeonsikOcrEnvelope,
@@ -569,6 +645,10 @@ class IngestionOrchestrator(
             setOf(IngestionArtifactKeys.RECEIPT, IngestionArtifactKeys.CASHOS_HINTS)
         } else emptySet()
         IngestionProjection.FITNESS_NUTRITION -> envelope.nutrition.map { IngestionArtifactKeys.nutrition(it.clientKey) }.toSet()
+        IngestionProjection.FITNESS_MEAL -> buildSet {
+            addAll(envelope.nutrition.map { IngestionArtifactKeys.nutrition(it.clientKey) })
+            addAll(envelope.consumption.map { IngestionArtifactKeys.consumption(it.clientKey) })
+        }
         IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> if (envelope.merchantCandidate != null && envelope.receipt == null) {
             setOf(IngestionArtifactKeys.MERCHANT_CANDIDATE)
         } else emptySet()
@@ -582,6 +662,9 @@ class IngestionOrchestrator(
         IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> IngestionArtifactKeys.RECEIPT in artifactKeys
         IngestionProjection.CASHOS_RECEIPT -> IngestionArtifactKeys.RECEIPT in artifactKeys || IngestionArtifactKeys.CASHOS_HINTS in artifactKeys
         IngestionProjection.FITNESS_NUTRITION -> artifactKeys.any { it.startsWith("nutrition:") }
+        IngestionProjection.FITNESS_MEAL -> artifactKeys.any {
+            it.startsWith("nutrition:") || it.startsWith("${IngestionArtifactKeys.CONSUMPTION}:")
+        }
         IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> IngestionArtifactKeys.MERCHANT_CANDIDATE in artifactKeys
     }
 
@@ -742,7 +825,26 @@ class IngestionOrchestrator(
         map { if (it.projection == value.projection) value else it }
 
     private fun enabledProjections(envelope: YeonsikOcrEnvelope): List<IngestionProjection> =
-        (envelope.targets.ifEmpty { inferredTargets(envelope) }).sortedBy(IngestionProjection::wireValue)
+        withDependencies(envelope.targets.ifEmpty { inferredTargets(envelope) }, envelope)
+            .sortedBy(IngestionProjection::wireValue)
+
+    private fun withDependencies(
+        requested: Set<IngestionProjection>,
+        envelope: YeonsikOcrEnvelope,
+    ): Set<IngestionProjection> = buildSet {
+        addAll(requested)
+        if (envelope.receipt != null && requested.any {
+                it == IngestionProjection.PRICETRACE_PRICE_OBSERVATION ||
+                    it == IngestionProjection.CASHOS_RECEIPT ||
+                    it == IngestionProjection.FITNESS_NUTRITION ||
+                    it == IngestionProjection.FITNESS_MEAL
+            }) {
+            add(IngestionProjection.PRICETRACE_RECEIPT)
+        }
+        if (requested.contains(IngestionProjection.FITNESS_MEAL)) {
+            add(IngestionProjection.FITNESS_NUTRITION)
+        }
+    }
 
     private fun inferredTargets(envelope: YeonsikOcrEnvelope): Set<IngestionProjection> = buildSet {
         if (envelope.receipt != null) {
@@ -754,8 +856,55 @@ class IngestionOrchestrator(
             add(IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE)
         }
         if (envelope.nutrition.isNotEmpty()) add(IngestionProjection.FITNESS_NUTRITION)
+        if (envelope.consumption.isNotEmpty()) add(IngestionProjection.FITNESS_MEAL)
     }
 
     private fun disabledProjections(envelope: YeonsikOcrEnvelope): List<IngestionProjection> =
         IngestionProjection.entries - enabledProjections(envelope).toSet()
+
+    private fun projectionDependencies(
+        projection: IngestionProjection,
+        envelope: YeonsikOcrEnvelope,
+    ): Set<IngestionProjection> = buildSet {
+        when (projection) {
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> add(IngestionProjection.PRICETRACE_RECEIPT)
+            IngestionProjection.CASHOS_RECEIPT,
+            IngestionProjection.FITNESS_NUTRITION -> if (envelope.receipt != null) {
+                add(IngestionProjection.PRICETRACE_RECEIPT)
+            }
+            IngestionProjection.FITNESS_MEAL -> add(IngestionProjection.FITNESS_NUTRITION)
+            else -> Unit
+        }
+    }
+
+    private fun requiresPriceTraceIdentity(
+        projection: IngestionProjection,
+        envelope: YeonsikOcrEnvelope,
+    ): Boolean = envelope.receipt != null && projection in setOf(
+        IngestionProjection.CASHOS_RECEIPT,
+        IngestionProjection.FITNESS_NUTRITION,
+        IngestionProjection.FITNESS_MEAL,
+    )
+
+    private fun resolvedIdentity(session: IngestionSession): ProjectionIdentity? =
+        session.projections.firstOrNull { it.projection == IngestionProjection.PRICETRACE_RECEIPT }
+            ?.takeIf { it.status == ProjectionStatus.UPLOADED }
+            ?.let { state ->
+                val parsed = PriceTraceIdentityJson.tryDecode(state.metadataJson)
+                    ?: state.remoteId?.takeIf(String::isNotBlank)?.let(::PriceTraceIdentity)
+                ProjectionIdentity(priceTrace = parsed)
+            }
+            ?.takeIf { it.priceTrace != null }
+
+    private fun projectionDependencyRank(projection: IngestionProjection): Int = when (projection) {
+        IngestionProjection.PRICETRACE_RECEIPT,
+        IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> 0
+        IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> 1
+        IngestionProjection.CASHOS_RECEIPT,
+        IngestionProjection.FITNESS_NUTRITION -> 2
+        IngestionProjection.FITNESS_MEAL -> 3
+    }
+
+    private fun String?.isDependencyRetryable(): Boolean = this == null ||
+        startsWith("dependency_pending:") || this == "pricetrace_identity_missing"
 }

@@ -29,6 +29,9 @@ data class CashOsReceiptIngestV3Item(
     val restaurantMenuId: String? = null,
     val catalogProductId: String? = null,
     val priceTraceCatalogProductId: String? = null,
+    val priceTraceProductId: String? = null,
+    val priceTraceStoreProductId: String? = null,
+    val priceTraceIdentity: JsonObject? = null,
     val nutritionFoodId: String? = null,
 ) {
     init {
@@ -59,6 +62,8 @@ data class CashOsReceiptIngestV3Payload(
     val items: List<CashOsReceiptIngestV3Item>,
     val restaurantId: String? = null,
     val restaurantLocationId: String? = null,
+    /** Full PriceTrace authority response; nested in items for compatibility with the v3 RPC. */
+    val priceTraceIdentity: JsonObject? = null,
     val categoryHint: String? = null,
     val paymentMethodHint: String? = null,
     val institutionHint: String? = null,
@@ -133,6 +138,15 @@ object CashOsReceiptIngestV3Json {
                         put("restaurant_menu_id", item.restaurantMenuId?.let(::JsonPrimitive) ?: JsonNull)
                         put("catalog_product_id", item.catalogProductId?.let(::JsonPrimitive) ?: JsonNull)
                         put("pricetrace_catalog_product_id", item.priceTraceCatalogProductId?.let(::JsonPrimitive) ?: JsonNull)
+                        if (item.priceTraceProductId != null) {
+                            put("pricetrace_product_id", JsonPrimitive(item.priceTraceProductId))
+                        }
+                        if (item.priceTraceStoreProductId != null) {
+                            put("pricetrace_store_product_id", JsonPrimitive(item.priceTraceStoreProductId))
+                        }
+                        if (item.priceTraceIdentity != null || payload.priceTraceIdentity != null) {
+                            put("pricetrace_identity", item.priceTraceIdentity ?: payload.priceTraceIdentity ?: JsonNull)
+                        }
                         put("nutrition_food_id", item.nutritionFoodId?.let(::JsonPrimitive) ?: JsonNull)
                     })
                 }

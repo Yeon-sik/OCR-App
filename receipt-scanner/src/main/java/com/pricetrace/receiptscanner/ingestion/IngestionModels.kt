@@ -9,8 +9,10 @@ object IngestionArtifactKeys {
     const val RECEIPT = "receipt"
     const val MERCHANT_CANDIDATE = "merchant_candidate"
     const val CASHOS_HINTS = "cashos_hints"
+    const val CONSUMPTION = "consumption"
 
     fun nutrition(clientKey: String): String = "nutrition:$clientKey"
+    fun consumption(clientKey: String): String = "$CONSUMPTION:$clientKey"
 }
 
 enum class IngestionMode(val wireValue: String) {
@@ -109,6 +111,25 @@ data class IngestionLink(
     val nutritionClientKey: String,
 )
 
+enum class ConsumptionVerificationStatus(val wireValue: String) {
+    UNVERIFIED("unverified"),
+    USER_VERIFIED("user_verified"),
+    ;
+
+    companion object {
+        fun fromWireValue(value: String): ConsumptionVerificationStatus = entries.firstOrNull { it.wireValue == value }
+            ?: error("Unsupported consumption verification status: $value")
+    }
+}
+
+/** Explicit evidence that a nutrition artifact was actually consumed. */
+data class IngestionConsumption(
+    val clientKey: String,
+    val nutritionClientKeys: Set<String>,
+    val consumedAt: String? = null,
+    val status: ConsumptionVerificationStatus = ConsumptionVerificationStatus.UNVERIFIED,
+)
+
 enum class IngestionReviewStatus(val wireValue: String) {
     READY("ready"),
     NEEDS_REVIEW("needs_review"),
@@ -128,6 +149,7 @@ data class YeonsikOcrEnvelope(
     val merchantCandidate: MerchantCandidate? = null,
     val receipt: ReceiptV2? = null,
     val nutrition: List<IngestionNutrition> = emptyList(),
+    val consumption: List<IngestionConsumption> = emptyList(),
     val classificationHints: Map<String, String?> = emptyMap(),
     val links: List<IngestionLink> = emptyList(),
     /** Requested destinations; mode is only a validated producer hint, never routing authority. */
@@ -140,6 +162,7 @@ enum class IngestionProjection(val wireValue: String) {
     PRICETRACE_PRICE_OBSERVATION("pricetrace_price_observation"),
     PRICETRACE_MERCHANT_CANDIDATE("pricetrace_merchant_candidate"),
     FITNESS_NUTRITION("fitness_nutrition"),
+    FITNESS_MEAL("fitness_meal"),
     CASHOS_RECEIPT("cashos_receipt"),
     ;
 

@@ -171,6 +171,7 @@ object CanonicalNutritionPayloadFactory {
         idempotencyKey: String,
         draft: NutritionLabelDraft,
         @Suppress("UNUSED_PARAMETER") envelopeVerified: Boolean = false,
+        priceTraceIdentity: JsonObject? = null,
     ): CanonicalNutritionImportPayload {
         // Kept for source compatibility; a session/envelope flag cannot authorize a parsed draft.
         require(draft.status == NutritionDraftStatus.USER_VERIFIED) {
@@ -206,6 +207,7 @@ object CanonicalNutritionPayloadFactory {
                 put("parser_version", JsonPrimitive(draft.parserVersion))
                 put("estimated", JsonPrimitive(false))
             },
+            priceTraceIdentity = priceTraceIdentity,
         )
     }
 
@@ -215,6 +217,7 @@ object CanonicalNutritionPayloadFactory {
         idempotencyKey: String,
         restaurantName: String,
         item: IngestionNutrition.RestaurantEstimate,
+        priceTraceIdentity: JsonObject? = null,
     ): CanonicalNutritionImportPayload {
         val estimate = item.estimate
         require(estimate.estimated) { "restaurant_estimate_required" }
@@ -258,6 +261,7 @@ object CanonicalNutritionPayloadFactory {
                 put("estimated", JsonPrimitive(true))
             },
             estimationEvidence = estimationEvidence,
+            priceTraceIdentity = priceTraceIdentity,
         )
     }
 

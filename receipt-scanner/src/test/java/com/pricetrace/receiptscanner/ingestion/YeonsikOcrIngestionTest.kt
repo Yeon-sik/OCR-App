@@ -478,12 +478,20 @@ class YeonsikOcrIngestionTest {
             ) is IngestionStartResult.Success,
         )
         assertEquals(
-            ProjectionStatus.UPLOADED,
+            ProjectionStatus.BLOCKED,
             orchestrator.submitProjection(
                 "ingestion-packaged-label-evidence",
                 IngestionProjection.FITNESS_NUTRITION,
                 envelope,
             ).status,
+        )
+        assertEquals(
+            "dependency_pending:pricetrace_receipt",
+            orchestrator.submitProjection(
+                "ingestion-packaged-label-evidence",
+                IngestionProjection.FITNESS_NUTRITION,
+                envelope,
+            ).lastError,
         )
         assertEquals(
             ProjectionStatus.BLOCKED,
@@ -714,6 +722,10 @@ class YeonsikOcrIngestionTest {
         val orchestrator = IngestionOrchestrator(
             store = store,
             submitters = mapOf(
+                IngestionProjection.PRICETRACE_RECEIPT to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission =
+                        ProjectionSubmission.Success("price-trace")
+                },
                 IngestionProjection.CASHOS_RECEIPT to object : IngestionProjectionSubmitter {
                     override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
                         requests += request
@@ -734,6 +746,11 @@ class YeonsikOcrIngestionTest {
         val receiptEvidence = listOf(LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true))
         orchestrator.start("ingestion-cashos-identity", "cashos-identity", envelope, evidence)
         orchestrator.markReceiptVerified("ingestion-cashos-identity", envelope, receiptEvidence)
+        orchestrator.submitProjection(
+            "ingestion-cashos-identity",
+            IngestionProjection.PRICETRACE_RECEIPT,
+            envelope,
+        )
 
         val first = orchestrator.submitProjection(
             "ingestion-cashos-identity",
@@ -788,6 +805,11 @@ class YeonsikOcrIngestionTest {
         assertEquals(2L, rotated.projectionRevisionSeq)
 
         orchestrator.markReceiptVerified("ingestion-cashos-identity", changedReceipt, receiptEvidence)
+        orchestrator.submitProjection(
+            "ingestion-cashos-identity",
+            IngestionProjection.PRICETRACE_RECEIPT,
+            changedReceipt,
+        )
         val receiptRetry = orchestrator.submitProjection(
             "ingestion-cashos-identity",
             IngestionProjection.CASHOS_RECEIPT,
@@ -814,6 +836,10 @@ class YeonsikOcrIngestionTest {
         val orchestrator = IngestionOrchestrator(
             store = InMemoryIngestionSessionStore(),
             submitters = mapOf(
+                IngestionProjection.PRICETRACE_RECEIPT to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission =
+                        ProjectionSubmission.Success("price-trace")
+                },
                 IngestionProjection.FITNESS_NUTRITION to object : IngestionProjectionSubmitter {
                     override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
                         requests += request
@@ -827,6 +853,16 @@ class YeonsikOcrIngestionTest {
             ),
         )
         orchestrator.start("ingestion-fitness-identity", "fitness-identity", envelope, evidence)
+        orchestrator.markReceiptVerified(
+            "ingestion-fitness-identity",
+            envelope,
+            listOf(LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true)),
+        )
+        orchestrator.submitProjection(
+            "ingestion-fitness-identity",
+            IngestionProjection.PRICETRACE_RECEIPT,
+            envelope,
+        )
         orchestrator.markNutritionVerified("ingestion-fitness-identity", envelope, labelEvidence)
         val first = orchestrator.submitProjection(
             "ingestion-fitness-identity",
@@ -853,6 +889,16 @@ class YeonsikOcrIngestionTest {
         assertEquals(first.idempotencyKey, retained.idempotencyKey)
         assertEquals(1L, retained.projectionRevisionSeq)
 
+        orchestrator.markReceiptVerified(
+            "ingestion-fitness-identity",
+            changedReceipt,
+            listOf(LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true)),
+        )
+        orchestrator.submitProjection(
+            "ingestion-fitness-identity",
+            IngestionProjection.PRICETRACE_RECEIPT,
+            changedReceipt,
+        )
         val retried = orchestrator.submitProjection(
             "ingestion-fitness-identity",
             IngestionProjection.FITNESS_NUTRITION,
@@ -875,6 +921,10 @@ class YeonsikOcrIngestionTest {
         val orchestrator = IngestionOrchestrator(
             store = InMemoryIngestionSessionStore(),
             submitters = mapOf(
+                IngestionProjection.PRICETRACE_RECEIPT to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission =
+                        ProjectionSubmission.Success("price-trace")
+                },
                 IngestionProjection.FITNESS_NUTRITION to object : IngestionProjectionSubmitter {
                     override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
                         requests += request
@@ -884,6 +934,16 @@ class YeonsikOcrIngestionTest {
             ),
         )
         orchestrator.start("ingestion-restaurant-identity", "restaurant-identity", envelope, evidence)
+        orchestrator.markReceiptVerified(
+            "ingestion-restaurant-identity",
+            envelope,
+            listOf(LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true)),
+        )
+        orchestrator.submitProjection(
+            "ingestion-restaurant-identity",
+            IngestionProjection.PRICETRACE_RECEIPT,
+            envelope,
+        )
         orchestrator.markNutritionVerified("ingestion-restaurant-identity", envelope, foodEvidence)
         val first = orchestrator.submitProjection(
             "ingestion-restaurant-identity",
@@ -910,6 +970,16 @@ class YeonsikOcrIngestionTest {
         assertEquals(2L, invalidated.projectionRevisionSeq)
 
         orchestrator.markNutritionVerified("ingestion-restaurant-identity", renamed, foodEvidence)
+        orchestrator.markReceiptVerified(
+            "ingestion-restaurant-identity",
+            renamed,
+            listOf(LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true)),
+        )
+        orchestrator.submitProjection(
+            "ingestion-restaurant-identity",
+            IngestionProjection.PRICETRACE_RECEIPT,
+            renamed,
+        )
         val renamedUpload = orchestrator.submitProjection(
             "ingestion-restaurant-identity",
             IngestionProjection.FITNESS_NUTRITION,
@@ -938,6 +1008,249 @@ class YeonsikOcrIngestionTest {
             renamedUpload.projectionPayloadFingerprint,
             afterTotalEdit.projectionPayloadFingerprint,
         )
+    }
+
+    @Test
+    fun priceTraceFailureRetryUnlocksDownstreamAndDoesNotResendUploadedProjection() = runBlocking {
+        val store = InMemoryIngestionSessionStore()
+        val calls = mutableMapOf<IngestionProjection, Int>()
+        val order = mutableListOf<IngestionProjection>()
+        val requests = mutableMapOf<IngestionProjection, MutableList<ProjectionRequest>>()
+        val identityJson = """
+            {
+              "schemaVersion":"verified-receipt-ingestion.v2",
+              "receiptId":"pt-receipt-1",
+              "storeId":"store-1",
+              "restaurantId":"restaurant-1",
+              "restaurantLocationId":"location-1",
+              "lines":[
+                {
+                  "sourceLineId":"line-1",
+                  "receiptItemId":"line-1",
+                  "productId":"product-1",
+                  "storeProductId":"store-product-1",
+                  "catalogProductId":"catalog-1",
+                  "restaurantMenuId":"menu-1"
+                }
+              ]
+            }
+        """.trimIndent()
+        val submitters = mapOf(
+            IngestionProjection.PRICETRACE_RECEIPT to object : IngestionProjectionSubmitter {
+                override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                    order += request.projection
+                    val count = (calls[request.projection] ?: 0) + 1
+                    calls[request.projection] = count
+                    return if (count == 1) {
+                        ProjectionSubmission.Failure("PriceTrace temporary outage", retryable = true)
+                    } else {
+                        ProjectionSubmission.Success("pt-receipt-1", metadataJson = identityJson)
+                    }
+                }
+            },
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION to object : IngestionProjectionSubmitter {
+                override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                    order += request.projection
+                    calls[request.projection] = (calls[request.projection] ?: 0) + 1
+                    requests.getOrPut(request.projection) { mutableListOf() } += request
+                    return ProjectionSubmission.Success("pt-receipt-1", metadataJson = identityJson)
+                }
+            },
+            IngestionProjection.CASHOS_RECEIPT to object : IngestionProjectionSubmitter {
+                override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                    order += request.projection
+                    val count = (calls[request.projection] ?: 0) + 1
+                    calls[request.projection] = count
+                    requests.getOrPut(request.projection) { mutableListOf() } += request
+                    return if (count == 1) {
+                        ProjectionSubmission.Failure("CashOS temporary outage", retryable = true)
+                    } else {
+                        ProjectionSubmission.Success("cashos-receipt-1")
+                    }
+                }
+            },
+            IngestionProjection.FITNESS_NUTRITION to object : IngestionProjectionSubmitter {
+                override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                    order += request.projection
+                    calls[request.projection] = (calls[request.projection] ?: 0) + 1
+                    requests.getOrPut(request.projection) { mutableListOf() } += request
+                    return ProjectionSubmission.Success("fitness-nutrition-1")
+                }
+            },
+        )
+        val orchestrator = IngestionOrchestrator(
+            store = store,
+            submitters = submitters,
+            now = { "2026-09-02T00:00:00Z" },
+        )
+        val envelope = (import(restaurantJson(), "cross-projection").draft as CanonicalDraft.Envelope).value
+        val evidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("food", SourceAttachmentType.FOOD_PHOTO, true),
+        )
+        val started = orchestrator.start("ingestion-cross-projection", "cross-projection", envelope, evidence)
+        assertTrue(started is IngestionStartResult.Success)
+        orchestrator.markReceiptVerified("ingestion-cross-projection", envelope, evidence)
+        orchestrator.markNutritionVerified("ingestion-cross-projection", envelope, evidence)
+
+        val first = orchestrator.submitAllReadyProjections("ingestion-cross-projection", envelope)
+        assertEquals(
+            ProjectionStatus.FAILED,
+            first.first { it.projection == IngestionProjection.PRICETRACE_RECEIPT }.status,
+        )
+        assertEquals(
+            ProjectionStatus.BLOCKED,
+            first.first { it.projection == IngestionProjection.CASHOS_RECEIPT }.status,
+        )
+        assertEquals(0, calls[IngestionProjection.CASHOS_RECEIPT] ?: 0)
+        assertEquals(0, calls[IngestionProjection.FITNESS_NUTRITION] ?: 0)
+
+        val second = orchestrator.submitAllReadyProjections("ingestion-cross-projection", envelope)
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            second.first { it.projection == IngestionProjection.PRICETRACE_RECEIPT }.status,
+        )
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            second.first { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }.status,
+        )
+        assertEquals(
+            ProjectionStatus.FAILED,
+            second.first { it.projection == IngestionProjection.CASHOS_RECEIPT }.status,
+        )
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            second.first { it.projection == IngestionProjection.FITNESS_NUTRITION }.status,
+        )
+        assertEquals(
+            PriceTraceIdentity(
+                receiptId = "pt-receipt-1",
+                storeId = "store-1",
+                restaurantId = "restaurant-1",
+                restaurantLocationId = "location-1",
+                lines = listOf(
+                    PriceTraceLineIdentity(
+                        sourceLineId = "line-1",
+                        receiptItemId = "line-1",
+                        productId = "product-1",
+                        storeProductId = "store-product-1",
+                        catalogProductId = "catalog-1",
+                        restaurantMenuId = "menu-1",
+                    ),
+                ),
+            ),
+            requests.getValue(IngestionProjection.CASHOS_RECEIPT).single().resolvedIdentity?.priceTrace,
+        )
+        assertEquals(
+            "store-1",
+            requests.getValue(IngestionProjection.FITNESS_NUTRITION).single()
+                .resolvedIdentity?.priceTrace?.storeId,
+        )
+        assertEquals(
+            listOf(
+                IngestionProjection.PRICETRACE_RECEIPT,
+                IngestionProjection.PRICETRACE_RECEIPT,
+                IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+                IngestionProjection.CASHOS_RECEIPT,
+                IngestionProjection.FITNESS_NUTRITION,
+            ),
+            order,
+        )
+
+        val third = orchestrator.submitAllReadyProjections("ingestion-cross-projection", envelope)
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            third.first { it.projection == IngestionProjection.CASHOS_RECEIPT }.status,
+        )
+        assertEquals(2, calls[IngestionProjection.CASHOS_RECEIPT])
+        assertEquals(1, calls[IngestionProjection.FITNESS_NUTRITION])
+        assertEquals(2, calls[IngestionProjection.PRICETRACE_RECEIPT])
+        assertEquals(1, calls[IngestionProjection.PRICETRACE_PRICE_OBSERVATION])
+        assertEquals(
+            listOf(
+                IngestionProjection.PRICETRACE_RECEIPT,
+                IngestionProjection.PRICETRACE_RECEIPT,
+                IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+                IngestionProjection.CASHOS_RECEIPT,
+                IngestionProjection.FITNESS_NUTRITION,
+                IngestionProjection.CASHOS_RECEIPT,
+            ),
+            order,
+        )
+    }
+
+    @Test
+    fun fitnessMealRequiresAnExplicitVerifiedConsumptionArtifact() = runBlocking {
+        val store = InMemoryIngestionSessionStore()
+        var mealCalls = 0
+        val identityJson = """{"receiptId":"pt-receipt-meal","storeId":"store-meal","lines":[]}"""
+        val configured = setOf(
+            IngestionProjection.PRICETRACE_RECEIPT,
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+            IngestionProjection.CASHOS_RECEIPT,
+            IngestionProjection.FITNESS_NUTRITION,
+            IngestionProjection.FITNESS_MEAL,
+        )
+        val submitters = configured.associateWith { projection ->
+            object : IngestionProjectionSubmitter {
+                override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                    if (projection == IngestionProjection.FITNESS_MEAL) mealCalls += 1
+                    return ProjectionSubmission.Success(
+                        remoteId = projection.wireValue,
+                        metadataJson = if (projection == IngestionProjection.PRICETRACE_RECEIPT) identityJson else null,
+                    )
+                }
+            }
+        }
+        val orchestrator = IngestionOrchestrator(
+            store = store,
+            submitters = submitters,
+            now = { "2026-09-02T00:00:00Z" },
+        )
+        val envelope = (import(restaurantJson(), "consumption-gate").draft as CanonicalDraft.Envelope).value.copy(
+            consumption = listOf(
+                IngestionConsumption(
+                    clientKey = "consumption-1",
+                    nutritionClientKeys = setOf("food-1"),
+                ),
+            ),
+        )
+        val evidence = listOf(
+            LocalEvidence("receipt", SourceAttachmentType.RECEIPT, true),
+            LocalEvidence("food", SourceAttachmentType.FOOD_PHOTO, true),
+        )
+        orchestrator.start("ingestion-consumption-gate", "consumption-gate", envelope, evidence)
+        orchestrator.markReceiptVerified("ingestion-consumption-gate", envelope, evidence)
+        orchestrator.markNutritionVerified("ingestion-consumption-gate", envelope, evidence)
+
+        val blocked = orchestrator.submitAllReadyProjections("ingestion-consumption-gate", envelope)
+            .first { it.projection == IngestionProjection.FITNESS_MEAL }
+        assertEquals(ProjectionStatus.BLOCKED, blocked.status)
+        assertEquals("projection_not_reverified", blocked.lastError)
+        assertEquals(0, mealCalls)
+
+        val verifiedEnvelope = envelope.copy(
+            consumption = envelope.consumption.map {
+                it.copy(status = ConsumptionVerificationStatus.USER_VERIFIED)
+            },
+        )
+        val revised = orchestrator.reviseCanonicalDraft(
+            "ingestion-consumption-gate",
+            verifiedEnvelope,
+        )
+        assertTrue(revised is IngestionStartResult.Success)
+        assertTrue(
+            orchestrator.markConsumptionVerified(
+                "ingestion-consumption-gate",
+                verifiedEnvelope,
+                evidence,
+            ) is IngestionStartResult.Success,
+        )
+
+        val uploaded = orchestrator.submitAllReadyProjections("ingestion-consumption-gate", verifiedEnvelope)
+            .first { it.projection == IngestionProjection.FITNESS_MEAL }
+        assertEquals(ProjectionStatus.UPLOADED, uploaded.status)
+        assertEquals(1, mealCalls)
     }
 
     private fun packagedReceiptEnvelope(localId: String): YeonsikOcrEnvelope {

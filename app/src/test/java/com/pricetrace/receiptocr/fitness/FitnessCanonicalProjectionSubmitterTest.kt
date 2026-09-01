@@ -6,12 +6,17 @@ import com.pricetrace.receiptscanner.ingestion.IngestionSource
 import com.pricetrace.receiptscanner.ingestion.MerchantCandidate
 import com.pricetrace.receiptscanner.ingestion.NutritionNutrientProvenance
 import com.pricetrace.receiptscanner.ingestion.NutritionRange
+import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentity
+import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
+import com.pricetrace.receiptscanner.ingestion.PriceTraceLineIdentity
+import com.pricetrace.receiptscanner.ingestion.ProjectionIdentity
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
@@ -32,7 +37,7 @@ class FitnessCanonicalProjectionSubmitterTest {
                 ingestionId = "ingestion-1",
                 projection = IngestionProjection.FITNESS_NUTRITION,
                 canonicalPayload = "{}",
-                resolvedIdentity = emptyMap(),
+                resolvedIdentity = null,
                 idempotencyKey = "bundle-key",
                 envelope = YeonsikOcrEnvelope(
                     mode = com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT,
@@ -66,6 +71,85 @@ class FitnessCanonicalProjectionSubmitterTest {
         assertEquals(500.0, range?.get("point")?.jsonPrimitive?.content?.toDouble())
         assertEquals(600.0, range?.get("max")?.jsonPrimitive?.content?.toDouble())
         assertTrue(first["p_nutrient_provenance"]!!.jsonObject.keys.containsAll(CanonicalNutritionImportPayload.REQUIRED_NUTRIENTS))
+    }
+
+    @Test
+    fun receiptBackedNutritionCarriesPriceTraceAuthorityIdentity() = runTest {
+        val identity = PriceTraceIdentity(
+            receiptId = "receipt-1",
+            storeId = "store-1",
+            restaurantId = "restaurant-1",
+            restaurantLocationId = "location-1",
+            lines = listOf(
+                PriceTraceLineIdentity(
+                    sourceLineId = "line-menu",
+                    receiptItemId = "line-menu",
+                    productId = "product-1",
+                    storeProductId = "store-product-1",
+                    catalogProductId = "catalog-1",
+                    restaurantMenuId = "menu-1",
+                ),
+            ),
+        )
+        val envelope = YeonsikOcrEnvelope(
+            mode = com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT,
+            source = IngestionSource(producer = "chatgpt-project", sourceFiles = emptyList()),
+            receipt = com.pricetrace.receiptscanner.domain.ReceiptV2(
+                document = com.pricetrace.receiptscanner.domain.ReceiptDocument(
+                    id = null,
+                    localDocumentId = "receipt-document",
+                    issuedOn = "2026-09-02",
+                    issuedAt = null,
+                    currency = "KRW",
+                    status = com.pricetrace.receiptscanner.domain.ReceiptStatus.FINAL,
+                    source = com.pricetrace.receiptscanner.domain.ReceiptSource(
+                        originalDocumentId = null,
+                        sourceImages = emptyList(),
+                        transcriptionStatus = com.pricetrace.receiptscanner.domain.TranscriptionStatus.USER_VERIFIED,
+                        rawText = null,
+                    ),
+                ),
+                merchant = com.pricetrace.receiptscanner.domain.ReceiptMerchant(
+                    name = "Test Restaurant",
+                    branchName = null,
+                ),
+                lineItems = emptyList(),
+                totals = com.pricetrace.receiptscanner.domain.ReceiptV2Totals(
+                    itemsGrossAmountMinor = null,
+                    discountAmountMinor = null,
+                    taxAmountMinor = null,
+                    feeAmountMinor = null,
+                    tipAmountMinor = null,
+                    roundingAmountMinor = null,
+                    grandTotalAmountMinor = 0,
+                ),
+                payments = emptyList(),
+            ),
+            nutrition = listOf(estimate("line-menu")),
+        )
+        val transport = QueueTransport(response("canonical-identity", "food-identity"))
+        val result = FitnessCanonicalProjectionSubmitter(NutritionSupabaseGateway(FakeStore(signedIn()), transport))
+            .submit(
+                ProjectionRequest(
+                    ingestionId = "ingestion-identity",
+                    projection = IngestionProjection.FITNESS_NUTRITION,
+                    canonicalPayload = "{}",
+                    resolvedIdentity = ProjectionIdentity(identity),
+                    idempotencyKey = "identity-key",
+                    envelope = envelope,
+                    localDocumentId = "receipt-document",
+                    revisionSeq = 1,
+                    canonicalFingerprint = "c".repeat(64),
+                ),
+            )
+
+        assertTrue(result is ProjectionSubmission.Success)
+        val body = Json.parseToJsonElement(requireNotNull(transport.requests.single().body)).jsonObject
+        val sentIdentity = body["p_pricetrace_identity"]?.jsonObject
+        assertEquals("receipt-1", sentIdentity?.get("receiptId")?.jsonPrimitive?.content)
+        assertEquals("store-1", sentIdentity?.get("storeId")?.jsonPrimitive?.content)
+        assertEquals("product-1", sentIdentity?.get("lines")?.jsonArray?.single()?.jsonObject?.get("productId")?.jsonPrimitive?.content)
+        assertEquals(PriceTraceIdentityJson.encode(identity), sentIdentity)
     }
 
     private fun estimate(clientKey: String): IngestionNutrition.RestaurantEstimate {

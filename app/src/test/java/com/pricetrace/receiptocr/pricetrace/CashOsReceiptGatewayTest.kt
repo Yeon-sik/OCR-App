@@ -147,7 +147,23 @@ class CashOsReceiptGatewayTest {
             ingestionId = "ingestion:ocr-local-session",
             projection = IngestionProjection.CASHOS_RECEIPT,
             canonicalPayload = YeonsikOcrEnvelopeJson.encode(envelope),
-            resolvedIdentity = emptyMap(),
+            resolvedIdentity = ProjectionIdentity(
+                priceTrace = PriceTraceIdentity(
+                    receiptId = "price-receipt-1",
+                    storeId = "store-1",
+                    restaurantId = "restaurant-1",
+                    restaurantLocationId = "location-1",
+                    lines = listOf(
+                        PriceTraceLineIdentity(
+                            receiptItemId = "product-1",
+                            productId = "product-1",
+                            storeProductId = "store-product-1",
+                            catalogProductId = "catalog-1",
+                            restaurantMenuId = "menu-1",
+                        ),
+                    ),
+                ),
+            ),
             idempotencyKey = "projection-key",
             envelope = envelope,
             localDocumentId = "ocr-local-session",
@@ -164,6 +180,8 @@ class CashOsReceiptGatewayTest {
         val body = Json.parseToJsonElement(requireNotNull(transport.requests.single().body)).jsonObject
         assertEquals("ocr-local-session", body["p_document_id"]?.jsonPrimitive?.content)
         assertEquals("bank", body["p_institution_hint"]?.jsonPrimitive?.content)
+        assertEquals("restaurant-1", body["p_restaurant_id"]?.jsonPrimitive?.content)
+        assertEquals("location-1", body["p_restaurant_location_id"]?.jsonPrimitive?.content)
         assertEquals(9, body["p_revision_seq"]?.jsonPrimitive?.intOrNull)
         assertEquals(45, body["p_grand_total_amount_krw"]?.jsonPrimitive?.intOrNull)
         val items = body["p_items"]!!.jsonArray.map { it.jsonObject }
@@ -174,6 +192,11 @@ class CashOsReceiptGatewayTest {
         assertEquals(JsonNull, items[0]["discount_amount_krw"])
         assertEquals(JsonNull, items[0]["tax_amount_krw"])
         assertEquals(100, items[0]["net_amount_krw"]?.jsonPrimitive?.intOrNull)
+        assertEquals("product-1", items[0]["pricetrace_product_id"]?.jsonPrimitive?.content)
+        assertEquals("store-product-1", items[0]["pricetrace_store_product_id"]?.jsonPrimitive?.content)
+        assertEquals("catalog-1", items[0]["pricetrace_identity"]?.jsonObject?.get("lines")?.jsonArray?.single()?.jsonObject?.get("catalogProductId")?.jsonPrimitive?.content)
+        assertEquals("store-1", items[0]["pricetrace_identity"]?.jsonObject?.get("storeId")?.jsonPrimitive?.content)
+        assertEquals("menu-1", items[0]["pricetrace_identity"]?.jsonObject?.get("lines")?.jsonArray?.single()?.jsonObject?.get("restaurantMenuId")?.jsonPrimitive?.content)
         assertEquals(-30, items[1]["net_amount_krw"]?.jsonPrimitive?.intOrNull)
         assertEquals(-20, items[2]["net_amount_krw"]?.jsonPrimitive?.intOrNull)
         assertEquals(-5, items[3]["net_amount_krw"]?.jsonPrimitive?.intOrNull)
