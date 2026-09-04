@@ -105,7 +105,7 @@ class CashOsReceiptGatewayTest {
                 "p_contract_version", "p_idempotency_key", "p_document_id", "p_receipt_revision",
                 "p_revision_seq", "p_receipt_fingerprint", "p_merchant_name", "p_branch_name",
                 "p_restaurant_id", "p_restaurant_location_id", "p_purchase_local_date", "p_purchase_local_time",
-                "p_grand_total_amount_krw", "p_category_hint", "p_payment_method_hint", "p_institution_hint",
+                "p_grand_total_amount_krw", "p_price_trace_store_id", "p_category_hint", "p_payment_method_hint", "p_institution_hint",
                 "p_category_id", "p_account_id", "p_items",
             ),
             body.keys,
@@ -114,6 +114,7 @@ class CashOsReceiptGatewayTest {
         assertEquals("ocr-local-session", body["p_document_id"]?.jsonPrimitive?.content)
         assertEquals(9, body["p_revision_seq"]?.jsonPrimitive?.intOrNull)
         assertEquals(45, body["p_grand_total_amount_krw"]?.jsonPrimitive?.intOrNull)
+        assertEquals("store-1", body["p_price_trace_store_id"]?.jsonPrimitive?.content)
         assertFalse(body.containsKey("p_ledger_entry_id"))
 
         val items = body["p_items"]!!.jsonArray.map { it.jsonObject }
@@ -184,6 +185,7 @@ class CashOsReceiptGatewayTest {
         assertEquals("location-1", body["p_restaurant_location_id"]?.jsonPrimitive?.content)
         assertEquals(9, body["p_revision_seq"]?.jsonPrimitive?.intOrNull)
         assertEquals(45, body["p_grand_total_amount_krw"]?.jsonPrimitive?.intOrNull)
+        assertEquals("store-1", body["p_price_trace_store_id"]?.jsonPrimitive?.content)
         val items = body["p_items"]!!.jsonArray.map { it.jsonObject }
         assertEquals("1", items[0]["quantity"]?.jsonPrimitive?.content)
         assertEquals(JsonNull, items[0]["unit"])
@@ -201,6 +203,11 @@ class CashOsReceiptGatewayTest {
         assertEquals(-20, items[2]["net_amount_krw"]?.jsonPrimitive?.intOrNull)
         assertEquals(-5, items[3]["net_amount_krw"]?.jsonPrimitive?.intOrNull)
         assertTrue(success.metadataJson.orEmpty().contains("ledger_entry_id"))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun v3PayloadRejectsMissingPriceTraceSellerIdentity() {
+        canonicalPayload().copy(priceTraceStoreId = "")
     }
 
     private fun mapperReceipt() = ReceiptV2(
@@ -284,6 +291,7 @@ class CashOsReceiptGatewayTest {
         purchaseLocalDate = "2026-08-13",
         purchaseLocalTime = "12:34:00",
         grandTotalAmountKrw = 45,
+        priceTraceStoreId = "store-1",
         items = listOf(
             CashOsReceiptIngestV3Item(
                 receiptItemId = "product-1",

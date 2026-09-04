@@ -37,9 +37,12 @@ internal class CashOsCanonicalProjectionSubmitter(
             ?: return ProjectionSubmission.Failure("local_document_id_missing", retryable = false)
         val priceTraceIdentity = request.resolvedIdentity?.priceTrace
             ?: return ProjectionSubmission.Failure("pricetrace_identity_missing", retryable = false)
+        val priceTraceStoreId = priceTraceIdentity.storeId
+            ?.takeIf { it.isNotBlank() && it == it.trim() }
+            ?: return ProjectionSubmission.Failure("pricetrace_store_id_missing", retryable = false)
 
         return try {
-            val payload = toPayload(request, receipt, localDocumentId, priceTraceIdentity)
+            val payload = toPayload(request, receipt, localDocumentId, priceTraceIdentity, priceTraceStoreId)
             when (val result = gateway.ingestVerifiedReceiptV3(payload)) {
                 is PriceObservationReadOutcome.Success -> ProjectionSubmission.Success(
                     remoteId = result.value.receiptId,
@@ -64,6 +67,7 @@ internal class CashOsCanonicalProjectionSubmitter(
         receipt: ReceiptV2,
         localDocumentId: String,
         priceTraceIdentity: PriceTraceIdentity,
+        priceTraceStoreId: String,
     ): CashOsReceiptIngestV3Payload {
         val merchantName = receipt.merchant.name?.trim()?.takeIf(String::isNotEmpty)
             ?: error("cashos_merchant_name_missing")
@@ -87,6 +91,7 @@ internal class CashOsCanonicalProjectionSubmitter(
             purchaseLocalTime = receipt.document.source.purchaseLocalTime()
                 ?: receipt.document.issuedAt?.let(::parseLocalTime),
             grandTotalAmountKrw = grandTotal,
+            priceTraceStoreId = priceTraceStoreId,
             restaurantId = priceTraceIdentity.restaurantId,
             restaurantLocationId = priceTraceIdentity.restaurantLocationId,
             priceTraceIdentity = PriceTraceIdentityJson.encode(priceTraceIdentity),
