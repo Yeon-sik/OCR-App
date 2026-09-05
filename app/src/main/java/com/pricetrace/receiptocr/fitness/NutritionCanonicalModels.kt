@@ -18,6 +18,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 const val NUTRITION_LABEL_V1 = "nutrition-label.v1"
 const val FOOD_ESTIMATE_V1 = "food-estimate.v1"
@@ -32,6 +33,122 @@ sealed interface NutritionCanonicalImportOutcome {
         val reason: NutritionGatewayFailure,
         val message: String? = null,
     ) : NutritionCanonicalImportOutcome
+}
+
+sealed interface NutritionProductLinkOutcome {
+    data class Success(
+        val response: ProductNutritionLinkProposalResponse,
+        val rawResponse: String,
+    ) : NutritionProductLinkOutcome
+
+    data class Failure(
+        val reason: NutritionGatewayFailure,
+        val message: String? = null,
+    ) : NutritionProductLinkOutcome
+}
+
+sealed interface NutritionMealImportOutcome {
+    data class Success(
+        val response: FitnessMealImportResponse,
+        val rawResponse: String,
+    ) : NutritionMealImportOutcome
+
+    data class Failure(
+        val reason: NutritionGatewayFailure,
+        val message: String? = null,
+    ) : NutritionMealImportOutcome
+}
+
+sealed interface NutritionMealComponentImportOutcome {
+    data class Success(
+        val response: NutritionMealComponentImportResponse,
+        val rawResponse: String,
+    ) : NutritionMealComponentImportOutcome
+
+    data class Failure(
+        val reason: NutritionGatewayFailure,
+        val message: String? = null,
+    ) : NutritionMealComponentImportOutcome
+}
+
+data class NutritionMealComponentImportResponse(
+    val componentImportId: String,
+    val idempotentReplay: Boolean,
+    val nutritionFoodId: String,
+    val inputContract: String,
+    val sourceType: String,
+    val dataVersion: Int,
+    val visibility: String,
+)
+
+data class ProductNutritionLinkProposalPayload(
+    val action: String = "link",
+    val namespace: String = "pricetrace",
+    val catalogProductId: String,
+    val nutritionFoodId: String,
+    val sourceRevision: String,
+    val source: JsonObject,
+) {
+    init {
+        require(action == "link")
+        require(namespace == "pricetrace")
+        require(catalogProductId.isNotBlank() && nutritionFoodId.isNotBlank())
+        require(sourceRevision.matches(Regex("^sha256:[0-9a-f]{64}$")))
+        require(source["catalogProductId"]?.jsonPrimitive?.content == catalogProductId)
+        require(source["productRevision"]?.jsonPrimitive?.content == sourceRevision)
+    }
+
+    fun toRpcJson(): String = ProductNutritionLinkProposalJson.encode(this)
+}
+
+data class ProductNutritionLinkProposalResponse(
+    val id: String,
+    val action: String,
+    val namespace: String,
+    val catalogProductId: String,
+    val nutritionFoodId: String,
+    val status: String,
+    val sourceRevision: String,
+)
+
+object ProductNutritionLinkProposalJson {
+    private val json = Json { explicitNulls = true; ignoreUnknownKeys = false }
+
+    fun encode(payload: ProductNutritionLinkProposalPayload): String = json.encodeToString(
+        JsonObject.serializer(),
+        buildJsonObject {
+            put("p_action", JsonPrimitive(payload.action))
+            put("p_namespace", JsonPrimitive(payload.namespace))
+            put("p_catalog_product_id", JsonPrimitive(payload.catalogProductId))
+            put("p_nutrition_food_id", JsonPrimitive(payload.nutritionFoodId))
+            put("p_source_revision", JsonPrimitive(payload.sourceRevision))
+            put("p_source", payload.source)
+        },
+    )
+
+    fun decodeResponse(value: String): ProductNutritionLinkProposalResponse {
+        val root = json.parseToJsonElement(value)
+        val row = when (root) {
+            is JsonObject -> root
+            else -> root.jsonArray.single().jsonObject
+        }
+        fun requiredString(key: String): String = (row[key] as? JsonPrimitive)?.contentOrNull
+            ?.takeIf(String::isNotBlank) ?: error("Missing Nutrition link response field: $key")
+        val identity = row["identity"]?.jsonObject ?: error("Missing Nutrition link response identity")
+        fun identityString(key: String): String = (identity[key] as? JsonPrimitive)?.contentOrNull
+            ?.takeIf(String::isNotBlank) ?: error("Missing Nutrition link identity field: $key")
+        val response = ProductNutritionLinkProposalResponse(
+            id = requiredString("id"),
+            action = requiredString("action"),
+            namespace = identityString("namespace"),
+            catalogProductId = identityString("catalogProductId"),
+            nutritionFoodId = identityString("nutritionFoodId"),
+            status = requiredString("status"),
+            sourceRevision = requiredString("sourceRevision"),
+        )
+        require(response.action == "link" && response.namespace == "pricetrace")
+        return response
+    }
 }
 
 data class CanonicalNutrientProvenance(
@@ -164,6 +281,61 @@ object CanonicalNutritionImportJson {
     private fun numberMap(values: Map<String, Double>): JsonObject = JsonObject(values.mapValues { (_, value) -> JsonPrimitive(value) })
 }
 
+/** Codec for the separate Fitness-owned meal_component_estimate Nutrition boundary. */
+object MealComponentEstimateJson {
+    private val json = Json { explicitNulls = true; ignoreUnknownKeys = false }
+
+    fun encode(payload: CanonicalNutritionImportPayload): String = json.encodeToString(
+        JsonObject.serializer(),
+        buildJsonObject {
+            put("p_idempotency_key", JsonPrimitive(payload.idempotencyKey))
+            put("p_source_document_ref", JsonPrimitive(payload.sourceDocumentRef))
+            put("p_food_name", JsonPrimitive(payload.foodName))
+            put("p_brand", payload.brand?.let(::JsonPrimitive) ?: JsonNull)
+            put("p_category", JsonPrimitive(payload.category))
+            put("p_basis_amount", JsonPrimitive(payload.basisAmount))
+            put("p_basis_unit", JsonPrimitive(payload.basisUnit))
+            put("p_required_nutrients", JsonObject(payload.requiredNutrients.mapValues { (_, value) -> JsonPrimitive(value) }))
+            put("p_nutrient_provenance", JsonObject(payload.nutrientProvenance.mapValues { (_, provenance) ->
+                buildJsonObject {
+                    put("value", JsonPrimitive(provenance.value))
+                    put("value_status", JsonPrimitive(provenance.valueStatus))
+                    put("source_type", JsonPrimitive(provenance.sourceType))
+                    put("evidence_refs", JsonArray(provenance.evidenceRefs.map(::JsonPrimitive)))
+                }
+            }))
+            put("p_optional_nutrients", JsonObject(payload.optionalNutrients.mapValues { (_, value) -> JsonPrimitive(value) }))
+            put("p_provenance", payload.provenance)
+            put("p_user_verified", JsonPrimitive(true))
+            put("p_pricetrace_identity", payload.priceTraceIdentity ?: JsonNull)
+            put("p_estimation_evidence", payload.estimationEvidence ?: JsonNull)
+        },
+    )
+
+    fun decodeResponse(value: String): NutritionMealComponentImportResponse {
+        val root = json.parseToJsonElement(value)
+        val row = when (root) {
+            is JsonObject -> root
+            else -> root.jsonArray.single().jsonObject
+        }
+        fun requiredString(key: String): String = (row[key] as? JsonPrimitive)?.contentOrNull
+            ?.takeIf(String::isNotBlank) ?: error("Missing meal component response field: $key")
+        fun requiredBoolean(key: String): Boolean = (row[key] as? JsonPrimitive)?.contentOrNull
+            ?.toBooleanStrictOrNull() ?: error("Invalid meal component response boolean: $key")
+        fun requiredInt(key: String): Int = (row[key] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
+            ?: error("Invalid meal component response integer: $key")
+        return NutritionMealComponentImportResponse(
+            componentImportId = requiredString("component_import_id"),
+            idempotentReplay = requiredBoolean("idempotent_replay"),
+            nutritionFoodId = requiredString("nutrition_food_id"),
+            inputContract = requiredString("input_contract"),
+            sourceType = requiredString("source_type"),
+            dataVersion = requiredInt("data_version"),
+            visibility = requiredString("visibility"),
+        )
+    }
+}
+
 object CanonicalNutritionPayloadFactory {
     fun fromProductLabel(
         localDocumentId: String,
@@ -218,12 +390,53 @@ object CanonicalNutritionPayloadFactory {
         restaurantName: String,
         item: IngestionNutrition.RestaurantEstimate,
         priceTraceIdentity: JsonObject? = null,
+    ): CanonicalNutritionImportPayload = fromEstimate(
+        localDocumentId = localDocumentId,
+        revisionSeq = revisionSeq,
+        idempotencyKey = idempotencyKey,
+        restaurantName = restaurantName,
+        branchName = null,
+        artifactKey = item.clientKey,
+        foodName = item.menuName,
+        estimate = item.estimate,
+        priceTraceIdentity = priceTraceIdentity,
+    )
+
+    fun fromMealComponentEstimate(
+        localDocumentId: String,
+        revisionSeq: Long,
+        idempotencyKey: String,
+        restaurantName: String,
+        item: IngestionNutrition.MealComponentEstimate,
+    ): CanonicalNutritionImportPayload = fromEstimate(
+        localDocumentId = localDocumentId,
+        revisionSeq = revisionSeq,
+        idempotencyKey = idempotencyKey,
+        restaurantName = item.reference?.restaurantName ?: restaurantName,
+        branchName = item.reference?.branchName,
+        artifactKey = item.clientKey,
+        foodName = item.menuName,
+        estimate = item.estimate,
+        // A free or estimated component is Fitness-owned. It must not carry a
+        // PriceTrace RestaurantMenu identity into the Nutrition RPC.
+        priceTraceIdentity = null,
+    )
+
+    private fun fromEstimate(
+        localDocumentId: String,
+        revisionSeq: Long,
+        idempotencyKey: String,
+        restaurantName: String,
+        branchName: String?,
+        artifactKey: String,
+        foodName: String,
+        estimate: RestaurantNutritionEstimate,
+        priceTraceIdentity: JsonObject?,
     ): CanonicalNutritionImportPayload {
-        val estimate = item.estimate
         require(estimate.estimated) { "restaurant_estimate_required" }
         val confidence = estimate.confidenceScore ?: estimate.confidence.toDoubleOrNull()
         require(confidence != null && confidence in 0.0..1.0) { "numeric_estimation_confidence_required" }
-        val sourceRef = sourceRef(localDocumentId, revisionSeq, item.clientKey)
+        val sourceRef = sourceRef(localDocumentId, revisionSeq, artifactKey)
         val required = NutritionField.requiredFields.associate { field ->
             field.wireKey to requireNotNull(estimate.nutrients[field]) { "missing_estimate_${field.wireKey}" }
         }
@@ -248,7 +461,7 @@ object CanonicalNutritionPayloadFactory {
             idempotencyKey = idempotencyKey,
             inputContract = FOOD_ESTIMATE_V1,
             sourceDocumentRef = sourceRef,
-            foodName = item.menuName.trim(),
+            foodName = foodName.trim(),
             brand = restaurantName.trim().takeIf(String::isNotEmpty),
             category = "recipe",
             basisAmount = 1.0,
@@ -258,6 +471,8 @@ object CanonicalNutritionPayloadFactory {
             optionalNutrients = optional,
             provenance = buildJsonObject {
                 put("restaurant_name", JsonPrimitive(restaurantName))
+                put("branch_name", branchName?.let(::JsonPrimitive) ?: JsonNull)
+                put("restaurant_menu_id", JsonNull)
                 put("estimated", JsonPrimitive(true))
             },
             estimationEvidence = estimationEvidence,

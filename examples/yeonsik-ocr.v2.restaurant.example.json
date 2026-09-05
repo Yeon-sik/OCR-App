@@ -1,0 +1,174 @@
+{
+  "schema_version": "yeonsik-ocr.v2",
+  "mode": "restaurant",
+  "source": {
+    "producer": "chatgpt",
+    "source_files": [
+      {"id": "receipt-1", "type": "receipt", "label": "영수증"},
+      {"id": "food-1", "type": "food_photo", "label": "유료 메뉴 사진"},
+      {"id": "food-3", "type": "food_photo", "label": "무료 반찬 사진"}
+    ],
+    "user_text": "식당 영수증과 음식 사진"
+  },
+  "merchant_candidate": {
+    "name": "Test Restaurant",
+    "business_kind": "food_service",
+    "branch_name": "강남점",
+    "address": null,
+    "phone": null,
+    "business_registration_number": null,
+    "source_attachment_ids": ["receipt-1"],
+    "source_namespace": null,
+    "source_location_code": null
+  },
+  "receipt": {
+    "schema_version": "receipt.v2",
+    "document": {
+      "id": null,
+      "type": "receipt",
+      "status": "final",
+      "issued_on": "2026-08-27",
+      "issued_at": null,
+      "currency": "KRW",
+      "fulfillment": {"type": "dine_in", "evidence": "printed"},
+      "source": {
+        "capture_method": "ocr",
+        "original_document_id": null,
+        "source_images": [],
+        "transcription_status": "user_verified",
+        "notes": [],
+        "raw_text": null
+      }
+    },
+    "merchant": {
+      "name": "Test Restaurant",
+      "branch_name": "강남점",
+      "business_kind": "food_service",
+      "retail_channel": "regular",
+      "catalog_namespace": null,
+      "merchant_id": null,
+      "business_registration_number": null,
+      "address": null,
+      "phone": null
+    },
+    "line_items": [
+      {
+        "id": "line-1",
+        "type": "product",
+        "description": "Noodles",
+        "source_line_references": [],
+        "identifiers": [],
+        "quantity": {"value": 1, "unit": "each"},
+        "unit_price_amount_minor": 10000,
+        "gross_amount_minor": 10000,
+        "discount_amount_minor": 0,
+        "tax_amount_minor": 0,
+        "net_amount_minor": 10000,
+        "confidence": "user_verified",
+        "tax_rate_percent": null,
+        "food_service": {"role": "main", "applies_to_line_id": null}
+      }
+    ],
+    "totals": {
+      "items_gross_amount_minor": 10000,
+      "discount_amount_minor": 0,
+      "tax_amount_minor": 0,
+      "fee_amount_minor": 0,
+      "tip_amount_minor": 0,
+      "rounding_amount_minor": 0,
+      "grand_total_amount_minor": 10000
+    },
+    "payments": [
+      {"method": "card", "amount_minor": 10000, "status": "paid", "reference": null}
+    ]
+  },
+  "nutrition": [
+    {
+      "client_key": "food-1",
+      "kind": "restaurant_estimate",
+      "line_id": "line-1",
+      "menu_name": "Noodles",
+      "payload": null,
+      "estimate": {
+        "estimated": true,
+        "confidence": 0.82,
+        "nutrients": {
+          "calories_kcal": 500,
+          "protein_grams": 20,
+          "carbs_grams": 70,
+          "fat_grams": 15,
+          "sodium_mg": 800,
+          "saturated_fat_grams": 3,
+          "sugars_grams": 5,
+          "fiber_grams": 4,
+          "added_sugars_grams": null,
+          "trans_fat_grams": null,
+          "cholesterol_mg": 20
+        },
+        "ranges": {"calories_kcal": {"min": 400, "point": 500, "max": 600}},
+        "provenance": {
+          "calories_kcal": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-1"]},
+          "protein_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-1"]},
+          "carbs_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-1"]},
+          "fat_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-1"]},
+          "sodium_mg": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-1"]},
+          "saturated_fat_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-1"]},
+          "sugars_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-1"]}
+        }
+      }
+    },
+    {
+      "client_key": "food-3",
+      "kind": "meal_component_estimate",
+      "line_id": null,
+      "menu_name": "Complimentary kimchi",
+      "restaurant_name": "Test Restaurant",
+      "branch_name": "강남점",
+      "restaurant_menu_id": null,
+      "payload": null,
+      "estimate": {
+        "estimated": true,
+        "confidence": 0.64,
+        "nutrients": {
+          "calories_kcal": 30,
+          "protein_grams": 2,
+          "carbs_grams": 5,
+          "fat_grams": 0.2,
+          "sodium_mg": 500,
+          "saturated_fat_grams": 0,
+          "sugars_grams": 2,
+          "fiber_grams": 2,
+          "added_sugars_grams": null,
+          "trans_fat_grams": null,
+          "cholesterol_mg": 0
+        },
+        "ranges": {},
+        "provenance": {
+          "calories_kcal": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-3"]},
+          "protein_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-3"]},
+          "carbs_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-3"]},
+          "fat_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-3"]},
+          "sodium_mg": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-3"]},
+          "saturated_fat_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-3"]},
+          "sugars_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-3"]}
+        }
+      }
+    }
+  ],
+  "product_candidates": [],
+  "consumption": [
+    {
+      "client_key": "meal-1",
+      "consumed_at": "2026-08-27T19:30:00+09:00",
+      "items": [
+        {"nutrition_client_key": "food-1", "amount": 1, "unit": "serving", "confidence": 0.9},
+        {"nutrition_client_key": "food-3", "amount": 1, "unit": "serving", "confidence": 0.7}
+      ],
+      "status": "user_verified"
+    }
+  ],
+  "classification_hints": {"cashos": {"category_hint": "식비", "institution_hint": null, "payment_method_hint": "card"}},
+  "links": [{"receipt_line_id": "line-1", "nutrition_client_key": "food-1"}],
+  "projection_targets": ["pricetrace_receipt", "fitness_nutrition", "fitness_meal"],
+  "review": {"status": "ready", "blocking_issues": [], "warnings": []}
+}

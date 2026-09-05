@@ -555,7 +555,7 @@ fun ReceiptOcrContent(
                         signedInEmail = uiState.nutritionSignedInEmail,
                         isSigningIn = uiState.isNutritionSigningIn,
                         isPublishing = uiState.isNutritionPublishing,
-                        isCanonicalReview = uiState.isCanonicalIngestion && uiState.receipt != null,
+                        isCanonicalReview = uiState.isCanonicalIngestion,
                         onBack = onBack,
                         onProductNameChanged = onNutritionProductNameChanged,
                         onBrandChanged = onNutritionBrandChanged,
@@ -969,10 +969,10 @@ private fun MerchantCandidateReviewScreen(
     }
 }
 
-private fun com.pricetrace.receiptscanner.importer.ExternalJsonImportResult.externalSchemaLabel(): String = when (draft) {
+private fun com.pricetrace.receiptscanner.importer.ExternalJsonImportResult.externalSchemaLabel(): String = when (val value = draft) {
     is com.pricetrace.receiptscanner.importer.CanonicalDraft.Receipt -> ReceiptV2.SCHEMA_VERSION
     is com.pricetrace.receiptscanner.importer.CanonicalDraft.Nutrition -> "fitness-nutrition-draft.v1"
-    is com.pricetrace.receiptscanner.importer.CanonicalDraft.Envelope -> com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_SCHEMA
+    is com.pricetrace.receiptscanner.importer.CanonicalDraft.Envelope -> value.value.schemaVersion
 }
 @Composable
 private fun WorkflowSelector(

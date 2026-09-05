@@ -7,7 +7,13 @@ import com.pricetrace.receiptocr.gemini.EncryptedGeminiApiKeyStore
 import com.pricetrace.receiptocr.gemini.GeminiApiKeyStore
 import com.pricetrace.receiptocr.fitness.AndroidNutritionSupabaseStore
 import com.pricetrace.receiptocr.fitness.FitnessCanonicalProjectionSubmitter
+import com.pricetrace.receiptocr.fitness.FitnessMealProjectionSubmitter
+import com.pricetrace.receiptocr.fitness.FitnessProductNutritionLinkProjectionSubmitter
 import com.pricetrace.receiptocr.fitness.NutritionSupabaseGateway
+import com.pricetrace.receiptocr.fitness.NutritionGatewayFailure
+import com.pricetrace.receiptocr.fitness.ProductRevisionReadOutcome
+import com.pricetrace.receiptocr.fitness.ProductRevisionReadResult
+import com.pricetrace.receiptocr.fitness.PriceTraceProductRevisionReader
 import com.pricetrace.receiptocr.pricetrace.AndroidPriceTraceSupabaseStore
 import com.pricetrace.receiptocr.pricetrace.AndroidCashOsSupabaseStore
 import com.pricetrace.receiptocr.pricetrace.AndroidCashOsLedgerSelectionStore
@@ -15,6 +21,7 @@ import com.pricetrace.receiptocr.pricetrace.CashOsCanonicalProjectionSubmitter
 import com.pricetrace.receiptocr.pricetrace.PriceTraceCanonicalGateway
 import com.pricetrace.receiptocr.pricetrace.PriceTraceCanonicalProjectionSubmitter
 import com.pricetrace.receiptocr.pricetrace.PriceObservationGateway
+import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
 import com.pricetrace.receiptscanner.capture.MlKitDocumentCaptureProvider
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionSuggester
 import com.pricetrace.receiptscanner.export.ReceiptExportService
@@ -76,11 +83,28 @@ class AppContainer(application: Application) {
     internal val cashOsLedgerSelectionStore = AndroidCashOsLedgerSelectionStore(application)
     internal val cashOsReceiptGateway = com.pricetrace.receiptocr.pricetrace.CashOsReceiptGateway(cashOsSupabaseStore)
     internal val priceTraceCanonicalGateway = PriceTraceCanonicalGateway(priceTraceSupabaseStore)
+    private val productRevisionReader = PriceTraceProductRevisionReader { catalogProductId ->
+        when (val result = priceTraceCanonicalGateway.readExactProductRevision(catalogProductId)) {
+            is com.pricetrace.receiptocr.pricetrace.PriceTraceProductReadOutcome.Success ->
+                ProductRevisionReadOutcome.Success(ProductRevisionReadResult(result.revision))
+            is com.pricetrace.receiptocr.pricetrace.PriceTraceProductReadOutcome.Failure ->
+                ProductRevisionReadOutcome.Failure(
+                    reason = result.kind.toNutritionGatewayFailure(),
+                    message = result.message,
+                )
+        }
+    }
     internal val canonicalProjectionSubmitters: Map<IngestionProjection, IngestionProjectionSubmitter> = mapOf(
         IngestionProjection.PRICETRACE_RECEIPT to PriceTraceCanonicalProjectionSubmitter(priceTraceCanonicalGateway),
         IngestionProjection.PRICETRACE_PRICE_OBSERVATION to PriceTraceCanonicalProjectionSubmitter(priceTraceCanonicalGateway),
         IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE to PriceTraceCanonicalProjectionSubmitter(priceTraceCanonicalGateway),
+        IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE to com.pricetrace.receiptocr.pricetrace.PriceTraceProductCandidateProjectionSubmitter(priceTraceCanonicalGateway),
         IngestionProjection.FITNESS_NUTRITION to FitnessCanonicalProjectionSubmitter(nutritionGateway),
+        IngestionProjection.FITNESS_MEAL to FitnessMealProjectionSubmitter(nutritionGateway),
+        IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK to FitnessProductNutritionLinkProjectionSubmitter(
+            nutritionGateway = nutritionGateway,
+            productRevisionReader = productRevisionReader,
+        ),
         IngestionProjection.CASHOS_RECEIPT to CashOsCanonicalProjectionSubmitter(cashOsReceiptGateway),
     )
     internal val ingestionOrchestrator = IngestionOrchestrator(
@@ -92,4 +116,15 @@ class AppContainer(application: Application) {
         queue = priceObservationQueue,
         submitter = priceObservationGateway,
     )
+}
+
+private fun PriceObservationFailureKind.toNutritionGatewayFailure(): NutritionGatewayFailure = when (this) {
+    PriceObservationFailureKind.NOT_CONFIGURED -> NutritionGatewayFailure.NOT_CONFIGURED
+    PriceObservationFailureKind.AUTHENTICATION -> NutritionGatewayFailure.AUTHENTICATION
+    PriceObservationFailureKind.NETWORK,
+    PriceObservationFailureKind.NETWORK_TIMEOUT -> NutritionGatewayFailure.NETWORK
+    PriceObservationFailureKind.SERVER -> NutritionGatewayFailure.SERVER
+    PriceObservationFailureKind.IDEMPOTENCY_MISMATCH,
+    PriceObservationFailureKind.INVALID_SELECTION,
+    PriceObservationFailureKind.CONTRACT -> NutritionGatewayFailure.CONTRACT
 }

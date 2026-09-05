@@ -1,11 +1,15 @@
 package com.pricetrace.receiptocr.pricetrace
 
 import com.pricetrace.receiptscanner.domain.ReceiptV2
+import com.pricetrace.receiptscanner.domain.StableIds
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
+import com.pricetrace.receiptscanner.ingestion.ProductCandidate
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
+import com.pricetrace.receiptscanner.ingestion.PriceTraceProductIdentityJson
+import com.pricetrace.receiptscanner.publisher.PriceObservationJson
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import kotlinx.coroutines.CancellationException
@@ -25,6 +29,11 @@ import java.net.SocketTimeoutException
 sealed interface PriceTraceCanonicalOutcome {
     data class Success(val response: JsonObject) : PriceTraceCanonicalOutcome
     data class Failure(val kind: PriceObservationFailureKind, val message: String? = null) : PriceTraceCanonicalOutcome
+}
+
+sealed interface PriceTraceProductReadOutcome {
+    data class Success(val revision: String) : PriceTraceProductReadOutcome
+    data class Failure(val kind: PriceObservationFailureKind, val message: String? = null) : PriceTraceProductReadOutcome
 }
 
 /** PriceTrace's verified receipt.v2 and merchant-only candidate RPC boundary. */
@@ -48,6 +57,70 @@ internal class PriceTraceCanonicalGateway(
         if (first !is PriceTraceCanonicalOutcome.Failure || first.kind != PriceObservationFailureKind.AUTHENTICATION) return first
         val refreshed = refresh(initial) ?: return first
         return submitMerchantOnce(idempotencyKey, merchant, refreshed)
+    }
+
+    suspend fun submitProductCandidates(
+        idempotencyKey: String,
+        candidates: List<ProductCandidate>,
+    ): PriceTraceCanonicalOutcome {
+        val initial = store.read()
+        if (!initial.isSignedIn) return PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
+        val first = submitProductCandidatesOnce(idempotencyKey, candidates, initial)
+        if (first !is PriceTraceCanonicalOutcome.Failure || first.kind != PriceObservationFailureKind.AUTHENTICATION) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return submitProductCandidatesOnce(idempotencyKey, candidates, refreshed)
+    }
+
+    /** Reads the exact PriceTrace product revision required by the cross-service link contract. */
+    suspend fun readExactProductRevision(catalogProductId: String): PriceTraceProductReadOutcome {
+        val initial = store.read()
+        if (!initial.isSignedIn) return PriceTraceProductReadOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
+        val first = readExactProductRevisionOnce(catalogProductId, initial)
+        if (first !is PriceTraceProductReadOutcome.Failure ||
+            first.kind != PriceObservationFailureKind.AUTHENTICATION
+        ) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return readExactProductRevisionOnce(catalogProductId, refreshed)
+    }
+
+    private suspend fun readExactProductRevisionOnce(
+        catalogProductId: String,
+        config: PriceTraceSupabaseConfig,
+    ): PriceTraceProductReadOutcome {
+        return try {
+            val response = transport.execute(
+                request(
+                    config = config,
+                    method = "POST",
+                    path = "/rest/v1/rpc/get_product_read_v1",
+                    body = PriceObservationJson.encodeProductReadRequest(
+                        query = null,
+                        limit = 1,
+                        catalogProductId = catalogProductId,
+                    ),
+                ),
+            )
+            if (response.statusCode !in 200..299) {
+                return PriceTraceProductReadOutcome.Failure(classify(response), response.body.takeIf(String::isNotBlank))
+            }
+            val read = PriceObservationJson.decodeProductRead(response.body)
+            require(read.products.size == 1 && read.products.single().catalogProductId == catalogProductId) {
+                "PriceTrace exact product read did not return the requested catalog product"
+            }
+            PriceTraceProductReadOutcome.Success(read.revision)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: SocketTimeoutException) {
+            PriceTraceProductReadOutcome.Failure(PriceObservationFailureKind.NETWORK_TIMEOUT)
+        } catch (_: IOException) {
+            PriceTraceProductReadOutcome.Failure(PriceObservationFailureKind.NETWORK)
+        } catch (error: Exception) {
+            PriceTraceProductReadOutcome.Failure(PriceObservationFailureKind.CONTRACT, error.message)
+        }
     }
 
     private suspend fun submitReceiptOnce(
@@ -118,16 +191,118 @@ internal class PriceTraceCanonicalGateway(
         PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.CONTRACT, error.message)
     }
 
+    private suspend fun submitProductCandidatesOnce(
+        idempotencyKey: String,
+        candidates: List<ProductCandidate>,
+        config: PriceTraceSupabaseConfig,
+    ): PriceTraceCanonicalOutcome = try {
+        require(candidates.isNotEmpty()) { "product_candidates_required" }
+        val responses = mutableListOf<JsonObject>()
+        candidates.forEach { candidate ->
+            val candidateKey = StableIds.sha256("$idempotencyKey|candidate=${candidate.clientKey}")
+            val body = buildJsonObject {
+                put("p_idempotency_key", JsonPrimitive(candidateKey))
+                put("p_candidate", productCandidateJson(candidate))
+            }.encode()
+            // The RPC is a PriceTrace-owned contract. The OCR-App sends facts only;
+            // CatalogProduct IDs and product revisions are accepted only from its response.
+            val response = transport.execute(
+                request(config, "POST", "/rest/v1/rpc/submit_product_candidate_v1", body = body),
+            )
+            if (response.statusCode !in 200..299) {
+                return PriceTraceCanonicalOutcome.Failure(
+                    classify(response),
+                    response.body.takeIf(String::isNotBlank),
+                )
+            }
+            responses += decodeResponse(response.body)
+        }
+        val products = candidates.zip(responses).mapNotNull { (candidate, response) ->
+            response.requiredStringOrNull("catalogProductId", "catalog_product_id")?.let { catalogId ->
+                buildJsonObject {
+                    put("clientKey", JsonPrimitive(candidate.clientKey))
+                    put("catalogProductId", JsonPrimitive(catalogId))
+                    put("productRevision", response["productRevision"] ?: response["product_revision"] ?: JsonNull)
+                }
+            }
+        }
+        PriceTraceCanonicalOutcome.Success(buildJsonObject {
+            put("schemaVersion", JsonPrimitive("product-candidate.v1"))
+            put("contract", JsonPrimitive("PRICETRACE_PRODUCT_CANDIDATE"))
+            put("responses", JsonArray(responses))
+            put("products", JsonArray(products))
+        })
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: SocketTimeoutException) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NETWORK_TIMEOUT)
+    } catch (_: IOException) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NETWORK)
+    } catch (error: Exception) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.CONTRACT, error.message)
+    }
+
+    private fun productCandidateJson(candidate: ProductCandidate): JsonObject = buildJsonObject {
+        put("schema_version", JsonPrimitive("PRICETRACE_PRODUCT_CANDIDATE"))
+        put("contract_version", JsonPrimitive("product-candidate.v1"))
+        put("source_app", JsonPrimitive("pricetrace_ocr_app"))
+        put("source_version", candidate.sourceVersion?.let(::JsonPrimitive) ?: JsonNull)
+        put("candidate_type", JsonPrimitive(candidate.candidateType))
+        put("product_name", JsonPrimitive(candidate.productName))
+        put("brand", candidate.effectiveBrand?.let(::JsonPrimitive) ?: JsonNull)
+        put("manufacturer", candidate.manufacturer?.let(::JsonPrimitive) ?: JsonNull)
+        put("specification", candidate.specification?.let(::JsonPrimitive) ?: JsonNull)
+        put("content_amount", candidate.contentAmount?.let(::JsonPrimitive) ?: JsonNull)
+        put("content_unit", candidate.contentUnit?.let(::JsonPrimitive) ?: JsonNull)
+        put("package_count", candidate.packageCount?.let(::JsonPrimitive) ?: JsonNull)
+        put("variant", candidate.variant?.let(::JsonPrimitive) ?: JsonNull)
+        put("identifiers", JsonArray(candidateIdentifiers(candidate)))
+        put("evidence", JsonArray(candidate.evidence.flatMap { evidence ->
+            evidence.sourceAttachmentIds.map { attachmentId -> buildJsonObject {
+                put("source_type", JsonPrimitive(evidence.sourceType))
+                put("source_ref", JsonPrimitive(evidence.sourceRef ?: evidence.source ?: attachmentId))
+                put("field", JsonPrimitive(evidence.field))
+                put("observed_value", evidence.observedValue?.let(::JsonPrimitive)
+                    ?: JsonPrimitive(candidate.productName))
+                evidence.contentHash?.takeIf { it.matches(Regex("^sha256:[a-f0-9]{64}$")) }
+                    ?.let { put("content_hash", JsonPrimitive(it)) }
+            }}
+        }))
+        put("provenance", buildJsonObject {
+            candidate.evidence.firstOrNull()?.sourceAttachmentIds?.firstOrNull()
+                ?.let { put("capture_id", JsonPrimitive(it)) }
+            put("extraction_method", JsonPrimitive("mixed"))
+            put("extractor", JsonPrimitive("ocr-app"))
+            candidate.sourceVersion?.let { put("extractor_version", JsonPrimitive(it)) }
+            candidate.sourceVersion?.let { put("source_revision", JsonPrimitive(it)) }
+        })
+    }
+
+    private fun candidateIdentifiers(candidate: ProductCandidate): List<JsonObject> {
+        val values = linkedMapOf<String, String>()
+        candidate.barcode?.let { values["gtin"] = it }
+        candidate.ean?.let { values["ean"] = it }
+        candidate.upc?.let { values["upc"] = it }
+        return values.map { (scheme, value) -> buildJsonObject {
+            put("scheme", JsonPrimitive(scheme))
+            put("value", JsonPrimitive(value))
+        }}
+    }
+
     private fun decodeResponse(value: String): JsonObject {
         val element = json.parseToJsonElement(value)
         val row = when (element) {
             is JsonObject -> element
             else -> element.jsonArray.single().jsonObject
         }
-        require((row["receiptId"] ?: row["candidateId"]) is JsonPrimitive) {
-            "PriceTrace canonical response is missing receiptId/candidateId"
+        require(listOf("receiptId", "candidateId", "catalogProductId").any { row[it] is JsonPrimitive }) {
+            "PriceTrace canonical response is missing receiptId/candidateId/catalogProductId"
         }
         return row
+    }
+
+    private fun JsonObject.requiredStringOrNull(vararg keys: String): String? = keys.firstNotNullOfOrNull { key ->
+        (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
     }
 
     private fun classify(response: PriceObservationHttpResponse): PriceObservationFailureKind {

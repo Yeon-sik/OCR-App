@@ -1,0 +1,111 @@
+{
+  "schema_version": "yeonsik-ocr.v2",
+  "mode": "packaged_product",
+  "source": {
+    "producer": "chatgpt",
+    "source_files": [
+      {"id": "product-photo-1", "type": "product_photo", "label": "상품 정면 사진"},
+      {"id": "nutrition-label-1", "type": "nutrition_label", "label": "영양성분표"}
+    ],
+    "user_text": "완제품 상품 사진과 영양성분표"
+  },
+  "merchant_candidate": null,
+  "receipt": null,
+  "nutrition": [
+    {
+      "client_key": "product-1",
+      "kind": "product_label",
+      "line_id": null,
+      "menu_name": null,
+      "payload": {
+        "schema_version": "fitness-nutrition-draft.v1",
+        "document_id": "nutrition-label-source-1",
+        "parser_version": "nutrition-label-parser.v2",
+        "status": "parsed",
+        "confirmed_at": null,
+        "name": "Test cereal",
+        "brand": "Test brand",
+        "kind": "external_menu",
+        "category": "cereal",
+        "basis_amount": 100,
+        "basis_unit": "g",
+        "prep_state": "unspecified",
+        "cooking_method": "unspecified",
+        "nutrients": {
+          "calories_kcal": 380,
+          "protein_grams": 10,
+          "carbs_grams": 70,
+          "fat_grams": 5,
+          "sodium_mg": 100,
+          "saturated_fat_grams": 1,
+          "sugars_grams": 12,
+          "fiber_grams": null,
+          "added_sugars_grams": null,
+          "trans_fat_grams": null,
+          "cholesterol_mg": null
+        },
+        "source_type": "product_label_ocr",
+        "source_reference": "ocr-document:nutrition-label-source-1",
+        "source_version": "nutrition-label-parser.v2",
+        "data_version": 2,
+        "visibility": "private",
+        "parse_warnings": [],
+        "evidence": {}
+      },
+      "estimate": null
+    }
+  ],
+  "product_candidates": [
+    {
+      "client_key": "product-1",
+      "product_name": "Test cereal",
+      "brand": "Test brand",
+      "manufacturer": "Test Foods",
+      "specification": "Original",
+      "content_amount": 500,
+      "content_unit": "g",
+      "package_count": 1,
+      "variant": "Original",
+      "barcode": "8801234567890",
+      "ean": null,
+      "upc": null,
+      "candidate_type": "retail_product",
+      "source_version": "chatgpt-vision-v2",
+      "evidence": [
+        {
+          "source_attachment_ids": ["product-photo-1"],
+          "source": "상품 정면 사진",
+          "source_type": "product_photo",
+          "source_ref": "product-photo-1",
+          "field": "product_name",
+          "observed_value": "Test cereal",
+          "content_hash": null
+        }
+      ]
+    }
+  ],
+  "consumption": [
+    {
+      "client_key": "meal-1",
+      "consumed_at": "2026-08-27T08:10:00+09:00",
+      "items": [
+        {
+          "nutrition_client_key": "product-1",
+          "amount": 40,
+          "unit": "g",
+          "confidence": 0.92
+        }
+      ],
+      "status": "user_verified"
+    }
+  ],
+  "classification_hints": {"cashos": {}},
+  "links": [],
+  "projection_targets": [
+    "pricetrace_product_candidate",
+    "fitness_nutrition",
+    "fitness_meal",
+    "fitness_product_nutrition_link"
+  ],
+  "review": {"status": "ready", "blocking_issues": [], "warnings": []}
+}
