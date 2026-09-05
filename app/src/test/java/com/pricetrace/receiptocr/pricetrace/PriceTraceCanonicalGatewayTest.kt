@@ -109,7 +109,7 @@ class PriceTraceCanonicalGatewayTest {
         val transport = QueueTransport(
             PriceObservationHttpResponse(
                 200,
-                """{"receiptId":"receipt-1","observationIds":[],"lines":[{"sourceLineId":"line-1","observationId":null,"restaurantObservationId":null,"resolutionStatus":"unresolved_catalog"}]}""",
+                """{"receiptId":"receipt-1","storeId":"store-1","restaurantId":"restaurant-1","restaurantLocationId":"location-1","observationIds":[],"lines":[{"sourceLineId":"line-1","receiptItemId":"item-1","productId":"product-1","storeProductId":"store-product-1","catalogProductId":"catalog-1","restaurantMenuId":"menu-1","observationId":null,"restaurantObservationId":null,"resolutionStatus":"unresolved_catalog"}]}""",
             ),
             PriceObservationHttpResponse(
                 200,
@@ -132,7 +132,7 @@ class PriceTraceCanonicalGatewayTest {
             ingestionId = "ingestion-1",
             projection = projection,
             canonicalPayload = YeonsikOcrEnvelopeJson.encode(envelope),
-            resolvedIdentity = emptyMap(),
+            resolvedIdentity = null,
             idempotencyKey = "projection-key-" + projection.wireValue,
             envelope = envelope,
             localDocumentId = "ocr-local-only",
@@ -144,6 +144,25 @@ class PriceTraceCanonicalGatewayTest {
             as ProjectionSubmission.Success
         assertTrue(receiptResult.primaryUploaded)
         assertTrue(receiptResult.alsoUploaded.isEmpty())
+        assertEquals(
+            PriceTraceIdentity(
+                receiptId = "receipt-1",
+                storeId = "store-1",
+                restaurantId = "restaurant-1",
+                restaurantLocationId = "location-1",
+                lines = listOf(
+                    PriceTraceLineIdentity(
+                        sourceLineId = "line-1",
+                        receiptItemId = "item-1",
+                        productId = "product-1",
+                        storeProductId = "store-product-1",
+                        catalogProductId = "catalog-1",
+                        restaurantMenuId = "menu-1",
+                    ),
+                ),
+            ),
+            PriceTraceIdentityJson.tryDecode(receiptResult.metadataJson),
+        )
 
         val completeObservationResult = submitter.submit(request(IngestionProjection.PRICETRACE_PRICE_OBSERVATION))
             as ProjectionSubmission.Success

@@ -6,6 +6,7 @@ import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
+import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonArray
@@ -25,6 +26,10 @@ internal class FitnessCanonicalProjectionSubmitter(
         if (envelope.nutrition.isEmpty()) {
             return ProjectionSubmission.Failure("nutrition_artifact_missing", retryable = false)
         }
+        if (envelope.receipt != null && request.resolvedIdentity?.priceTrace == null) {
+            return ProjectionSubmission.Failure("pricetrace_identity_missing", retryable = false)
+        }
+        val priceTraceIdentity = request.resolvedIdentity?.priceTrace?.let(PriceTraceIdentityJson::encode)
 
         val responses = mutableListOf<String>()
         var lastFoodId: String? = null
@@ -39,6 +44,7 @@ internal class FitnessCanonicalProjectionSubmitter(
                         draft = item.draft,
                         // submitProjection() verifies the persisted envelope fingerprint first.
                         envelopeVerified = false,
+                        priceTraceIdentity = priceTraceIdentity,
                     )
                     is IngestionNutrition.RestaurantEstimate -> {
                         val restaurantName = envelope.receipt?.merchant?.name
@@ -53,6 +59,7 @@ internal class FitnessCanonicalProjectionSubmitter(
                             idempotencyKey = itemKey,
                             restaurantName = restaurantName,
                             item = item,
+                            priceTraceIdentity = priceTraceIdentity,
                         )
                     }
                 }

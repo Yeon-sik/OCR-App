@@ -29,6 +29,9 @@ data class CashOsReceiptIngestV3Item(
     val restaurantMenuId: String? = null,
     val catalogProductId: String? = null,
     val priceTraceCatalogProductId: String? = null,
+    val priceTraceProductId: String? = null,
+    val priceTraceStoreProductId: String? = null,
+    val priceTraceIdentity: JsonObject? = null,
     val nutritionFoodId: String? = null,
 ) {
     init {
@@ -56,9 +59,12 @@ data class CashOsReceiptIngestV3Payload(
     val purchaseLocalDate: String,
     val purchaseLocalTime: String?,
     val grandTotalAmountKrw: Long,
+    val priceTraceStoreId: String,
     val items: List<CashOsReceiptIngestV3Item>,
     val restaurantId: String? = null,
     val restaurantLocationId: String? = null,
+    /** Full PriceTrace authority response; nested in items for compatibility with the v3 RPC. */
+    val priceTraceIdentity: JsonObject? = null,
     val categoryHint: String? = null,
     val paymentMethodHint: String? = null,
     val institutionHint: String? = null,
@@ -74,6 +80,13 @@ data class CashOsReceiptIngestV3Payload(
         require(merchantName.isNotBlank() && merchantName.length <= 500)
         require(branchName == null || branchName.length <= 500)
         require(grandTotalAmountKrw >= 0)
+        require(
+            priceTraceStoreId.isNotBlank() &&
+                priceTraceStoreId == priceTraceStoreId.trim() &&
+                priceTraceStoreId.length <= 200 &&
+                !priceTraceStoreId.startsWith("http://", ignoreCase = true) &&
+                !priceTraceStoreId.startsWith("https://", ignoreCase = true),
+        ) { "priceTraceStoreId must be an opaque identity" }
         require(items.isNotEmpty() && items.size <= 200)
     }
 
@@ -111,6 +124,7 @@ object CashOsReceiptIngestV3Json {
             put("p_purchase_local_date", JsonPrimitive(payload.purchaseLocalDate))
             put("p_purchase_local_time", payload.purchaseLocalTime?.let(::JsonPrimitive) ?: JsonNull)
             put("p_grand_total_amount_krw", JsonPrimitive(payload.grandTotalAmountKrw))
+            put("p_price_trace_store_id", JsonPrimitive(payload.priceTraceStoreId))
             put("p_category_hint", payload.categoryHint?.let(::JsonPrimitive) ?: JsonNull)
             put("p_payment_method_hint", payload.paymentMethodHint?.let(::JsonPrimitive) ?: JsonNull)
             put("p_institution_hint", payload.institutionHint?.let(::JsonPrimitive) ?: JsonNull)
@@ -133,6 +147,15 @@ object CashOsReceiptIngestV3Json {
                         put("restaurant_menu_id", item.restaurantMenuId?.let(::JsonPrimitive) ?: JsonNull)
                         put("catalog_product_id", item.catalogProductId?.let(::JsonPrimitive) ?: JsonNull)
                         put("pricetrace_catalog_product_id", item.priceTraceCatalogProductId?.let(::JsonPrimitive) ?: JsonNull)
+                        if (item.priceTraceProductId != null) {
+                            put("pricetrace_product_id", JsonPrimitive(item.priceTraceProductId))
+                        }
+                        if (item.priceTraceStoreProductId != null) {
+                            put("pricetrace_store_product_id", JsonPrimitive(item.priceTraceStoreProductId))
+                        }
+                        if (item.priceTraceIdentity != null || payload.priceTraceIdentity != null) {
+                            put("pricetrace_identity", item.priceTraceIdentity ?: payload.priceTraceIdentity ?: JsonNull)
+                        }
                         put("nutrition_food_id", item.nutritionFoodId?.let(::JsonPrimitive) ?: JsonNull)
                     })
                 }

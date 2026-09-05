@@ -249,6 +249,7 @@ data class ReceiptAppUiState(
     val isSubmittingPriceObservation: Boolean = false,
     val isSubmittingRestaurantReceipt: Boolean = false,
     val isSubmittingCanonicalPriceTrace: Boolean = false,
+    val isSubmittingCanonicalAllReady: Boolean = false,
     val canonicalPriceTraceReceiptId: String? = null,
     val canonicalPriceTraceLastError: String? = null,
     val restaurantReceiptId: String? = null,
@@ -1503,6 +1504,75 @@ class ReceiptAppViewModel(
         }
     }
 
+    fun submitAllReadyCanonicalProjections() {
+        val state = mutableUiState.value
+        if (!state.isCanonicalIngestion || state.isSubmittingCanonicalAllReady) return
+        val receipt = state.receipt
+        val documentId = state.currentDocumentId
+            ?: receipt?.document?.requireLocalDocumentId()
+            ?: return
+        val receiptVerified = receipt?.document?.source?.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
+        val nutritionVerified = state.canonicalNutritionCount > 0 &&
+            state.canonicalNutritionVerifiedCount == state.canonicalNutritionCount
+        if (!receiptVerified && (receipt != null || !nutritionVerified)) {
+            mutableUiState.value = state.copy(
+                message = "Verify the canonical receipt or nutrition artifacts before submitting ready projections.",
+            )
+            return
+        }
+        viewModelScope.launch {
+            val envelope = loadIngestionEnvelope(documentId)
+            if (envelope == null) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = "The canonical envelope for ready projections was not found.",
+                )
+                return@launch
+            }
+            mutableUiState.value = mutableUiState.value.copy(
+                isSubmittingCanonicalAllReady = true,
+                isSubmittingCanonicalPriceTrace = envelope.receipt != null,
+                isSubmittingCashOsReceipt = envelope.receipt != null,
+                isNutritionPublishing = envelope.nutrition.isNotEmpty(),
+                message = null,
+            )
+            try {
+                val projections = ingestionOrchestrator.submitAllReadyProjections(
+                    ingestionId = ingestionIdFor(documentId),
+                    envelope = envelope,
+                )
+                projections
+                    .filter { it.status != ProjectionStatus.DISABLED }
+                    .forEach { projection ->
+                        applyCanonicalProjectionStateToUi(
+                            projection = projection.projection,
+                            state = projection,
+                            message = canonicalProjectionMessage(projection.projection, projection),
+                        )
+                    }
+                val uploaded = projections.count { it.status == ProjectionStatus.UPLOADED }
+                val blocked = projections.count { it.status == ProjectionStatus.BLOCKED }
+                val failed = projections.count { it.status == ProjectionStatus.FAILED }
+                mutableUiState.value = mutableUiState.value.copy(
+                    isSubmittingCanonicalAllReady = false,
+                    isSubmittingCanonicalPriceTrace = false,
+                    isSubmittingCashOsReceipt = false,
+                    isNutritionPublishing = false,
+                    message = "Ready canonical projections processed: $uploaded uploaded, $blocked blocked, $failed failed.",
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    isSubmittingCanonicalAllReady = false,
+                    isSubmittingCanonicalPriceTrace = false,
+                    isSubmittingCashOsReceipt = false,
+                    isNutritionPublishing = false,
+                    message = error.message ?: "Ready canonical projections could not be completed.",
+                )
+            }
+        }
+    }
+
     /** Opens the nutrition artifact review without publishing anything to Fitness. */
     fun showCanonicalNutritionReview() {
         val state = mutableUiState.value
@@ -1991,6 +2061,56 @@ class ReceiptAppViewModel(
         return state
     }
 
+    private fun applyCanonicalProjectionStateToUi(
+        projection: IngestionProjection,
+        state: ProjectionState,
+        message: String?,
+    ) {
+        val metadata = state.metadataObject()
+        val current = mutableUiState.value
+        mutableUiState.value = when (projection) {
+            IngestionProjection.CASHOS_RECEIPT -> current.copy(
+                isSubmittingCashOsReceipt = false,
+                cashOsLedgerEntryId = metadata?.stringValue("ledger_entry_id") ?: current.cashOsLedgerEntryId,
+                cashOsReceiptId = state.remoteId ?: current.cashOsReceiptId,
+                cashOsAccountResolution = metadata?.stringValue("account_resolution") ?: current.cashOsAccountResolution,
+                cashOsAccountCandidateIds = metadata?.stringValues("account_candidate_ids") ?: current.cashOsAccountCandidateIds,
+                cashOsReceiptLastError = state.lastError,
+                message = message,
+            )
+            IngestionProjection.PRICETRACE_RECEIPT -> current.copy(
+                isSubmittingRestaurantReceipt = false,
+                isSubmittingCanonicalPriceTrace = false,
+                canonicalPriceTraceReceiptId = state.remoteId ?: current.canonicalPriceTraceReceiptId,
+                canonicalPriceTraceLastError = state.lastError,
+                restaurantReceiptId = state.remoteId ?: current.restaurantReceiptId,
+                restaurantReceiptLastError = state.lastError,
+                message = message,
+            )
+            IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> current.copy(
+                isSubmittingMerchantCandidate = false,
+                merchantCandidateId = state.remoteId ?: current.merchantCandidateId,
+                merchantCandidateLastError = state.lastError,
+                message = message,
+            )
+            IngestionProjection.FITNESS_NUTRITION -> current.copy(
+                isNutritionPublishing = false,
+                message = message,
+            )
+            else -> current.copy(message = message)
+        }
+    }
+
+    private fun canonicalProjectionMessage(
+        projection: IngestionProjection,
+        state: ProjectionState,
+    ): String? = when (state.status) {
+        ProjectionStatus.UPLOADED -> "${projection.wireValue} canonical projection completed.${state.remoteId?.let { " ($it)" }.orEmpty()}"
+        ProjectionStatus.BLOCKED -> "${projection.wireValue} projection is blocked: ${state.lastError.orEmpty()}"
+        ProjectionStatus.FAILED -> "${projection.wireValue} projection failed. Retry with the same idempotency key."
+        else -> state.lastError
+    }
+
     private fun ProjectionState.metadataObject(): kotlinx.serialization.json.JsonObject? = metadataJson?.let { value ->
         runCatching { Json.parseToJsonElement(value).jsonObject }.getOrNull()
     }
@@ -2134,6 +2254,10 @@ class ReceiptAppViewModel(
             IngestionProjection.FITNESS_NUTRITION -> envelope.nutrition
                 .map { IngestionArtifactKeys.nutrition(it.clientKey) }
                 .toSet()
+            IngestionProjection.FITNESS_MEAL -> buildSet {
+                addAll(envelope.nutrition.map { IngestionArtifactKeys.nutrition(it.clientKey) })
+                addAll(envelope.consumption.map { IngestionArtifactKeys.consumption(it.clientKey) })
+            }
             IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> setOf(IngestionArtifactKeys.MERCHANT_CANDIDATE)
         }
         val result = IngestionEvidenceGate.evaluate(

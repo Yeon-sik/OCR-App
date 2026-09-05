@@ -187,6 +187,8 @@ fun ReceiptOcrContent(
     canonicalPriceTraceReceiptId: String? = null,
     canonicalPriceTraceLastError: String? = null,
     onSubmitCanonicalPriceTrace: () -> Unit = {},
+    isSubmittingCanonicalAllReady: Boolean = false,
+    onSubmitAllReadyCanonicalProjections: () -> Unit = {},
     merchantCandidate: MerchantCandidate? = null,
     merchantCandidateVerified: Boolean = false,
     isSubmittingMerchantCandidate: Boolean = false,
@@ -486,6 +488,8 @@ fun ReceiptOcrContent(
                     canonicalPriceTraceReceiptId = uiState.canonicalPriceTraceReceiptId,
                     canonicalPriceTraceLastError = uiState.canonicalPriceTraceLastError,
                     onSubmitCanonicalPriceTrace = onSubmitCanonicalPriceTrace,
+                    isSubmittingCanonicalAllReady = uiState.isSubmittingCanonicalAllReady,
+                    onSubmitAllReadyCanonicalProjections = onSubmitAllReadyCanonicalProjections,
                     cashOsSignedInEmail = uiState.cashOsSignedInEmail,
                     cashOsLedgerEntryId = uiState.cashOsLedgerEntryId,
                     cashOsLedgerCandidates = uiState.cashOsLedgerCandidates,
@@ -2985,6 +2989,8 @@ fun JsonPreviewScreen(
     canonicalPriceTraceReceiptId: String? = null,
     canonicalPriceTraceLastError: String? = null,
     onSubmitCanonicalPriceTrace: () -> Unit = {},
+    isSubmittingCanonicalAllReady: Boolean = false,
+    onSubmitAllReadyCanonicalProjections: () -> Unit = {},
     cashOsSignedInEmail: String? = null,
     cashOsLedgerEntryId: String? = null,
     cashOsLedgerCandidates: List<CashOsLedgerCandidate> = emptyList(),
@@ -3000,6 +3006,8 @@ fun JsonPreviewScreen(
     val verified = receipt?.document?.source?.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
     val canonicalNutritionVerified = canonicalNutritionCount > 0 &&
         canonicalNutritionVerifiedCount == canonicalNutritionCount
+    val canSubmitCanonicalAllReady = verified ||
+        (receipt == null && canonicalNutritionVerified)
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("json_preview"),
         contentPadding = PaddingValues(20.dp),
@@ -3077,7 +3085,7 @@ fun JsonPreviewScreen(
                 OutlinedButton(
                     onClick = onSubmitCanonicalPriceTrace,
                     enabled = verified && priceTraceSignedInEmail != null &&
-                        !isExporting && !isSubmittingCanonicalPriceTrace,
+                        !isExporting && !isSubmittingCanonicalPriceTrace && !isSubmittingCanonicalAllReady,
                     modifier = Modifier.fillMaxWidth().testTag("pricetrace_canonical_submit_button"),
                 ) {
                     if (isSubmittingCanonicalPriceTrace) BusyIndicator()
@@ -3090,6 +3098,26 @@ fun JsonPreviewScreen(
                         canonicalPriceTraceLastError != null -> "PriceTrace 재시도 필요 · $canonicalPriceTraceLastError"
                         else -> "검수된 전체 receipt.v2를 source images/raw text/payment reference 없이 제출합니다."
                     },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            item {
+                Button(
+                    onClick = onSubmitAllReadyCanonicalProjections,
+                    enabled = canSubmitCanonicalAllReady &&
+                        !isExporting &&
+                        !isSubmittingCanonicalAllReady &&
+                        !isSubmittingCanonicalPriceTrace &&
+                        !isSubmittingCanonicalNutrition &&
+                        !isSubmittingCashOsReceipt,
+                    modifier = Modifier.fillMaxWidth().testTag("canonical_submit_all_ready_button"),
+                ) {
+                    if (isSubmittingCanonicalAllReady) BusyIndicator()
+                    Text("준비된 canonical projection 모두 제출")
+                }
+                Text(
+                    "PriceTrace identity 확정 후 price observation, CashOS, Fitness를 의존성 순서로 제출합니다. 성공한 대상은 재전송하지 않습니다.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -3112,7 +3140,7 @@ fun JsonPreviewScreen(
             item {
                 OutlinedButton(
                     onClick = onShowCanonicalNutritionReview,
-                    enabled = !isExporting && !isSubmittingCanonicalNutrition,
+                    enabled = !isExporting && !isSubmittingCanonicalNutrition && !isSubmittingCanonicalAllReady,
                     modifier = Modifier.fillMaxWidth().testTag("fitness_canonical_review_button"),
                 ) {
                     Text("관련 nutrition 원본 검수 열기")
@@ -3133,7 +3161,8 @@ fun JsonPreviewScreen(
                 Button(
                     onClick = onSubmitCanonicalNutrition,
                     enabled = canonicalNutritionVerified &&
-                        nutritionSignedInEmail != null && !isExporting && !isSubmittingCanonicalNutrition,
+                        nutritionSignedInEmail != null && !isExporting &&
+                        !isSubmittingCanonicalNutrition && !isSubmittingCanonicalAllReady,
                     modifier = Modifier.fillMaxWidth().testTag("fitness_canonical_submit_button"),
                 ) {
                     if (isSubmittingCanonicalNutrition) BusyIndicator()
@@ -3164,7 +3193,8 @@ fun JsonPreviewScreen(
         item {
             OutlinedButton(
                 onClick = onSubmitCashOsReceipt,
-                enabled = verified && cashOsSignedInEmail != null && !isExporting && !isSubmittingCashOsReceipt,
+                enabled = verified && cashOsSignedInEmail != null && !isExporting &&
+                    !isSubmittingCashOsReceipt && !isSubmittingCanonicalAllReady,
                 modifier = Modifier.fillMaxWidth().testTag("cashos_receipt_submit_button"),
             ) {
                 if (isSubmittingCashOsReceipt) BusyIndicator()

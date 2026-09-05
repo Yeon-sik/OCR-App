@@ -42,7 +42,13 @@ object YeonsikOcrEnvelopeJson {
     ): YeonsikOcrEnvelope {
         require(localDocumentId.isNotBlank())
         val root = json.parseToJsonElement(value).jsonObject
-        require((root.keys subtract TRUST_KEYS) in setOf(TOP_LEVEL_KEYS, TOP_LEVEL_KEYS - "projection_targets")) { "Unexpected or missing envelope keys" }
+        val suppliedKeys = root.keys subtract TRUST_KEYS
+        require(suppliedKeys in setOf(
+            TOP_LEVEL_KEYS,
+            TOP_LEVEL_KEYS - "projection_targets",
+            TOP_LEVEL_KEYS_WITH_CONSUMPTION,
+            TOP_LEVEL_KEYS_WITH_CONSUMPTION - "projection_targets",
+        )) { "Unexpected or missing envelope keys" }
         require(root.string("schema_version") == YEONSIK_OCR_SCHEMA)
         val mode = IngestionMode.fromWireValue(root.string("mode"))
         val source = decodeSource(root.objectValue("source"))
@@ -60,12 +66,15 @@ object YeonsikOcrEnvelopeJson {
         val nutrition = root.arrayValue("nutrition").map { element ->
             decodeNutrition(element, preservePersistedVerification)
         }
+        val consumption = root["consumption"]?.jsonArray?.map { element ->
+            decodeConsumption(element.jsonObject, preservePersistedVerification)
+        }.orEmpty()
         val merchant = root["merchant_candidate"]?.takeUnless { it == JsonNull }?.let { decodeMerchant(it.jsonObject) }
         val links = root.arrayValue("links").map { decodeLink(it.jsonObject) }
         val targets = root["projection_targets"]?.jsonArray?.map { IngestionProjection.fromWireValue(it.jsonPrimitive.content) }?.toSet().orEmpty()
         val hints = decodeHints(root.objectValue("classification_hints"))
-        validateMode(mode, merchant, receipt, nutrition, links)
-        validateTargets(merchant, targets, receipt, nutrition)
+        validateMode(mode, merchant, receipt, nutrition, consumption, links)
+        validateTargets(merchant, targets, receipt, nutrition, consumption)
         // External review state is descriptive only. A local user must perform verification again.
         return YeonsikOcrEnvelope(
             mode = mode,
@@ -73,6 +82,7 @@ object YeonsikOcrEnvelopeJson {
             merchantCandidate = merchant,
             receipt = receipt,
             nutrition = nutrition,
+            consumption = consumption,
             classificationHints = hints,
             links = links,
             targets = targets,
@@ -104,6 +114,7 @@ object YeonsikOcrEnvelopeJson {
             } ?: JsonNull,
         )
         put("nutrition", JsonArray(envelope.nutrition.map { item -> nutritionJson(item, canonicalIds) }))
+        put("consumption", JsonArray(envelope.consumption.map(::consumptionJson)))
         put("classification_hints", classificationHintsJson(envelope.classificationHints))
         put("links", JsonArray(envelope.links.map(::linkJson)))
         put("projection_targets", JsonArray(envelope.targets.sortedBy(IngestionProjection::wireValue).map { JsonPrimitive(it.wireValue) }))
@@ -197,6 +208,24 @@ object YeonsikOcrEnvelopeJson {
         }
     }
 
+    private fun decodeConsumption(
+        root: JsonObject,
+        preservePersistedVerification: Boolean,
+    ): IngestionConsumption {
+        val baseKeys = setOf("client_key", "nutrition_client_keys", "consumed_at")
+        require(root.keys == baseKeys || root.keys == baseKeys + "status")
+        val status = root["status"]?.let { element ->
+            ConsumptionVerificationStatus.fromWireValue(element.jsonPrimitive.content)
+        } ?: ConsumptionVerificationStatus.UNVERIFIED
+        return IngestionConsumption(
+            clientKey = root.string("client_key"),
+            nutritionClientKeys = root.arrayValue("nutrition_client_keys").strings().toSet(),
+            consumedAt = root.nullableString("consumed_at"),
+            status = status.takeIf { preservePersistedVerification }
+                ?: ConsumptionVerificationStatus.UNVERIFIED,
+        )
+    }
+
     private fun decodeEstimate(root: JsonObject): RestaurantNutritionEstimate {
         val legacyKeys = setOf("estimated", "confidence", "nutrients", "ranges")
         val canonicalKeys = legacyKeys + "provenance"
@@ -273,6 +302,7 @@ object YeonsikOcrEnvelopeJson {
         merchant: MerchantCandidate?,
         receipt: ReceiptV2?,
         nutrition: List<IngestionNutrition>,
+        consumption: List<IngestionConsumption>,
         links: List<IngestionLink>,
     ) {
         require(nutrition.map { it.clientKey }.distinct().size == nutrition.size) {
@@ -287,6 +317,15 @@ object YeonsikOcrEnvelopeJson {
             line != null && item?.lineId == line.id
         }) {
             "links must reference an existing receipt line and its nutrition artifact"
+        }
+        require(consumption.map { it.clientKey }.distinct().size == consumption.size) {
+            "consumption client_key values must be unique"
+        }
+        require(consumption.all { item ->
+            item.clientKey.isNotBlank() && item.nutritionClientKeys.isNotEmpty() &&
+                item.nutritionClientKeys.all { key -> nutrition.any { nutritionItem -> nutritionItem.clientKey == key } }
+        }) {
+            "consumption must reference existing nutrition artifacts"
         }
         when (mode) {
             IngestionMode.MERCHANT -> require(
@@ -318,6 +357,7 @@ object YeonsikOcrEnvelopeJson {
         targets: Set<IngestionProjection>,
         receipt: ReceiptV2?,
         nutrition: List<IngestionNutrition>,
+        consumption: List<IngestionConsumption>,
     ) {
         val available = buildSet {
             if (receipt != null) {
@@ -326,6 +366,7 @@ object YeonsikOcrEnvelopeJson {
                 add(IngestionProjection.CASHOS_RECEIPT)
             }
             if (nutrition.isNotEmpty()) add(IngestionProjection.FITNESS_NUTRITION)
+            if (nutrition.isNotEmpty() && consumption.isNotEmpty()) add(IngestionProjection.FITNESS_MEAL)
             if (merchant != null && receipt == null) add(IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE)
         }
         require(targets.all { it in available }) {
@@ -351,6 +392,12 @@ object YeonsikOcrEnvelopeJson {
         put("name", JsonPrimitive(value.name)); put("business_kind", JsonPrimitive(value.businessKind.wireValue)); put("branch_name", value.branchName?.let(::JsonPrimitive) ?: JsonNull); put("address", value.address?.let(::JsonPrimitive) ?: JsonNull); put("phone", value.phone?.let(::JsonPrimitive) ?: JsonNull); put("business_registration_number", value.businessRegistrationNumber?.let(::JsonPrimitive) ?: JsonNull); put("source_attachment_ids", JsonArray(value.sourceAttachmentIds.map(::JsonPrimitive))); put("source_namespace", value.sourceNamespace?.let(::JsonPrimitive) ?: JsonNull); put("source_location_code", value.sourceLocationCode?.let(::JsonPrimitive) ?: JsonNull)
     }
     private fun linkJson(value: IngestionLink) = buildJsonObject { put("receipt_line_id", JsonPrimitive(value.receiptLineId)); put("nutrition_client_key", JsonPrimitive(value.nutritionClientKey)) }
+    private fun consumptionJson(value: IngestionConsumption) = buildJsonObject {
+        put("client_key", JsonPrimitive(value.clientKey))
+        put("nutrition_client_keys", JsonArray(value.nutritionClientKeys.toSortedSet().map(::JsonPrimitive)))
+        put("consumed_at", value.consumedAt?.let(::JsonPrimitive) ?: JsonNull)
+        put("status", JsonPrimitive(value.status.wireValue))
+    }
     private fun reviewJson(value: IngestionReview) = buildJsonObject { put("status", JsonPrimitive(value.status.wireValue)); put("blocking_issues", JsonArray(value.blockingIssues.map(::JsonPrimitive))); put("warnings", JsonArray(value.warnings.map(::JsonPrimitive))) }
 
     private fun JsonObject.withDocumentId(id: String): JsonObject {
@@ -366,5 +413,6 @@ object YeonsikOcrEnvelopeJson {
     private fun JsonObject.arrayValue(key: String): JsonArray = this[key]?.jsonArray ?: error("$key must be an array")
     private fun JsonArray.strings(): List<String> = map { (it as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.contentOrNull?.takeIf(String::isNotBlank) ?: error("array must contain strings") }
     private val TOP_LEVEL_KEYS = setOf("schema_version", "mode", "source", "merchant_candidate", "receipt", "nutrition", "classification_hints", "links", "projection_targets", "review")
+    private val TOP_LEVEL_KEYS_WITH_CONSUMPTION = TOP_LEVEL_KEYS + "consumption"
     private val TRUST_KEYS = setOf("user_verified", "confirmed_at", "owner_id", "confirmed_by", "created_at", "updated_at", "published_at", "publisher_status", "revision", "remote_id", "server_id")
 }

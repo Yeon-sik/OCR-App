@@ -5,6 +5,7 @@ import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
+import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import kotlinx.coroutines.CancellationException
@@ -203,6 +204,15 @@ internal class PriceTraceCanonicalProjectionSubmitter(
                     ?: return ProjectionSubmission.Failure("receipt_artifact_missing", retryable = false)
                 when (val result = gateway.submitVerifiedReceipt(request.idempotencyKey, receipt)) {
                     is PriceTraceCanonicalOutcome.Success -> {
+                        // Parse at the authority boundary; the raw response remains durable metadata.
+                        try {
+                            PriceTraceIdentityJson.decode(result.response)
+                        } catch (_: Exception) {
+                            return ProjectionSubmission.Failure(
+                                "pricetrace_identity_invalid",
+                                retryable = false,
+                            )
+                        }
                         val observationUploaded = result.response.hasCompleteObservations(receipt)
                         ProjectionSubmission.Success(
                             remoteId = result.response.requiredId("receiptId"),

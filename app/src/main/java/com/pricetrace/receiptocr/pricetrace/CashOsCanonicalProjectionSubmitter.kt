@@ -1,6 +1,5 @@
 package com.pricetrace.receiptocr.pricetrace
 
-import com.pricetrace.receiptscanner.domain.PlaceResolutionStatus
 import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.domain.ReceiptV2LineItem
 import com.pricetrace.receiptscanner.domain.purchaseLocalTime
@@ -9,6 +8,8 @@ import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
+import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentity
+import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.publisher.CashOsReceiptIngestV3Item
 import com.pricetrace.receiptscanner.publisher.CashOsReceiptIngestV3Payload
 import com.pricetrace.receiptscanner.publisher.CashOsReceiptIngestV3Response
@@ -34,9 +35,14 @@ internal class CashOsCanonicalProjectionSubmitter(
             ?: return ProjectionSubmission.Failure("receipt_artifact_missing", retryable = false)
         val localDocumentId = request.localDocumentId
             ?: return ProjectionSubmission.Failure("local_document_id_missing", retryable = false)
+        val priceTraceIdentity = request.resolvedIdentity?.priceTrace
+            ?: return ProjectionSubmission.Failure("pricetrace_identity_missing", retryable = false)
+        val priceTraceStoreId = priceTraceIdentity.storeId
+            ?.takeIf { it.isNotBlank() && it == it.trim() }
+            ?: return ProjectionSubmission.Failure("pricetrace_store_id_missing", retryable = false)
 
         return try {
-            val payload = toPayload(request, receipt, localDocumentId)
+            val payload = toPayload(request, receipt, localDocumentId, priceTraceIdentity, priceTraceStoreId)
             when (val result = gateway.ingestVerifiedReceiptV3(payload)) {
                 is PriceObservationReadOutcome.Success -> ProjectionSubmission.Success(
                     remoteId = result.value.receiptId,
@@ -60,6 +66,8 @@ internal class CashOsCanonicalProjectionSubmitter(
         request: ProjectionRequest,
         receipt: ReceiptV2,
         localDocumentId: String,
+        priceTraceIdentity: PriceTraceIdentity,
+        priceTraceStoreId: String,
     ): CashOsReceiptIngestV3Payload {
         val merchantName = receipt.merchant.name?.trim()?.takeIf(String::isNotEmpty)
             ?: error("cashos_merchant_name_missing")
@@ -71,9 +79,6 @@ internal class CashOsCanonicalProjectionSubmitter(
         val grandTotal = receipt.totals.grandTotalAmountMinor
             ?: error("cashos_grand_total_missing")
         require(grandTotal >= 0) { "cashos_grand_total_must_be_non_negative" }
-        val selectedPlace = receipt.placeResolution.selectedCandidate
-            ?.takeIf { receipt.placeResolution.status == PlaceResolutionStatus.USER_CONFIRMED }
-
         return CashOsReceiptIngestV3Payload(
             idempotencyKey = request.idempotencyKey,
             documentId = localDocumentId,
@@ -86,20 +91,23 @@ internal class CashOsCanonicalProjectionSubmitter(
             purchaseLocalTime = receipt.document.source.purchaseLocalTime()
                 ?: receipt.document.issuedAt?.let(::parseLocalTime),
             grandTotalAmountKrw = grandTotal,
-            restaurantId = selectedPlace?.restaurantId,
-            restaurantLocationId = selectedPlace?.restaurantLocationId,
+            priceTraceStoreId = priceTraceStoreId,
+            restaurantId = priceTraceIdentity.restaurantId,
+            restaurantLocationId = priceTraceIdentity.restaurantLocationId,
+            priceTraceIdentity = PriceTraceIdentityJson.encode(priceTraceIdentity),
             categoryHint = request.envelope?.classificationHints?.get("cashos.category_hint"),
             paymentMethodHint = request.envelope?.classificationHints?.get("cashos.payment_method_hint")
                 ?: receipt.payments.firstOrNull()?.method,
             institutionHint = request.envelope?.classificationHints?.get("cashos.institution_hint"),
-            items = receipt.lineItems.map(::toItem),
+            items = receipt.lineItems.map { item -> toItem(item, priceTraceIdentity) },
         )
     }
 
-    private fun toItem(item: ReceiptV2LineItem): CashOsReceiptIngestV3Item {
+    private fun toItem(item: ReceiptV2LineItem, priceTraceIdentity: PriceTraceIdentity): CashOsReceiptIngestV3Item {
         val description = item.description?.trim()?.takeIf(String::isNotEmpty)
             ?: error("cashos_line_description_missing:${item.id}")
         val net = item.netAmountMinor ?: error("cashos_line_net_missing:${item.id}")
+        val lineIdentity = priceTraceIdentity.lineFor(item.id)
         return CashOsReceiptIngestV3Item(
             receiptItemId = item.id,
             descriptionSnapshot = description,
@@ -112,6 +120,14 @@ internal class CashOsCanonicalProjectionSubmitter(
             taxAmountKrw = item.taxAmountMinor,
             netAmountKrw = net,
             lineType = item.type.wireValue,
+            restaurantMenuId = lineIdentity?.restaurantMenuId,
+            catalogProductId = lineIdentity?.catalogProductId,
+            priceTraceCatalogProductId = lineIdentity?.catalogProductId,
+            priceTraceProductId = lineIdentity?.productId,
+            priceTraceStoreProductId = lineIdentity?.storeProductId,
+            priceTraceIdentity = PriceTraceIdentityJson.encode(
+                priceTraceIdentity.copy(lines = lineIdentity?.let(::listOf).orEmpty()),
+            ),
         )
     }
 
