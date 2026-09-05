@@ -10,7 +10,8 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.pricetrace.receiptocr.fitness.NutritionAuthOutcome
 import com.pricetrace.receiptocr.fitness.NutritionGatewayFailure
-import com.pricetrace.receiptocr.fitness.NutritionPublishOutcome
+import com.pricetrace.receiptocr.fitness.CanonicalNutritionPayloadFactory
+import com.pricetrace.receiptocr.fitness.NutritionCanonicalImportOutcome
 import com.pricetrace.receiptocr.gemini.ReceiptCorrectionEvidenceCropper
 import com.pricetrace.receiptocr.gemini.NutritionCorrectionEvidenceCropper
 import com.pricetrace.receiptocr.pricetrace.CashOsAuthOutcome
@@ -2395,19 +2396,39 @@ class ReceiptAppViewModel(
                     )
                     return@launch
                 }
-                when (val outcome = nutritionGateway.publish(verified)) {
-                    is NutritionPublishOutcome.Success -> {
+                val idempotencyKey = StableIds.sha256(
+                    "fitness-nutrition:v2|$sessionDocumentId|${verified.documentId}|1",
+                )
+                val payload = CanonicalNutritionPayloadFactory.fromProductLabel(
+                    localDocumentId = sessionDocumentId,
+                    revisionSeq = 1L,
+                    idempotencyKey = idempotencyKey,
+                    draft = verified,
+                )
+                when (val outcome = nutritionGateway.importCanonical(payload)) {
+                    is NutritionCanonicalImportOutcome.Success -> {
                         updateNutritionSessionPublication(verified, "uploaded", null)
-                        recordProjectionUploaded(sessionDocumentId, IngestionProjection.FITNESS_NUTRITION, verified.foodId)
+                        recordProjectionUploaded(
+                            sessionDocumentId,
+                            IngestionProjection.FITNESS_NUTRITION,
+                            outcome.response.nutritionFoodId,
+                            payload.idempotencyKey,
+                        )
                         mutableUiState.value = nutritionState(
                             draft = verified,
                             ocrDocument = state.ocrDocument,
-                            message = "Fitness Nutrition DB에 private 식품으로 저장했습니다. 상품 연결·공개는 Fitness App의 별도 승인 흐름에서 처리합니다.",
+                            message = "Fitness canonical nutrition import를 완료했습니다: ${outcome.response.nutritionFoodId}",
                         )
                     }
-                    is NutritionPublishOutcome.Failure -> {
-                        updateNutritionSessionPublication(verified, "failed", "nutrition_${outcome.reason.name.lowercase()}")
-                        recordProjectionFailure(sessionDocumentId, IngestionProjection.FITNESS_NUTRITION, "nutrition_${outcome.reason.name.lowercase()}")
+                    is NutritionCanonicalImportOutcome.Failure -> {
+                        val errorCode = "nutrition_${outcome.reason.name.lowercase()}"
+                        updateNutritionSessionPublication(verified, "failed", errorCode)
+                        recordProjectionFailure(
+                            sessionDocumentId,
+                            IngestionProjection.FITNESS_NUTRITION,
+                            errorCode,
+                            payload.idempotencyKey,
+                        )
                         val failureMessage = nutritionFailureMessage(outcome.reason) + " 확정 초안은 로컬에 보존했으므로 다시 전송할 수 있습니다."
                         mutableUiState.value = nutritionState(
                             draft = verified,

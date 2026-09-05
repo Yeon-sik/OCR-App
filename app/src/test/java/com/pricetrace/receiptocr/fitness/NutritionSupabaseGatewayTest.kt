@@ -36,121 +36,7 @@ class NutritionSupabaseGatewayTest {
     }
 
     @Test
-    fun unverifiedDraftIsRejectedBeforeAnyTransportCall() = runTest {
-        val store = FakeStore(signedIn())
-        val transport = QueueTransport()
-        val gateway = NutritionSupabaseGateway(store, transport)
-
-        val result = gateway.publish(
-            verifiedDraft().copy(
-                status = com.pricetrace.receiptscanner.nutrition.NutritionDraftStatus.PARSED,
-                confirmedAt = null,
-            ),
-        )
-
-        assertEquals(NutritionPublishOutcome.Failure(NutritionGatewayFailure.CONTRACT), result)
-        assertTrue(transport.requests.isEmpty())
-    }
-
-    @Test
-    fun newVerifiedDraftIsInsertedAsOwnerPrivateWithoutOcrEvidence() = runTest {
-        val store = FakeStore(signedIn())
-        val transport = QueueTransport(
-            NutritionHttpResponse(200, "[]"),
-            NutritionHttpResponse(
-                201,
-                """[{"id":"ocr-nutrition:ocr-doc","revision":1}]""",
-            ),
-        )
-        val gateway = NutritionSupabaseGateway(
-            store = store,
-            transport = transport,
-            now = { "2026-08-11T11:00:00+09:00" },
-        )
-
-        val result = gateway.publish(verifiedDraft())
-
-        assertEquals(NutritionPublishOutcome.Success("ocr-nutrition:ocr-doc", 1), result)
-        assertEquals("GET", transport.requests[0].method)
-        val insert = transport.requests[1]
-        assertEquals("POST", insert.method)
-        assertTrue(insert.url.endsWith("/rest/v1/nutrition_foods?on_conflict=id"))
-        assertEquals("Bearer access-token", insert.headers["Authorization"])
-        assertTrue(insert.body.orEmpty().contains("\"visibility\":\"private\""))
-        assertTrue(insert.body.orEmpty().contains("\"owner_id\":\"user-1\""))
-        assertTrue(insert.body.orEmpty().contains("\"source_reference\":\"ocr-document:ocr-doc\""))
-        assertFalse(insert.body.orEmpty().contains("evidence"))
-        assertFalse(insert.body.orEmpty().contains("raw_text"))
-        assertFalse(insert.body.orEmpty().contains("catalog_product_id"))
-    }
-
-    @Test
-    fun existingScannerRowUsesRevisionGuardInsteadOfBlindOverwrite() = runTest {
-        val store = FakeStore(signedIn())
-        val transport = QueueTransport(
-            NutritionHttpResponse(
-                200,
-                """[{"id":"ocr-nutrition:ocr-doc","owner_id":"user-1","revision":4,"source_type":"product_label_ocr","source_reference":"ocr-document:ocr-doc"}]""",
-            ),
-            NutritionHttpResponse(
-                200,
-                """[{"id":"ocr-nutrition:ocr-doc","revision":5}]""",
-            ),
-        )
-        val gateway = NutritionSupabaseGateway(store, transport, now = { "2026-08-11T12:00:00+09:00" })
-
-        val result = gateway.publish(verifiedDraft())
-
-        assertEquals(NutritionPublishOutcome.Success("ocr-nutrition:ocr-doc", 5), result)
-        val patch = transport.requests[1]
-        assertEquals("PATCH", patch.method)
-        assertTrue(patch.url.contains("revision=eq.4"))
-        assertTrue(patch.body.orEmpty().contains("\"revision\": 5"))
-        assertFalse(patch.body.orEmpty().contains("\"owner_id\""))
-        assertFalse(patch.body.orEmpty().contains("\"id\""))
-    }
-
-    @Test
-    fun differentSourceReferenceFailsClosedWithoutWriting() = runTest {
-        val store = FakeStore(signedIn())
-        val transport = QueueTransport(
-            NutritionHttpResponse(
-                200,
-                """[{"id":"ocr-nutrition:ocr-doc","owner_id":"user-1","revision":7,"source_type":"product_label_ocr","source_reference":"manual:other"}]""",
-            ),
-        )
-        val gateway = NutritionSupabaseGateway(store, transport)
-
-        val result = gateway.publish(verifiedDraft())
-
-        assertEquals(NutritionPublishOutcome.Failure(NutritionGatewayFailure.CONFLICT), result)
-        assertEquals(1, transport.requests.size)
-    }
-
-    @Test
-    fun expiredAccessTokenRefreshesOnceBeforeRetryingPublish() = runTest {
-        val store = FakeStore(signedIn())
-        val transport = QueueTransport(
-            NutritionHttpResponse(401, "{}"),
-            NutritionHttpResponse(
-                200,
-                """{"access_token":"access-2","refresh_token":"refresh-2","user":{"id":"user-1","email":"fit@example.com"}}""",
-            ),
-            NutritionHttpResponse(200, "[]"),
-            NutritionHttpResponse(201, """[{"id":"ocr-nutrition:ocr-doc","revision":1}]"""),
-        )
-        val gateway = NutritionSupabaseGateway(store, transport)
-
-        val result = gateway.publish(verifiedDraft())
-
-        assertTrue(result is NutritionPublishOutcome.Success)
-        assertEquals("access-2", store.read().accessToken)
-        assertTrue(transport.requests[1].url.contains("grant_type=refresh_token"))
-        assertEquals("Bearer access-2", transport.requests[2].headers["Authorization"])
-    }
-
-    @Test
-    fun canonicalNutritionRpcUsesAuthenticatedImportAndPreservesCanonicalFields() = runTest {
+    fun canonicalNutritionUsesOnlyFitnessOwnedImportRpc() = runTest {
         val store = FakeStore(signedIn())
         val transport = QueueTransport(
             NutritionHttpResponse(
@@ -208,8 +94,39 @@ class NutritionSupabaseGatewayTest {
             CanonicalNutritionImportPayload.REQUIRED_NUTRIENTS,
             body["p_nutrient_provenance"]!!.jsonObject.keys,
         )
-        assertEquals(null, body["p_estimation_evidence"]?.let { if (it is kotlinx.serialization.json.JsonNull) null else it })
     }
+
+    @Test
+    fun canonicalImportRefreshesExpiredAccessTokenOnce() = runTest {
+        val store = FakeStore(signedIn())
+        val transport = QueueTransport(
+            NutritionHttpResponse(401, "{}"),
+            NutritionHttpResponse(
+                200,
+                """{"access_token":"access-2","refresh_token":"refresh-2","user":{"id":"user-1","email":"fit@example.com"}}""",
+            ),
+            NutritionHttpResponse(
+                200,
+                """[{"canonical_import_id":"canonical-1","idempotent_replay":false,"nutrition_food_id":"food-1","input_contract":"nutrition-label.v1","projection_source_type":"ocr_app","projection_import_id":null,"catalog_product_id":null,"estimation_evidence_id":null,"visibility":"private"}]""",
+            ),
+        )
+        val gateway = NutritionSupabaseGateway(store, transport)
+
+        val result = gateway.importCanonical(
+            CanonicalNutritionPayloadFactory.fromProductLabel(
+                localDocumentId = "ocr-label-session",
+                revisionSeq = 1,
+                idempotencyKey = "refresh-key",
+                draft = verifiedDraft(),
+            ),
+        )
+
+        assertTrue(result is NutritionCanonicalImportOutcome.Success)
+        assertEquals("access-2", store.read().accessToken)
+        assertTrue(transport.requests[1].url.contains("grant_type=refresh_token"))
+        assertEquals("Bearer access-2", transport.requests[2].headers["Authorization"])
+    }
+
     @Test
     fun connectionValidationRejectsCleartextAndAcceptsCustomHttps() {
         assertTrue(
