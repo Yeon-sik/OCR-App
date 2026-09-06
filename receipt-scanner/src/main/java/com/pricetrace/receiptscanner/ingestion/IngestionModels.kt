@@ -94,6 +94,10 @@ data class ProductCandidateBarcode(
         }
     }
 
+    /** Project v2 calls this field `scheme`; the internal name remains source-compatible. */
+    val scheme: String
+        get() = type
+
     private companion object {
         val SUPPORTED_LENGTHS = setOf(8, 12, 13, 14)
     }
@@ -113,11 +117,23 @@ data class ProductCandidate(
     val evidence: List<ProductCandidateEvidence> = emptyList(),
     val candidateType: String = "retail_product",
     val sourceVersion: String? = null,
+    /** The Project-owned source references retained while the candidate is a local fact draft. */
+    val sourceAttachmentIds: List<String> = emptyList(),
+    val confidence: Double = 1.0,
 ) {
     init {
         require(clientKey.isNotBlank() && productName.isNotBlank())
         require(productName.length <= 300)
         require(candidateType in setOf("retail_product", "complimentary_side", "meal_component_estimate"))
+        require(sourceAttachmentIds.distinct().size == sourceAttachmentIds.size) {
+            "product candidate source attachment IDs must be unique"
+        }
+        require(sourceAttachmentIds.all(String::isNotBlank)) {
+            "product candidate source attachment IDs must be non-empty"
+        }
+        require(confidence.isFinite() && confidence in 0.0..1.0) {
+            "product candidate confidence must be between 0 and 1"
+        }
         listOf(
             brand,
             manufacturer,
@@ -155,6 +171,12 @@ data class ProductCandidate(
         require(contentUnit == null || contentUnit in setOf("g", "ml", "each"))
         require(packageCount == null || packageCount > 0)
     }
+
+    /** Falls back to legacy evidence for candidates loaded from the pre-v2 internal shape. */
+    val effectiveSourceAttachmentIds: List<String>
+        get() = sourceAttachmentIds.ifEmpty {
+            evidence.flatMap { it.sourceAttachmentIds }.distinct()
+        }
 
     private companion object {
         val PRODUCT_EVIDENCE_SOURCE_TYPES = setOf(
@@ -222,7 +244,9 @@ sealed interface IngestionNutrition {
         val reference: MealComponentReference? = null,
     ) : IngestionNutrition {
         init {
-            require(componentRole.isNotBlank()) { "meal component role is required" }
+            require(componentRole == "complimentary_side") {
+                "meal component role must be complimentary_side"
+            }
         }
     }
 }
@@ -259,19 +283,23 @@ enum class ConsumptionVerificationStatus(val wireValue: String) {
 /** Explicit evidence that a nutrition artifact was actually consumed. */
 data class IngestionConsumptionItem(
     val nutritionClientKey: String,
-    val amount: Double,
-    val unit: String,
+    val amount: Double?,
+    val unit: String?,
     val confidence: Double,
     val amountStatus: String = "estimated",
 ) {
     init {
         require(nutritionClientKey.isNotBlank())
-        require(amount.isFinite() && amount > 0)
-        require(unit.isNotBlank())
+        require(amount == null || amount.isFinite() && amount > 0)
+        require(unit == null || unit.isNotBlank())
         require(confidence.isFinite() && confidence in 0.0..1.0)
-        require(amountStatus.isNotBlank())
+        require(amountStatus in CONSUMPTION_AMOUNT_STATUSES) {
+            "unsupported consumption amount_status: $amountStatus"
+        }
     }
 }
+
+val CONSUMPTION_AMOUNT_STATUSES = setOf("user_provided", "observed", "estimated", "unknown")
 
 data class IngestionConsumption(
     val clientKey: String,
@@ -292,6 +320,13 @@ data class IngestionConsumption(
 
     val effectiveNutritionClientKeys: Set<String>
         get() = if (items.isNotEmpty()) items.map { it.nutritionClientKey }.toSet() else nutritionClientKeys
+
+    /** Values are sufficient for a Fitness Meal draft, but local verification is still separate. */
+    fun isCompleteForFitnessMeal(): Boolean = consumedAt?.let { value ->
+        runCatching { java.time.OffsetDateTime.parse(value) }.isSuccess
+    } == true && items.isNotEmpty() && items.all { item ->
+        item.amount != null && item.unit?.isNotBlank() == true && item.amountStatus != "unknown"
+    }
 }
 
 enum class IngestionReviewStatus(val wireValue: String) {
@@ -331,13 +366,19 @@ enum class IngestionProjection(val wireValue: String) {
     PRICETRACE_PRODUCT_CANDIDATE("pricetrace_product_candidate"),
     FITNESS_NUTRITION("fitness_nutrition"),
     FITNESS_MEAL("fitness_meal"),
-    FITNESS_PRODUCT_NUTRITION_LINK("fitness_product_nutrition_link"),
+    /** Fitness-owned persistence projection; the v2 wire contract names its target by sink. */
+    FITNESS_PRODUCT_NUTRITION_LINK("pricetrace_product_nutrition_link"),
     CASHOS_RECEIPT("cashos_receipt"),
     ;
 
     companion object {
-        fun fromWireValue(value: String): IngestionProjection = entries.firstOrNull { it.wireValue == value }
-            ?: error("Unsupported projection target: $value")
+        fun fromWireValue(value: String): IngestionProjection = when (value) {
+            "fitness_product_nutrition_link",
+            "catalog_product_nutrition_link",
+            FITNESS_PRODUCT_NUTRITION_LINK.wireValue -> FITNESS_PRODUCT_NUTRITION_LINK
+            else -> entries.firstOrNull { it.wireValue == value }
+                ?: error("Unsupported projection target: $value")
+        }
 
         /** Naming aliases for callers that describe the same Fitness-owned link differently. */
         val CATALOG_PRODUCT_NUTRITION_LINK: IngestionProjection

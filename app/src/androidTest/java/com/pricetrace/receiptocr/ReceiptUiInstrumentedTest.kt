@@ -48,6 +48,9 @@ import com.pricetrace.receiptscanner.input.InputOrigin
 import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
 import com.pricetrace.receiptscanner.ingestion.IngestionConsumption
 import com.pricetrace.receiptscanner.ingestion.IngestionConsumptionItem
+import com.pricetrace.receiptscanner.ingestion.ProductCandidate
+import com.pricetrace.receiptscanner.ingestion.ProductCandidateBarcode
+import com.pricetrace.receiptscanner.ingestion.ProductCandidateEvidence
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
@@ -716,7 +719,7 @@ class ReceiptUiInstrumentedTest {
     }
 
     @Test
-    fun consumptionReviewShowsCanonicalFieldsAndRequiresExplicitConfirmation() {
+    fun consumptionReviewAllowsIncompleteDraftFieldsToBeFilledBeforeConfirmation() {
         var consumedAt: String? = null
         var amount: String? = null
         var unit: String? = null
@@ -729,15 +732,15 @@ class ReceiptUiInstrumentedTest {
             canonicalConsumptionArtifacts = listOf(
                 IngestionConsumption(
                     clientKey = "meal-1",
-                    consumedAt = "2026-09-06T08:10:00+09:00",
+                    consumedAt = null,
                     status = ConsumptionVerificationStatus.UNVERIFIED,
                     items = listOf(
                         IngestionConsumptionItem(
                             nutritionClientKey = "product-1",
-                            amount = 40.0,
-                            unit = "g",
+                            amount = null,
+                            unit = null,
                             confidence = 0.92,
-                            amountStatus = "estimated",
+                            amountStatus = "unknown",
                         ),
                     ),
                 ),
@@ -758,6 +761,7 @@ class ReceiptUiInstrumentedTest {
 
         composeRule.onNodeWithTag("consumption_review").assertIsDisplayed()
         composeRule.onNodeWithText("UNVERIFIED").assertIsDisplayed()
+        composeRule.onNodeWithText("unknown").assertIsDisplayed()
         composeRule.onNodeWithTag("consumption_review").performScrollToNode(
             hasTestTag("consumption_item_amount_status_meal-1_product-1"),
         )
@@ -775,6 +779,72 @@ class ReceiptUiInstrumentedTest {
             assertEquals("g", unit)
             assertEquals("measured", amountStatus)
             assertEquals(1, confirmed)
+        }
+    }
+
+    @Test
+    fun productCandidateReviewShowsProjectFactsAndRequiresExplicitConfirmation() {
+        val candidate = ProductCandidate(
+            clientKey = "product-1",
+            productName = "Test Drink",
+            brand = "Test Brand",
+            variant = "Zero",
+            specification = "500 ml",
+            contentAmount = 500.0,
+            contentUnit = "ml",
+            packageCount = 1,
+            barcodes = listOf(ProductCandidateBarcode(type = "ean13", value = "8800000000000")),
+            sourceAttachmentIds = listOf("product-photo-1"),
+            evidence = listOf(
+                ProductCandidateEvidence(
+                    sourceAttachmentIds = listOf("product-photo-1"),
+                    sourceRef = "product-photo-1",
+                    observedValue = "Test Drink",
+                ),
+            ),
+            confidence = 0.93,
+        )
+        var state by mutableStateOf(
+            ReceiptAppUiState(
+                screen = AppScreen.PRODUCT_CANDIDATE_REVIEW,
+                isCanonicalIngestion = true,
+                currentDocumentId = "doc-product-candidate-ui",
+                productCandidates = listOf(candidate),
+                canonicalNutritionCount = 1,
+                priceTraceSignedInEmail = "price@example.com",
+            ),
+        )
+        var confirmed = 0
+        var submitted = 0
+        var nutritionReviewOpened = 0
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onShowCanonicalNutritionReview = { nutritionReviewOpened += 1 },
+                    onConfirmProductCandidates = {
+                        confirmed += 1
+                        state = state.copy(productCandidateVerifiedKeys = setOf(candidate.clientKey))
+                    },
+                    onSubmitProductCandidates = { submitted += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("product_candidate_review").assertIsDisplayed()
+        composeRule.onNodeWithText("Test Drink").assertIsDisplayed()
+        composeRule.onNodeWithText("브랜드 · Test Brand").assertIsDisplayed()
+        composeRule.onNodeWithTag("confirm_product_candidates").assertIsEnabled().performClick()
+        composeRule.runOnIdle {
+            assertEquals(1, confirmed)
+        }
+        composeRule.onNodeWithTag("submit_product_candidates").assertIsEnabled().performClick()
+        composeRule.runOnIdle {
+            assertEquals(1, submitted)
+        }
+        composeRule.onNodeWithTag("open_nutrition_review_from_product_candidate").performClick()
+        composeRule.runOnIdle {
+            assertEquals(1, nutritionReviewOpened)
         }
     }
 

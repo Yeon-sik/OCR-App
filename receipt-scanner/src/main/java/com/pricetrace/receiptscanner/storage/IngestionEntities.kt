@@ -77,7 +77,7 @@ internal fun IngestionSessionEntity.toDomain(
 )
 
 internal fun IngestionProjectionEntity.toDomain() = ProjectionState(
-    projection = IngestionProjection.entries.first { it.wireValue == projection },
+    projection = IngestionProjection.fromWireValue(projection),
     status = ProjectionStatus.fromPersisted(status),
     idempotencyKey = idempotencyKey,
     remoteId = remoteId,

@@ -117,6 +117,7 @@ import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.nutrition.NutritionUnit
 import com.pricetrace.receiptscanner.ingestion.MerchantCandidate
+import com.pricetrace.receiptscanner.ingestion.ProductCandidate
 import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionConsumption
 import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
@@ -192,6 +193,7 @@ fun ReceiptOcrContent(
     isSubmittingCanonicalNutrition: Boolean = false,
     onSubmitCanonicalNutrition: () -> Unit = {},
     onShowCanonicalNutritionReview: () -> Unit = {},
+    onShowProductCandidateReview: () -> Unit = {},
     onConfirmCanonicalNutritionReview: () -> Unit = {},
     onConfirmCanonicalNutritionArtifact: (String) -> Unit = {},
     isSubmittingCanonicalPriceTrace: Boolean = false,
@@ -207,6 +209,13 @@ fun ReceiptOcrContent(
     merchantCandidateLastError: String? = null,
     onConfirmMerchantCandidate: () -> Unit = {},
     onSubmitMerchantCandidate: () -> Unit = {},
+    productCandidates: List<ProductCandidate> = emptyList(),
+    productCandidateVerifiedKeys: Set<String> = emptySet(),
+    isSubmittingProductCandidates: Boolean = false,
+    productCandidateId: String? = null,
+    productCandidateLastError: String? = null,
+    onConfirmProductCandidates: () -> Unit = {},
+    onSubmitProductCandidates: () -> Unit = {},
     onMerchantNameChanged: (String) -> Unit = {},
     onBranchNameChanged: (String) -> Unit = {},
     onBusinessRegistrationNumberChanged: (String) -> Unit = {},
@@ -285,6 +294,7 @@ fun ReceiptOcrContent(
                     AppScreen.NUTRITION_REVIEW,
                     AppScreen.CONSUMPTION_REVIEW,
                     AppScreen.MERCHANT_REVIEW,
+                    AppScreen.PRODUCT_CANDIDATE_REVIEW,
                 ) &&
                 pages.isEmpty()
             ) {
@@ -323,6 +333,23 @@ fun ReceiptOcrContent(
                     onOpen = onShowCanonicalNutritionReview,
                 )
             }
+            if (
+                isCanonicalIngestion &&
+                productCandidates.isNotEmpty() &&
+                uiState.screen in setOf(
+                    AppScreen.NUTRITION_REVIEW,
+                    AppScreen.CONSUMPTION_REVIEW,
+                    AppScreen.JSON_PREVIEW,
+                )
+            ) {
+                CanonicalProductCandidateReviewEntry(
+                    verifiedCount = productCandidateVerifiedKeys.count { key ->
+                        productCandidates.any { it.clientKey == key }
+                    },
+                    totalCount = productCandidates.size,
+                    onOpen = onShowProductCandidateReview,
+                )
+            }
             when (uiState.screen) {
                 AppScreen.SESSION_LIST -> SessionListScreen(
                     sessions = sessions,
@@ -358,6 +385,21 @@ fun ReceiptOcrContent(
                         onSubmit = onSubmitMerchantCandidate,
                     )
                 }
+                AppScreen.PRODUCT_CANDIDATE_REVIEW -> ProductCandidateReviewScreen(
+                    candidates = productCandidates,
+                    verifiedKeys = productCandidateVerifiedKeys,
+                    signedInEmail = uiState.priceTraceSignedInEmail,
+                    isSubmitting = isSubmittingProductCandidates,
+                    submittedCandidateId = productCandidateId,
+                    lastError = productCandidateLastError,
+                    hasNutritionArtifacts = canonicalNutritionCount > 0,
+                    pages = pages,
+                    resolvePageFile = resolvePageFile,
+                    onBack = onBack,
+                    onConfirm = onConfirmProductCandidates,
+                    onSubmit = onSubmitProductCandidates,
+                    onOpenNutritionReview = onShowCanonicalNutritionReview,
+                )
                 AppScreen.API_SETTINGS -> ApiSettingsScreen(
                     provider = uiState.correctionProvider,
                     supabaseUrl = uiState.nutritionSupabaseUrl,
@@ -509,6 +551,10 @@ fun ReceiptOcrContent(
                     isCanonicalIngestion = uiState.isCanonicalIngestion,
                     canonicalNutritionCount = uiState.canonicalNutritionCount,
                     canonicalNutritionVerifiedCount = uiState.canonicalNutritionVerifiedCount,
+                    productCandidateCount = productCandidates.size,
+                    productCandidateVerifiedCount = productCandidateVerifiedKeys.count { key ->
+                        productCandidates.any { it.clientKey == key }
+                    },
                     canonicalConsumptionArtifacts = canonicalConsumptionArtifacts,
                     canonicalConsumptionVerifiedCount = canonicalConsumptionVerifiedCount,
                     onShowConsumptionReview = onShowConsumptionReview,
@@ -911,7 +957,16 @@ private fun ImportPreviewScreen(
                         is com.pricetrace.receiptscanner.importer.CanonicalDraft.Envelope -> {
                             Text("Integrated ingestion", style = MaterialTheme.typography.titleMedium)
                             Text("모드 · ${draft.value.mode.wireValue}")
-                            Text("PriceTrace · ${if (draft.value.receipt != null || draft.value.merchantCandidate != null) "활성" else "비활성"}")
+                            Text(
+                                "PriceTrace · ${if (
+                                    draft.value.receipt != null ||
+                                    draft.value.merchantCandidate != null ||
+                                    draft.value.productCandidates.isNotEmpty()
+                                ) "활성" else "비활성"}",
+                            )
+                            if (draft.value.productCandidates.isNotEmpty()) {
+                                Text("상품 후보 · ${draft.value.productCandidates.size}개")
+                            }
                             Text("Fitness · ${if (draft.value.nutrition.isNotEmpty()) "활성" else "비활성"}")
                             Text("CashOS · ${draft.value.classificationHints.keys.any { it.startsWith("cashos.") }}")
                             Text("외부 검증 상태는 강등되었고, 원본 이미지 대조가 필요합니다.")
@@ -1009,6 +1064,125 @@ private fun MerchantCandidateReviewScreen(
                     submittedCandidateId != null -> "제출 완료 · " + submittedCandidateId
                     lastError != null -> "재시도 필요 · " + lastError
                     verified -> "검수 완료 상태입니다. 제출 버튼을 눌러 서버 candidate RPC를 호출하세요."
+                    else -> "검수 완료 전에는 외부 제출이 차단됩니다."
+                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProductCandidateReviewScreen(
+    candidates: List<ProductCandidate>,
+    verifiedKeys: Set<String>,
+    signedInEmail: String?,
+    isSubmitting: Boolean,
+    submittedCandidateId: String?,
+    lastError: String?,
+    hasNutritionArtifacts: Boolean,
+    pages: List<ReceiptPage>,
+    resolvePageFile: (String) -> File,
+    onBack: () -> Unit,
+    onConfirm: () -> Unit,
+    onSubmit: () -> Unit,
+    onOpenNutritionReview: () -> Unit,
+) {
+    val allVerified = candidates.isNotEmpty() && candidates.all { it.clientKey in verifiedKeys }
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().testTag("product_candidate_review"),
+        contentPadding = PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item {
+            ScreenHeader(
+                "상품 후보 검수",
+                "상품 사진에서 보이는 사실만 확인합니다. 상품 identity는 PriceTrace가 resolve합니다.",
+                onBack,
+            )
+        }
+        items(pages, key = { it.id }) { page ->
+            EvidenceImage(page, resolvePageFile(page.storageKey), emptyList(), zoomEnabled = true)
+        }
+        item {
+            Text(
+                "검수 완료 ${verifiedKeys.size}/${candidates.size}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        items(candidates, key = { it.clientKey }) { candidate ->
+            val sourceIds = candidate.effectiveSourceAttachmentIds
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("product_candidate_${candidate.clientKey}"),
+            ) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text(candidate.productName, style = MaterialTheme.typography.titleMedium)
+                    candidate.brand?.let { Text("브랜드 · $it") }
+                    candidate.manufacturer?.let { Text("제조사 · $it") }
+                    candidate.variant?.let { Text("variant · $it") }
+                    candidate.specification?.let { Text("규격 · $it") }
+                    candidate.contentAmount?.let { amount ->
+                        Text("내용량 · ${formatNutritionNumber(amount)} ${candidate.contentUnit.orEmpty()}")
+                    }
+                    candidate.packageCount?.let { Text("포장 수량 · $it") }
+                    if (candidate.barcodes.isNotEmpty()) {
+                        Text("바코드 · " + candidate.barcodes.joinToString { "${it.scheme}:${it.value}" })
+                    }
+                    Text("confidence · ${candidate.confidence}")
+                    Text("source attachment IDs · ${sourceIds.joinToString().ifBlank { "없음" }}")
+                    Text(
+                        if (candidate.clientKey in verifiedKeys) "검수 완료" else "검수 대기",
+                        color = if (candidate.clientKey in verifiedKeys) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        },
+                    )
+                }
+            }
+        }
+        item {
+            Text(
+                "PriceTrace에는 기존 product-candidate 내부 contract와 로컬 근거 참조만 전송합니다. StandardProduct/CatalogProduct ID는 생성하지 않습니다.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        if (hasNutritionArtifacts) {
+            item {
+                OutlinedButton(
+                    onClick = onOpenNutritionReview,
+                    modifier = Modifier.fillMaxWidth().testTag("open_nutrition_review_from_product_candidate"),
+                ) {
+                    Text("ProductLabel nutrition 검수로 이동")
+                }
+            }
+        }
+        item {
+            if (!allVerified) {
+                Button(
+                    onClick = onConfirm,
+                    enabled = candidates.isNotEmpty() && !isSubmitting,
+                    modifier = Modifier.fillMaxWidth().testTag("confirm_product_candidates"),
+                ) {
+                    Text("상품 후보 검수 완료")
+                }
+            }
+            OutlinedButton(
+                onClick = onSubmit,
+                enabled = allVerified && signedInEmail != null && !isSubmitting,
+                modifier = Modifier.fillMaxWidth().testTag("submit_product_candidates"),
+            ) {
+                if (isSubmitting) BusyIndicator()
+                Text("PriceTrace에 product candidate 제출")
+            }
+            Text(
+                when {
+                    signedInEmail == null -> "PriceTrace 연결 설정에서 로그인 후 제출할 수 있습니다."
+                    submittedCandidateId != null -> "제출 완료 · $submittedCandidateId"
+                    lastError != null -> "재시도 필요 · $lastError"
+                    allVerified -> "검수 완료 상태입니다. 제출 버튼을 눌러 서버 candidate RPC를 호출하세요."
                     else -> "검수 완료 전에는 외부 제출이 차단됩니다."
                 },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1700,6 +1874,30 @@ private fun CanonicalConsumptionReviewEntry(
 }
 
 @Composable
+private fun CanonicalProductCandidateReviewEntry(
+    verifiedCount: Int,
+    totalCount: Int,
+    onOpen: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+            .testTag("canonical_product_candidate_review_entry"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("상품 후보 검수", fontWeight = FontWeight.SemiBold)
+            Text("상품 사진에서 확인한 사실을 검수하세요. 현재 $verifiedCount/${totalCount}개를 확정했습니다.")
+            Button(
+                onClick = onOpen,
+                modifier = Modifier.fillMaxWidth().testTag("open_product_candidate_review"),
+            ) {
+                Text("상품 후보 원본 검수 열기")
+            }
+        }
+    }
+}
+
+@Composable
 private fun ConsumptionReviewScreen(
     consumptions: List<IngestionConsumption>,
     nutritionArtifacts: List<IngestionNutrition>,
@@ -1771,7 +1969,7 @@ private fun ConsumptionReviewScreen(
                             mutableStateOf(formatNutritionNumber(item.amount))
                         }
                         var unit by remember(consumption.clientKey, item.nutritionClientKey) {
-                            mutableStateOf(item.unit)
+                            mutableStateOf(item.unit.orEmpty())
                         }
                         var amountStatus by remember(consumption.clientKey, item.nutritionClientKey) {
                             mutableStateOf(item.amountStatus)
@@ -3225,6 +3423,8 @@ fun JsonPreviewScreen(
     isCanonicalIngestion: Boolean = false,
     canonicalNutritionCount: Int = 0,
     canonicalNutritionVerifiedCount: Int = 0,
+    productCandidateCount: Int = 0,
+    productCandidateVerifiedCount: Int = 0,
     canonicalConsumptionArtifacts: List<IngestionConsumption> = emptyList(),
     canonicalConsumptionVerifiedCount: Int = 0,
     onShowConsumptionReview: () -> Unit = {},
@@ -3253,10 +3453,12 @@ fun JsonPreviewScreen(
     val verified = receipt?.document?.source?.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
     val canonicalNutritionVerified = canonicalNutritionCount > 0 &&
         canonicalNutritionVerifiedCount == canonicalNutritionCount
+    val productCandidatesVerified = productCandidateCount == 0 ||
+        productCandidateVerifiedCount == productCandidateCount
     val canonicalConsumptionVerified = canonicalConsumptionArtifacts.isEmpty() ||
         canonicalConsumptionVerifiedCount == canonicalConsumptionArtifacts.size
-    val canSubmitCanonicalAllReady = verified ||
-        (receipt == null && canonicalNutritionVerified)
+    val canSubmitCanonicalAllReady = productCandidatesVerified && (verified ||
+        (receipt == null && canonicalNutritionVerified))
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("json_preview"),
         contentPadding = PaddingValues(20.dp),

@@ -111,8 +111,8 @@ object YeonsikOcrV2Json {
             val element = json.parseToJsonElement(ReceiptV2Json.encodeCanonical(receipt))
             if (!canonicalIds) element else element.jsonObject.withDocumentId("__receipt__")
         } ?: JsonNull)
-        put("nutrition", JsonArray(envelope.nutrition.map { nutritionJson(it, canonicalIds) }))
         put("product_candidates", JsonArray(envelope.productCandidates.map(::productCandidateJson)))
+        put("nutrition", JsonArray(envelope.nutrition.map { nutritionJson(it, canonicalIds) }))
         put("consumption", JsonArray(envelope.consumption.map(::consumptionJson)))
         put("classification_hints", classificationHintsJson(envelope.classificationHints))
         put("links", JsonArray(envelope.links.map(::linkJson)))
@@ -123,30 +123,21 @@ object YeonsikOcrV2Json {
     private fun productCandidateJson(value: ProductCandidate): JsonObject = buildJsonObject {
         put("client_key", JsonPrimitive(value.clientKey))
         put("product_name", JsonPrimitive(value.productName))
-        put("brand", value.brand?.let(::JsonPrimitive) ?: JsonNull)
-        put("manufacturer", value.manufacturer?.let(::JsonPrimitive) ?: JsonNull)
-        put("specification", value.specification?.let(::JsonPrimitive) ?: JsonNull)
+        put("brand_name", value.brand?.let(::JsonPrimitive) ?: JsonNull)
+        put("manufacturer_name", value.manufacturer?.let(::JsonPrimitive) ?: JsonNull)
+        put("variant_name", value.variant?.let(::JsonPrimitive) ?: JsonNull)
+        put("specification_text", value.specification?.let(::JsonPrimitive) ?: JsonNull)
         put("content_amount", value.contentAmount?.let(::JsonPrimitive) ?: JsonNull)
         put("content_unit", value.contentUnit?.let(::JsonPrimitive) ?: JsonNull)
         put("package_count", value.packageCount?.let(::JsonPrimitive) ?: JsonNull)
-        put("variant", value.variant?.let(::JsonPrimitive) ?: JsonNull)
         put("barcodes", JsonArray(value.barcodes.map { barcode ->
             buildJsonObject {
-                put("type", JsonPrimitive(barcode.type))
+                put("scheme", JsonPrimitive(barcode.scheme))
                 put("value", JsonPrimitive(barcode.value))
             }
         }))
-        put("candidate_type", JsonPrimitive(value.candidateType))
-        put("source_version", value.sourceVersion?.let(::JsonPrimitive) ?: JsonNull)
-        put("evidence", JsonArray(value.evidence.map { evidence -> buildJsonObject {
-            put("source_attachment_ids", JsonArray(evidence.sourceAttachmentIds.map(::JsonPrimitive)))
-            put("source", evidence.source?.let(::JsonPrimitive) ?: JsonNull)
-            put("source_type", JsonPrimitive(evidence.sourceType))
-            put("source_ref", JsonPrimitive(evidence.sourceRef ?: evidence.source ?: evidence.sourceAttachmentIds.first()))
-            put("field", JsonPrimitive(evidence.field))
-            put("observed_value", evidence.observedValue?.let(::JsonPrimitive) ?: JsonNull)
-            put("content_hash", evidence.contentHash?.let(::JsonPrimitive) ?: JsonNull)
-        }}))
+        put("source_attachment_ids", JsonArray(value.effectiveSourceAttachmentIds.map(::JsonPrimitive)))
+        put("confidence", JsonPrimitive(value.confidence))
     }
 
     private fun nutritionJson(item: IngestionNutrition, canonicalIds: Boolean): JsonObject = when (item) {
@@ -155,6 +146,7 @@ object YeonsikOcrV2Json {
             put("kind", JsonPrimitive("product_label"))
             put("line_id", item.lineId?.let(::JsonPrimitive) ?: JsonNull)
             put("menu_name", JsonNull)
+            put("component_role", JsonNull)
             put("payload", json.parseToJsonElement(NutritionLabelJson.encode(
                 if (canonicalIds) item.draft.copy(documentId = "__nutrition__") else item.draft,
             )))
@@ -165,6 +157,7 @@ object YeonsikOcrV2Json {
             put("kind", JsonPrimitive("restaurant_estimate"))
             put("line_id", JsonPrimitive(item.lineId))
             put("menu_name", JsonPrimitive(item.menuName))
+            put("component_role", JsonNull)
             put("payload", JsonNull)
             put("estimate", estimateJson(item.estimate))
         }
@@ -173,18 +166,20 @@ object YeonsikOcrV2Json {
             put("kind", JsonPrimitive("meal_component_estimate"))
             put("line_id", item.lineId?.let(::JsonPrimitive) ?: JsonNull)
             put("menu_name", JsonPrimitive(item.menuName))
+            put("component_role", JsonPrimitive(item.componentRole))
             put("payload", JsonNull)
             put("estimate", estimateJson(item.estimate))
-            put("component_role", JsonPrimitive(item.componentRole))
-            put("restaurant_name", item.reference?.restaurantName?.let(::JsonPrimitive) ?: JsonNull)
-            put("branch_name", item.reference?.branchName?.let(::JsonPrimitive) ?: JsonNull)
-            put("restaurant_menu_id", JsonNull)
         }
     }
 
     private fun estimateJson(estimate: RestaurantNutritionEstimate): JsonObject = buildJsonObject {
-        put("estimated", JsonPrimitive(estimate.estimated))
-        put("confidence", estimate.confidenceScore?.let(::JsonPrimitive) ?: JsonPrimitive(estimate.confidence))
+        require(estimate.estimated) { "v2 nutrition estimates must be marked estimated" }
+        val confidence = estimate.confidenceScore ?: estimate.confidence.toDoubleOrNull()
+        require(confidence != null && confidence.isFinite() && confidence in 0.0..1.0) {
+            "v2 nutrition estimate confidence must be numeric and between 0 and 1"
+        }
+        put("estimated", JsonPrimitive(true))
+        put("confidence", JsonPrimitive(confidence))
         put("nutrients", JsonObject(NutritionField.entries.associate { field ->
             field.wireKey to (estimate.nutrients[field]?.let(::JsonPrimitive) ?: JsonNull)
         }))
@@ -204,7 +199,60 @@ object YeonsikOcrV2Json {
 
     private fun decodeProductCandidate(element: JsonElement): ProductCandidate {
         val root = element.jsonObject
-        requireKeys(root, PRODUCT_CANDIDATE_KEYS)
+        return when {
+            root.keys == PROJECT_PRODUCT_CANDIDATE_KEYS -> decodeProjectProductCandidate(root)
+            root.keys == LEGACY_PRODUCT_CANDIDATE_KEYS -> decodeLegacyProductCandidate(root)
+            else -> throw IllegalArgumentException("Unexpected product candidate keys")
+        }
+    }
+
+    /** Converts the Project's fact-only shape into the existing internal evidence contract. */
+    private fun decodeProjectProductCandidate(root: JsonObject): ProductCandidate {
+        val sourceAttachmentIds = root.arrayValue("source_attachment_ids").strings()
+        require(sourceAttachmentIds.isNotEmpty()) { "product candidates require source_attachment_ids" }
+        val barcodes = root.arrayValue("barcodes").map { barcodeElement ->
+            val barcode = barcodeElement.jsonObject
+            requireKeys(barcode, PROJECT_BARCODE_KEYS)
+            ProductCandidateBarcode(
+                type = barcode.string("scheme"),
+                value = barcode.string("value"),
+            )
+        }
+        val productName = root.string("product_name")
+        val brand = root.nullableString("brand_name")
+        val manufacturer = root.nullableString("manufacturer_name")
+        val variant = root.nullableString("variant_name")
+        val specification = root.nullableString("specification_text")
+        return ProductCandidate(
+            clientKey = root.string("client_key"),
+            productName = productName,
+            brand = brand,
+            manufacturer = manufacturer,
+            specification = specification,
+            contentAmount = root.nullableNumber("content_amount"),
+            contentUnit = root.nullableString("content_unit"),
+            packageCount = root.nullableNumber("package_count")?.toPositiveInt("package_count"),
+            variant = variant,
+            barcodes = barcodes,
+            evidence = projectProductEvidence(
+                sourceAttachmentIds = sourceAttachmentIds,
+                productName = productName,
+                brand = brand,
+                manufacturer = manufacturer,
+                variant = variant,
+                specification = specification,
+                contentAmount = root.nullableNumber("content_amount"),
+                contentUnit = root.nullableString("content_unit"),
+                packageCount = root.nullableNumber("package_count"),
+                barcodes = barcodes,
+            ),
+            sourceAttachmentIds = sourceAttachmentIds,
+            confidence = root.number("confidence").also { require(it in 0.0..1.0) },
+        )
+    }
+
+    /** Reads the pre-Project v2 shape retained for persisted/example compatibility. */
+    private fun decodeLegacyProductCandidate(root: JsonObject): ProductCandidate {
         val evidence = root.arrayValue("evidence").map { evidenceElement ->
             val item = evidenceElement.jsonObject
             requireKeys(item, EVIDENCE_KEYS)
@@ -226,14 +274,11 @@ object YeonsikOcrV2Json {
             specification = root.nullableString("specification"),
             contentAmount = root.nullableNumber("content_amount"),
             contentUnit = root.nullableString("content_unit"),
-            packageCount = root.nullableNumber("package_count")?.let { value ->
-                require(value % 1.0 == 0.0 && value > 0)
-                value.toInt()
-            },
+            packageCount = root.nullableNumber("package_count")?.toPositiveInt("package_count"),
             variant = root.nullableString("variant"),
             barcodes = root.arrayValue("barcodes").map { barcodeElement ->
                 val barcode = barcodeElement.jsonObject
-                requireKeys(barcode, BARCODE_KEYS)
+                requireKeys(barcode, LEGACY_BARCODE_KEYS)
                 ProductCandidateBarcode(
                     type = barcode.string("type"),
                     value = barcode.string("value"),
@@ -242,22 +287,61 @@ object YeonsikOcrV2Json {
             evidence = evidence,
             candidateType = root.string("candidate_type"),
             sourceVersion = root.nullableString("source_version"),
+            sourceAttachmentIds = evidence.flatMap { it.sourceAttachmentIds }.distinct(),
         )
+    }
+
+    private fun projectProductEvidence(
+        sourceAttachmentIds: List<String>,
+        productName: String,
+        brand: String?,
+        manufacturer: String?,
+        variant: String?,
+        specification: String?,
+        contentAmount: Double?,
+        contentUnit: String?,
+        packageCount: Double?,
+        barcodes: List<ProductCandidateBarcode>,
+    ): List<ProductCandidateEvidence> {
+        val facts = buildList {
+            add("product_name" to productName)
+            brand?.let { add("brand_name" to it) }
+            manufacturer?.let { add("manufacturer_name" to it) }
+            variant?.let { add("variant_name" to it) }
+            specification?.let { add("specification_text" to it) }
+            if (contentAmount != null && contentUnit != null) {
+                add("content_amount" to "$contentAmount $contentUnit")
+            }
+            packageCount?.let { add("package_count" to it.toString()) }
+            if (barcodes.isNotEmpty()) {
+                add("barcodes" to barcodes.joinToString(",") { "${it.scheme}:${it.value}" })
+            }
+        }
+        return facts.map { (field, observedValue) ->
+            ProductCandidateEvidence(
+                sourceAttachmentIds = sourceAttachmentIds,
+                sourceType = "product_photo",
+                sourceRef = sourceAttachmentIds.first(),
+                field = field,
+                observedValue = observedValue,
+            )
+        }
     }
 
     private fun decodeNutrition(element: JsonElement, preservePersistedVerification: Boolean): IngestionNutrition {
         val root = element.jsonObject
         val kind = root.string("kind")
-        requireKeys(root, if (kind == "meal_component_estimate") {
-            MEAL_COMPONENT_NUTRITION_KEYS
-        } else {
-            NUTRITION_KEYS
-        })
+        val canonicalShape = root.keys == NUTRITION_KEYS
+        val legacyShape = root.keys == LEGACY_NUTRITION_KEYS ||
+            (kind == "meal_component_estimate" && root.keys == LEGACY_MEAL_COMPONENT_NUTRITION_KEYS)
+        require(canonicalShape || legacyShape) { "Unexpected nutrition outer keys" }
         val clientKey = root.string("client_key")
+        val componentRole = root.nullableString("component_role")
         return when (kind) {
             "product_label" -> {
                 require(root["line_id"] == JsonNull)
                 require(root["menu_name"] == JsonNull)
+                require(componentRole == null) { "product_label component_role must be null" }
                 require(root["estimate"] == JsonNull)
                 val payload = root["payload"]?.takeUnless { it == JsonNull }
                     ?: error("product_label payload required")
@@ -278,6 +362,7 @@ object YeonsikOcrV2Json {
             }
             "restaurant_estimate" -> {
                 require(root["line_id"] != JsonNull)
+                require(componentRole == null) { "restaurant_estimate component_role must be null" }
                 require(root["payload"] == JsonNull)
                 require(root["estimate"] != JsonNull)
                 IngestionNutrition.RestaurantEstimate(
@@ -290,19 +375,25 @@ object YeonsikOcrV2Json {
             "meal_component_estimate" -> {
                 require(root["payload"] == JsonNull)
                 require(root["estimate"] != JsonNull)
-                require(root.nullableString("restaurant_menu_id") == null) {
-                    "meal_component_estimate cannot assert a PriceTrace restaurant_menu_id"
+                require(componentRole == "complimentary_side") {
+                    "meal_component_estimate component_role must be complimentary_side"
+                }
+                val reference = if (legacyShape) {
+                    MealComponentReference(
+                        restaurantName = root.nullableString("restaurant_name"),
+                        branchName = root.nullableString("branch_name"),
+                        restaurantMenuId = root.nullableString("restaurant_menu_id"),
+                    )
+                } else {
+                    null
                 }
                 IngestionNutrition.MealComponentEstimate(
                     clientKey = clientKey,
                     lineId = root.nullableString("line_id"),
                     menuName = root.string("menu_name"),
-                    estimate = decodeEstimate(root.objectValue("estimate")),
-                    componentRole = root.string("component_role"),
-                    reference = MealComponentReference(
-                        restaurantName = root.nullableString("restaurant_name"),
-                        branchName = root.nullableString("branch_name"),
-                    ),
+                    estimate = decodeEstimate(root.objectValue("estimate"), requireFoodImageProvenance = true),
+                    componentRole = requireNotNull(componentRole),
+                    reference = reference,
                 )
             }
             else -> error("Unsupported v2 nutrition kind: $kind")
@@ -312,16 +403,17 @@ object YeonsikOcrV2Json {
     private fun decodeConsumption(root: JsonObject, preservePersistedVerification: Boolean): IngestionConsumption {
         require(root.keys == CONSUMPTION_KEYS || root.keys == CONSUMPTION_KEYS - "status")
         val consumedAt = root.nullableString("consumed_at")
-        require(consumedAt != null) { "v2 consumption requires the actual consumed_at meal time" }
-        runCatching { OffsetDateTime.parse(consumedAt) }
-            .getOrElse { error("consumed_at must be an ISO-8601 offset date-time") }
+        consumedAt?.let { value ->
+            runCatching { OffsetDateTime.parse(value) }
+                .getOrElse { error("consumed_at must be an ISO-8601 offset date-time") }
+        }
         val items = root.arrayValue("items").map { element ->
             val item = element.jsonObject
             requireKeys(item, CONSUMPTION_ITEM_KEYS)
             IngestionConsumptionItem(
                 nutritionClientKey = item.string("nutrition_client_key"),
-                amount = item.number("amount"),
-                unit = item.string("unit"),
+                amount = item.nullableNumber("amount"),
+                unit = item.nullableString("unit"),
                 confidence = item.number("confidence").also { require(it in 0.0..1.0) },
                 amountStatus = item.string("amount_status"),
             )
@@ -338,16 +430,28 @@ object YeonsikOcrV2Json {
         )
     }
 
-    private fun decodeEstimate(root: JsonObject): RestaurantNutritionEstimate {
+    private fun decodeEstimate(
+        root: JsonObject,
+        requireFoodImageProvenance: Boolean = false,
+    ): RestaurantNutritionEstimate {
         val allowed = ESTIMATE_KEYS + "provenance"
         require(root.keys == ESTIMATE_KEYS || root.keys == allowed) { "Unexpected estimate keys" }
         require(root.boolean("estimated")) { "nutrition estimate must be explicitly estimated" }
-        val confidenceElement = root["confidence"] ?: error("confidence is required")
-        val confidenceScore = (confidenceElement as? JsonPrimitive)?.doubleOrNull?.takeIf(Double::isFinite)
-        val confidence = confidenceElement.jsonPrimitive.content
+        val confidenceScore = root.number("confidence").also {
+            require(it in 0.0..1.0) { "nutrition estimate confidence must be between 0 and 1" }
+        }
+        val confidence = confidenceScore.toString()
         val nutrientsRoot = root.objectValue("nutrients")
         require(nutrientsRoot.keys == NutritionField.entries.map { it.wireKey }.toSet())
         val nutrients = NutritionField.entries.associateWith { field -> nutrientsRoot.nullableNumber(field.wireKey) }
+        NutritionField.entries.forEach { field ->
+            nutrients[field]?.let { value ->
+                require(value >= 0.0) { "nutrition values must be non-negative" }
+            }
+        }
+        NutritionField.requiredFields.forEach { field ->
+            require(nutrients[field] != null) { "missing_estimate_${field.wireKey}" }
+        }
         val ranges = root.objectValue("ranges").map { (key, value) ->
             val field = NutritionField.fromWireKey(key) ?: error("Unsupported nutrition range: $key")
             field to decodeRange(value.jsonObject)
@@ -363,6 +467,20 @@ object YeonsikOcrV2Json {
                     evidenceRefs = item.arrayValue("evidence_refs").strings(),
                 )
             }?.toMap().orEmpty()
+        NutritionField.requiredFields.forEach { field ->
+            val item = provenance[field] ?: error("missing_provenance_${field.wireKey}")
+            require(item.valueStatus.isNotBlank() && item.sourceType.isNotBlank()) {
+                "nutrition provenance must identify status and source"
+            }
+            require(item.evidenceRefs.isNotEmpty()) {
+                "nutrition provenance requires evidence references"
+            }
+            if (requireFoodImageProvenance) {
+                require(item.sourceType == "food_image_estimate") {
+                    "meal component provenance must use food_image_estimate"
+                }
+            }
+        }
         return RestaurantNutritionEstimate(
             nutrients = nutrients,
             estimated = true,
@@ -478,7 +596,7 @@ object YeonsikOcrV2Json {
             "consumption client_key values must be unique"
         }
         require(consumption.all { item ->
-            item.items.isNotEmpty() && item.consumedAt != null && item.effectiveNutritionClientKeys.all { key ->
+            item.items.isNotEmpty() && item.effectiveNutritionClientKeys.all { key ->
                 nutrition.any { nutritionItem -> nutritionItem.clientKey == key }
             }
         }) { "consumption must contain item-level references to existing nutrition artifacts" }
@@ -574,19 +692,18 @@ object YeonsikOcrV2Json {
 
     private fun consumptionJson(value: IngestionConsumption) = buildJsonObject {
         require(value.items.isNotEmpty()) { "v2 consumption must contain item-level values" }
-        require(value.consumedAt != null) { "v2 consumption must contain consumed_at" }
         put("client_key", JsonPrimitive(value.clientKey))
-        put("consumed_at", JsonPrimitive(value.consumedAt))
+        put("consumed_at", value.consumedAt?.let(::JsonPrimitive) ?: JsonNull)
+        put("status", JsonPrimitive(value.status.wireValue))
         put("items", JsonArray(value.items.map { item ->
             buildJsonObject {
                 put("nutrition_client_key", JsonPrimitive(item.nutritionClientKey))
-                put("amount", JsonPrimitive(item.amount))
-                put("unit", JsonPrimitive(item.unit))
-                put("confidence", JsonPrimitive(item.confidence))
+                put("amount", item.amount?.let(::JsonPrimitive) ?: JsonNull)
+                put("unit", item.unit?.let(::JsonPrimitive) ?: JsonNull)
                 put("amount_status", JsonPrimitive(item.amountStatus))
+                put("confidence", JsonPrimitive(item.confidence))
             }
         }))
-        put("status", JsonPrimitive(value.status.wireValue))
     }
 
     private fun classificationHintsJson(hints: Map<String, String?>): JsonObject = buildJsonObject {
@@ -616,6 +733,13 @@ object YeonsikOcrV2Json {
         }
     }
 
+    private fun Double.toPositiveInt(key: String): Int {
+        require(isFinite() && this % 1.0 == 0.0 && this > 0 && this <= Int.MAX_VALUE.toDouble()) {
+            "$key must be a positive integer"
+        }
+        return toInt()
+    }
+
     private fun JsonObject.string(key: String): String =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.takeIf(String::isNotBlank)
             ?: error("$key must be a non-empty string")
@@ -626,16 +750,16 @@ object YeonsikOcrV2Json {
             ?: error("$key must be a string or null") }
 
     private fun JsonObject.boolean(key: String): Boolean =
-        (this[key] as? JsonPrimitive)?.contentOrNull?.toBooleanStrictOrNull()
+        (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.contentOrNull?.toBooleanStrictOrNull()
             ?: error("$key must be boolean")
 
     private fun JsonObject.number(key: String): Double =
-        (this[key] as? JsonPrimitive)?.doubleOrNull?.takeIf(Double::isFinite)
+        (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.doubleOrNull?.takeIf(Double::isFinite)
             ?: error("$key must be a finite number")
 
     private fun JsonObject.nullableNumber(key: String): Double? = this[key]
         .takeUnless { it == null || it == JsonNull }
-        ?.let { (it as? JsonPrimitive)?.doubleOrNull?.takeIf(Double::isFinite)
+        ?.let { (it as? JsonPrimitive)?.takeIf { primitive -> !primitive.isString }?.doubleOrNull?.takeIf(Double::isFinite)
             ?: error("$key must be a finite number or null") }
 
     private fun JsonObject.objectValue(key: String): JsonObject = this[key]?.jsonObject
@@ -660,18 +784,28 @@ object YeonsikOcrV2Json {
         "name", "business_kind", "branch_name", "address", "phone", "business_registration_number",
         "source_attachment_ids", "source_namespace", "source_location_code",
     )
-    private val PRODUCT_CANDIDATE_KEYS = setOf(
+    private val PROJECT_PRODUCT_CANDIDATE_KEYS = setOf(
+        "client_key", "product_name", "brand_name", "manufacturer_name", "variant_name",
+        "specification_text", "content_amount", "content_unit", "package_count", "barcodes",
+        "source_attachment_ids", "confidence",
+    )
+    private val LEGACY_PRODUCT_CANDIDATE_KEYS = setOf(
         "client_key", "product_name", "brand", "manufacturer", "specification",
         "content_amount", "content_unit", "package_count", "variant", "barcodes",
         "candidate_type", "source_version", "evidence",
     )
-    private val BARCODE_KEYS = setOf("type", "value")
+    private val PROJECT_BARCODE_KEYS = setOf("scheme", "value")
+    private val LEGACY_BARCODE_KEYS = setOf("type", "value")
     private val EVIDENCE_KEYS = setOf(
         "source_attachment_ids", "source", "source_type", "source_ref", "field", "observed_value", "content_hash",
     )
-    private val NUTRITION_KEYS = setOf("client_key", "kind", "line_id", "menu_name", "payload", "estimate")
-    private val MEAL_COMPONENT_NUTRITION_KEYS = NUTRITION_KEYS +
-        setOf("component_role", "restaurant_name", "branch_name", "restaurant_menu_id")
+    private val NUTRITION_KEYS = setOf(
+        "client_key", "kind", "line_id", "menu_name", "component_role", "payload", "estimate",
+    )
+    private val LEGACY_NUTRITION_KEYS = NUTRITION_KEYS - "component_role"
+    private val LEGACY_MEAL_COMPONENT_NUTRITION_KEYS = LEGACY_NUTRITION_KEYS + setOf(
+        "component_role", "restaurant_name", "branch_name", "restaurant_menu_id",
+    )
     private val CONSUMPTION_KEYS = setOf("client_key", "consumed_at", "items", "status")
     private val CONSUMPTION_ITEM_KEYS = setOf("nutrition_client_key", "amount", "unit", "confidence", "amount_status")
     private val LINK_KEYS = setOf("receipt_line_id", "nutrition_client_key")

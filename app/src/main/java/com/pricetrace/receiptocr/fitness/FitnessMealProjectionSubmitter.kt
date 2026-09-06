@@ -49,6 +49,9 @@ internal class FitnessMealProjectionSubmitter(
         runCatching { OffsetDateTime.parse(eatenAt) }.getOrElse {
             return ProjectionSubmission.Failure("consumed_at_invalid", retryable = false)
         }
+        if (envelope.consumption.any { !it.isCompleteForFitnessMeal() }) {
+            return ProjectionSubmission.Failure("consumption_artifact_incomplete", retryable = false)
+        }
 
         val nutritionRows = parseNutritionRows(request.dependencyMetadataJson[IngestionProjection.FITNESS_NUTRITION])
             ?: return ProjectionSubmission.Failure("fitness_nutrition_metadata_invalid", retryable = true)
@@ -75,11 +78,15 @@ internal class FitnessMealProjectionSubmitter(
                         amountStatus = item.amountStatus,
                         nutrition = nutrition,
                     )
+                    val consumedAmount = item.amount
+                        ?: throw IllegalArgumentException("consumption_artifact_incomplete")
+                    val consumedUnit = item.unit
+                        ?: throw IllegalArgumentException("consumption_artifact_incomplete")
                     FitnessMealItemPayload(
                         nutritionFoodId = requireNotNull(foodIds[item.nutritionClientKey]),
                         clientKey = item.nutritionClientKey,
-                        consumedAmount = item.amount,
-                        consumedUnit = item.unit,
+                        consumedAmount = consumedAmount,
+                        consumedUnit = consumedUnit,
                         confidence = item.confidence,
                         sourceProvenance = sourceProvenance,
                         priceTraceIdentity = if (nutrition is IngestionNutrition.MealComponentEstimate) {

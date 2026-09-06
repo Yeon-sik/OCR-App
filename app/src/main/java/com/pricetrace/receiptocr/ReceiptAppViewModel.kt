@@ -51,6 +51,8 @@ import com.pricetrace.receiptscanner.importer.ExternalJsonImporter
 import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionConsumption
 import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
+import com.pricetrace.receiptscanner.ingestion.CONSUMPTION_AMOUNT_STATUSES
+import com.pricetrace.receiptscanner.ingestion.ProductCandidate
 import com.pricetrace.receiptscanner.ingestion.IngestionOrchestrator
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus
@@ -154,6 +156,7 @@ enum class AppScreen {
     IMAGE_CONFIRM,
     IMPORT_PREVIEW,
     MERCHANT_REVIEW,
+    PRODUCT_CANDIDATE_REVIEW,
     OCR_PROGRESS,
     FIELD_REVIEW,
     ITEM_REVIEW,
@@ -184,6 +187,11 @@ data class ReceiptAppUiState(
     val isSubmittingMerchantCandidate: Boolean = false,
     val merchantCandidateId: String? = null,
     val merchantCandidateLastError: String? = null,
+    val productCandidates: List<ProductCandidate> = emptyList(),
+    val productCandidateVerifiedKeys: Set<String> = emptySet(),
+    val isSubmittingProductCandidates: Boolean = false,
+    val productCandidateId: String? = null,
+    val productCandidateLastError: String? = null,
     val isPreparingScanner: Boolean = false,
     val isImportingPages: Boolean = false,
     val isProcessingOcr: Boolean = false,
@@ -716,6 +724,36 @@ class ReceiptAppViewModel(
                 merchantCandidateId = projection?.remoteId,
                 merchantCandidateLastError = projection?.lastError,
                 canonicalNutritionCount = 0,
+                canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(envelope),
+                canonicalConsumptionVerifiedCount = consumptionVerifiedCount,
+                isConsumptionVerifying = false,
+                isCanonicalIngestion = true,
+            )
+            return true
+        }
+        if (envelope.productCandidates.isNotEmpty() &&
+            envelope.receipt == null &&
+            merchantCandidate == null
+        ) {
+            val verifiedKeys = envelope.productCandidates
+                .filter { IngestionArtifactKeys.productCandidate(it.clientKey) in ingestionSession.verifiedArtifactFingerprints }
+                .map { it.clientKey }
+                .toSet()
+            val projection = ingestionSession.projections.firstOrNull {
+                it.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE
+            }
+            mutableUiState.value = mutableUiState.value.copy(
+                screen = AppScreen.PRODUCT_CANDIDATE_REVIEW,
+                currentDocumentId = documentId,
+                productCandidates = envelope.productCandidates,
+                productCandidateVerifiedKeys = verifiedKeys,
+                isSubmittingProductCandidates = false,
+                productCandidateId = projection?.remoteId,
+                productCandidateLastError = projection?.lastError,
+                canonicalNutritionCount = envelope.nutrition.size,
+                canonicalNutritionArtifacts = envelope.nutrition,
+                canonicalNutritionVerifiedCount = verifiedNutritionCount(ingestionSession, envelope),
+                canonicalNutritionVerifiedKeys = verifiedNutritionKeys(ingestionSession, envelope),
                 canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(envelope),
                 canonicalConsumptionVerifiedCount = consumptionVerifiedCount,
                 isConsumptionVerifying = false,
@@ -1467,6 +1505,105 @@ class ReceiptAppViewModel(
         }
     }
 
+    fun confirmProductCandidates() {
+        val state = mutableUiState.value
+        if (!state.isCanonicalIngestion || state.isSubmittingProductCandidates || state.productCandidates.isEmpty()) return
+        val documentId = state.currentDocumentId ?: return
+        val candidateKeys = state.productCandidates.map { it.clientKey }.toSet()
+        if (state.productCandidateVerifiedKeys.containsAll(candidateKeys)) return
+        viewModelScope.launch {
+            val envelope = loadIngestionEnvelope(documentId)
+            if (envelope == null || envelope.productCandidates.isEmpty()) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = "확정할 product candidate artifact를 찾지 못했습니다.",
+                )
+                return@launch
+            }
+            val gate = canonicalProjectionEvidenceGate(
+                documentId = documentId,
+                envelope = envelope,
+                projection = IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE,
+            )
+            if (!gate.isAllowed) {
+                mutableUiState.value = mutableUiState.value.copy(message = verifiedDraftGateMessage(gate))
+                return@launch
+            }
+            when (val verification = markIngestionProductCandidatesVerified(documentId, candidateKeys)) {
+                null -> mutableUiState.value = mutableUiState.value.copy(
+                    message = "product candidate canonical session을 찾지 못했습니다.",
+                )
+                is IngestionStartResult.Failure -> mutableUiState.value = mutableUiState.value.copy(
+                    message = "product candidate 검수를 완료하지 못했습니다: ${verification.issues.joinToString()}",
+                )
+                is IngestionStartResult.Success,
+                is IngestionStartResult.Duplicate -> mutableUiState.value = mutableUiState.value.copy(
+                    productCandidateVerifiedKeys = candidateKeys,
+                    message = "product candidate 검수를 완료했습니다. PriceTrace 제출을 별도로 실행할 수 있습니다.",
+                )
+            }
+        }
+    }
+
+    fun submitProductCandidates() {
+        val state = mutableUiState.value
+        if (!state.isCanonicalIngestion || state.isSubmittingProductCandidates) return
+        if (state.productCandidates.isEmpty()) return
+        val candidateKeys = state.productCandidates.map { it.clientKey }.toSet()
+        if (!state.productCandidateVerifiedKeys.containsAll(candidateKeys)) {
+            mutableUiState.value = state.copy(message = "product candidate를 먼저 검수 완료하세요.")
+            return
+        }
+        if (state.priceTraceSignedInEmail == null) {
+            mutableUiState.value = state.copy(message = "연결 설정에서 먼저 PriceTrace에 로그인하세요.")
+            return
+        }
+        val documentId = state.currentDocumentId ?: return
+        viewModelScope.launch {
+            val envelope = loadIngestionEnvelope(documentId)
+            if (envelope == null) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = "PriceTrace product candidate canonical envelope를 찾지 못했습니다.",
+                )
+                return@launch
+            }
+            val gate = canonicalProjectionEvidenceGate(
+                documentId = documentId,
+                envelope = envelope,
+                projection = IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE,
+            )
+            if (!gate.isAllowed) {
+                mutableUiState.value = mutableUiState.value.copy(message = verifiedDraftGateMessage(gate))
+                return@launch
+            }
+            mutableUiState.value = mutableUiState.value.copy(
+                isSubmittingProductCandidates = true,
+                productCandidateLastError = null,
+                message = null,
+            )
+            try {
+                val projection = submitCanonicalProjectionToUi(
+                    documentId = documentId,
+                    projection = IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE,
+                )
+                if (projection == null) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isSubmittingProductCandidates = false,
+                        productCandidateLastError = "canonical_envelope_missing",
+                        message = "PriceTrace product candidate canonical envelope를 찾지 못했습니다.",
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    isSubmittingProductCandidates = false,
+                    productCandidateLastError = error.message ?: error::class.java.simpleName,
+                    message = "PriceTrace product candidate projection을 완료하지 못했습니다.",
+                )
+            }
+        }
+    }
+
     fun submitCanonicalPriceTrace() {
         val state = mutableUiState.value
         val receipt = state.receipt ?: return
@@ -1536,7 +1673,11 @@ class ReceiptAppViewModel(
         val receiptVerified = receipt?.document?.source?.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
         val nutritionVerified = state.canonicalNutritionCount > 0 &&
             state.canonicalNutritionVerifiedCount == state.canonicalNutritionCount
-        if (!receiptVerified && (receipt != null || !nutritionVerified)) {
+        val productCandidatesVerified = state.productCandidates.isEmpty() ||
+            state.productCandidateVerifiedKeys.containsAll(state.productCandidates.map { it.clientKey }.toSet())
+        if (!productCandidatesVerified ||
+            (!receiptVerified && (receipt != null || !nutritionVerified))
+        ) {
             mutableUiState.value = state.copy(
                 message = "Verify the canonical receipt or nutrition artifacts before submitting ready projections.",
             )
@@ -1555,6 +1696,7 @@ class ReceiptAppViewModel(
                 isSubmittingCanonicalPriceTrace = envelope.receipt != null,
                 isSubmittingCashOsReceipt = envelope.receipt != null,
                 isNutritionPublishing = envelope.nutrition.isNotEmpty(),
+                isSubmittingProductCandidates = envelope.productCandidates.isNotEmpty(),
                 message = null,
             )
             try {
@@ -1579,6 +1721,7 @@ class ReceiptAppViewModel(
                     isSubmittingCanonicalPriceTrace = false,
                     isSubmittingCashOsReceipt = false,
                     isNutritionPublishing = false,
+                    isSubmittingProductCandidates = false,
                     message = "Ready canonical projections processed: $uploaded uploaded, $blocked blocked, $failed failed.",
                 )
             } catch (cancelled: CancellationException) {
@@ -1589,6 +1732,7 @@ class ReceiptAppViewModel(
                     isSubmittingCanonicalPriceTrace = false,
                     isSubmittingCashOsReceipt = false,
                     isNutritionPublishing = false,
+                    isSubmittingProductCandidates = false,
                     message = error.message ?: "Ready canonical projections could not be completed.",
                 )
             }
@@ -1650,6 +1794,58 @@ class ReceiptAppViewModel(
         }
     }
 
+    /** Opens the product candidate review without publishing anything to PriceTrace. */
+    fun showProductCandidateReview() {
+        val state = mutableUiState.value
+        if (!state.isCanonicalIngestion) return
+        val documentId = state.currentDocumentId
+            ?: state.receipt?.document?.requireLocalDocumentId()
+            ?: return
+        viewModelScope.launch {
+            val envelope = loadIngestionEnvelope(documentId)
+            if (envelope == null || envelope.productCandidates.isEmpty()) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = "검수할 product candidate artifact를 찾지 못했습니다.",
+                )
+                return@launch
+            }
+            val ingestionSession = container.ingestionSessionStore.get(ingestionIdFor(documentId))
+            val projection = ingestionSession?.projections?.firstOrNull {
+                it.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE
+            }
+            mutableUiState.value = mutableUiState.value.copy(
+                screen = AppScreen.PRODUCT_CANDIDATE_REVIEW,
+                currentDocumentId = documentId,
+                productCandidates = envelope.productCandidates,
+                productCandidateVerifiedKeys = ingestionSession?.let { session ->
+                    envelope.productCandidates
+                        .filter {
+                            IngestionArtifactKeys.productCandidate(it.clientKey) in session.verifiedArtifactFingerprints
+                        }
+                        .map { it.clientKey }
+                        .toSet()
+                }.orEmpty(),
+                isSubmittingProductCandidates = false,
+                productCandidateId = projection?.remoteId ?: state.productCandidateId,
+                productCandidateLastError = projection?.lastError,
+                canonicalNutritionCount = envelope.nutrition.size,
+                canonicalNutritionArtifacts = envelope.nutrition,
+                canonicalNutritionVerifiedCount = ingestionSession?.let {
+                    verifiedNutritionCount(it, envelope)
+                } ?: 0,
+                canonicalNutritionVerifiedKeys = ingestionSession?.let {
+                    verifiedNutritionKeys(it, envelope)
+                }.orEmpty(),
+                canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(envelope),
+                canonicalConsumptionVerifiedCount = ingestionSession?.let {
+                    verifiedConsumptionCount(it, envelope)
+                } ?: 0,
+                isConsumptionVerifying = false,
+                message = "상품 후보를 원본과 대조한 뒤 별도로 확정하세요. ProductLabel 검수는 다음 단계에서 진행합니다.",
+            )
+        }
+    }
+
     /** Opens the explicit consumption review required before a Fitness Meal projection. */
     fun showConsumptionReview() {
         val state = mutableUiState.value
@@ -1686,8 +1882,8 @@ class ReceiptAppViewModel(
     }
 
     fun updateConsumptionConsumedAt(consumptionClientKey: String, value: String) {
-        val consumedAt = value.trim()
-        if (consumedAt.isBlank() || runCatching { OffsetDateTime.parse(consumedAt) }.isFailure) return
+        val consumedAt = value.trim().takeIf(String::isNotBlank)
+        if (consumedAt != null && runCatching { OffsetDateTime.parse(consumedAt) }.isFailure) return
         updateConsumption(consumptionClientKey) { consumption ->
             consumption.copy(consumedAt = consumedAt, status = ConsumptionVerificationStatus.UNVERIFIED)
         }
@@ -1698,7 +1894,12 @@ class ReceiptAppViewModel(
         nutritionClientKey: String,
         value: String,
     ) {
-        val amount = value.toDoubleOrNull()?.takeIf { it.isFinite() && it > 0 } ?: return
+        val rawAmount = value.trim()
+        val amount = if (rawAmount.isBlank()) {
+            null
+        } else {
+            rawAmount.toDoubleOrNull()?.takeIf { it.isFinite() && it > 0 } ?: return
+        }
         updateConsumption(consumptionClientKey) { consumption ->
             consumption.copy(
                 status = ConsumptionVerificationStatus.UNVERIFIED,
@@ -1715,12 +1916,13 @@ class ReceiptAppViewModel(
         value: String,
     ) {
         val unit = value.trim()
-        if (unit.isBlank()) return
         updateConsumption(consumptionClientKey) { consumption ->
             consumption.copy(
                 status = ConsumptionVerificationStatus.UNVERIFIED,
                 items = consumption.items.map { item ->
-                    if (item.nutritionClientKey == nutritionClientKey) item.copy(unit = unit) else item
+                    if (item.nutritionClientKey == nutritionClientKey) {
+                        item.copy(unit = unit.takeIf(String::isNotBlank))
+                    } else item
                 },
             )
         }
@@ -1732,13 +1934,14 @@ class ReceiptAppViewModel(
         value: String,
     ) {
         val amountStatus = value.trim()
-        if (amountStatus.isBlank()) return
+        val normalizedStatus = amountStatus.takeIf(String::isNotBlank) ?: "unknown"
+        if (normalizedStatus !in CONSUMPTION_AMOUNT_STATUSES) return
         updateConsumption(consumptionClientKey) { consumption ->
             consumption.copy(
                 status = ConsumptionVerificationStatus.UNVERIFIED,
                 items = consumption.items.map { item ->
                     if (item.nutritionClientKey == nutritionClientKey) {
-                        item.copy(amountStatus = amountStatus)
+                        item.copy(amountStatus = normalizedStatus)
                     } else {
                         item
                     }
@@ -1808,10 +2011,7 @@ class ReceiptAppViewModel(
                     return@launch
                 }
                 val invalid = envelope.consumption.firstOrNull { consumption ->
-                    consumption.items.isEmpty() ||
-                        consumption.consumedAt == null ||
-                        runCatching { OffsetDateTime.parse(consumption.consumedAt) }.isFailure ||
-                        consumption.items.any { it.amountStatus.isBlank() }
+                    !consumption.isCompleteForFitnessMeal()
                 }
                 if (invalid != null) {
                     mutableUiState.value = mutableUiState.value.copy(
@@ -2449,6 +2649,12 @@ class ReceiptAppViewModel(
                 merchantCandidateLastError = state.lastError,
                 message = message,
             )
+            IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE -> current.copy(
+                isSubmittingProductCandidates = false,
+                productCandidateId = state.remoteId ?: current.productCandidateId,
+                productCandidateLastError = state.lastError,
+                message = message,
+            )
             IngestionProjection.FITNESS_NUTRITION -> current.copy(
                 isNutritionPublishing = false,
                 message = message,
@@ -2488,6 +2694,12 @@ class ReceiptAppViewModel(
                 isSubmittingMerchantCandidate = false,
                 merchantCandidateId = state.remoteId ?: current.merchantCandidateId,
                 merchantCandidateLastError = state.lastError,
+                message = message,
+            )
+            IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE -> current.copy(
+                isSubmittingProductCandidates = false,
+                productCandidateId = state.remoteId ?: current.productCandidateId,
+                productCandidateLastError = state.lastError,
                 message = message,
             )
             IngestionProjection.FITNESS_NUTRITION -> current.copy(
@@ -3927,6 +4139,7 @@ class ReceiptAppViewModel(
             AppScreen.IMAGE_CONFIRM -> AppScreen.SESSION_LIST
             AppScreen.IMPORT_PREVIEW -> AppScreen.SESSION_LIST
             AppScreen.MERCHANT_REVIEW -> AppScreen.SESSION_LIST
+            AppScreen.PRODUCT_CANDIDATE_REVIEW -> AppScreen.SESSION_LIST
             AppScreen.OCR_PROGRESS -> return true
             AppScreen.FIELD_REVIEW -> AppScreen.IMAGE_CONFIRM
             AppScreen.ITEM_REVIEW -> AppScreen.FIELD_REVIEW

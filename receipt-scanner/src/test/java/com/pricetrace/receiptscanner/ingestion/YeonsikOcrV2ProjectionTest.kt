@@ -12,7 +12,50 @@ import java.io.File
 
 class YeonsikOcrV2ProjectionTest {
     @Test
-    fun `v2 fitness meal is blocked until consumption is explicitly user verified`() = runBlocking {
+    fun `v2 incomplete consumption never activates fitness meal`() = runBlocking {
+        val imported = ExternalJsonImporter().import(
+            readExample("yeonsik-ocr.v2.packaged-product.example.json"),
+            "local-v2-incomplete-consumption",
+        ) as ExternalJsonImportOutcome.Success
+        val sourceEnvelope = (imported.result.draft as CanonicalDraft.Envelope).value
+        val envelope = sourceEnvelope.copy(
+            consumption = sourceEnvelope.consumption.map { consumption ->
+                consumption.copy(
+                    consumedAt = null,
+                    items = consumption.items.map { item ->
+                        item.copy(amount = null, unit = null, amountStatus = "unknown")
+                    },
+                )
+            },
+        )
+        val store = InMemoryIngestionSessionStore()
+        val orchestrator = IngestionOrchestrator(
+            store = store,
+            submitters = mapOf(
+                IngestionProjection.FITNESS_MEAL to submitter { ProjectionSubmission.Success("meal-1") },
+            ),
+            now = { "2026-09-06T00:00:00Z" },
+        )
+
+        val started = orchestrator.start(
+            ingestionId = "ingestion-v2-incomplete-consumption",
+            localDocumentId = "local-v2-incomplete-consumption",
+            envelope = envelope,
+            evidence = listOf(
+                LocalEvidence("product-photo-1", SourceAttachmentType.PRODUCT_PHOTO, true),
+                LocalEvidence("nutrition-label-1", SourceAttachmentType.NUTRITION_LABEL, true),
+                LocalEvidence("meal-photo-1", SourceAttachmentType.FOOD_PHOTO, true),
+            ),
+        ) as IngestionStartResult.Success
+
+        assertEquals(
+            ProjectionStatus.DISABLED,
+            started.session.projections.first { it.projection == IngestionProjection.FITNESS_MEAL }.status,
+        )
+    }
+
+    @Test
+    fun `v2 fitness meal stays disabled until consumption is complete and explicitly user verified`() = runBlocking {
         val imported = ExternalJsonImporter().import(
             readExample("yeonsik-ocr.v2.packaged-product.example.json"),
             "local-v2-consumption-gate",
@@ -38,14 +81,16 @@ class YeonsikOcrV2ProjectionTest {
             envelope = envelope,
             evidence = evidence,
         )
-        val blocked = orchestrator.submitProjection(
+        val disabled = orchestrator.submitProjection(
             "ingestion-v2-consumption-gate",
             IngestionProjection.FITNESS_MEAL,
             envelope,
         )
 
-        assertEquals(ProjectionStatus.BLOCKED, blocked.status)
-        assertEquals("consumption_artifact_not_user_verified", blocked.lastError)
+        assertEquals(
+            ProjectionStatus.DISABLED,
+            disabled.status,
+        )
     }
 
     @Test

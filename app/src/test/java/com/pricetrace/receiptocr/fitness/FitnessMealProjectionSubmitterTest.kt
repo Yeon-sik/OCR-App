@@ -144,6 +144,33 @@ class FitnessMealProjectionSubmitterTest {
         assertTrue(transport.requests.isEmpty())
     }
 
+    @Test
+    fun incompleteConsumptionIsRejectedBeforeRemoteCall() = runTest {
+        val transport = QueueTransport()
+        val source = packagedEnvelope("2026-09-06T08:10:00+09:00")
+        val result = FitnessMealProjectionSubmitter(
+            NutritionSupabaseGateway(FakeStore(signedIn()), transport),
+        ).submit(
+            request(
+                envelope = source.copy(
+                    consumption = source.consumption.map { consumption ->
+                        consumption.copy(
+                            items = consumption.items.map {
+                                it.copy(amount = null, unit = null, amountStatus = "unknown")
+                            },
+                        )
+                    },
+                ),
+                dependencyMetadata = """[{"nutrition_food_id":"food-1"}]""",
+            ),
+        )
+
+        val failure = result as ProjectionSubmission.Failure
+        assertEquals("consumption_artifact_incomplete", failure.message)
+        assertFalse(failure.retryable)
+        assertTrue(transport.requests.isEmpty())
+    }
+
     private fun request(
         envelope: YeonsikOcrEnvelope,
         dependencyMetadata: String,
