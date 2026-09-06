@@ -12,7 +12,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonArray
 
 /** Publishes only canonical Nutrition contracts for the integrated OCR envelope. */
-internal class FitnessCanonicalProjectionSubmitter(
+class FitnessCanonicalProjectionSubmitter(
     private val gateway: NutritionSupabaseGateway,
 ) : IngestionProjectionSubmitter {
     override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {

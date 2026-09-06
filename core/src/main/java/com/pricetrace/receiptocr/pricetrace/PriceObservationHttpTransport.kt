@@ -8,23 +8,23 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
 
-internal data class PriceObservationHttpRequest(
+data class PriceObservationHttpRequest(
     val method: String,
     val url: String,
     val headers: Map<String, String>,
     val body: String? = null,
 )
 
-internal data class PriceObservationHttpResponse(
+data class PriceObservationHttpResponse(
     val statusCode: Int,
     val body: String,
 )
 
-internal fun interface PriceObservationHttpTransport {
+fun interface PriceObservationHttpTransport {
     suspend fun execute(request: PriceObservationHttpRequest): PriceObservationHttpResponse
 }
 
-internal class HttpsPriceObservationHttpTransport : PriceObservationHttpTransport {
+class HttpsPriceObservationHttpTransport : PriceObservationHttpTransport {
     override suspend fun execute(request: PriceObservationHttpRequest): PriceObservationHttpResponse =
         withContext(Dispatchers.IO) {
             require(request.url.startsWith("https://", ignoreCase = true)) {

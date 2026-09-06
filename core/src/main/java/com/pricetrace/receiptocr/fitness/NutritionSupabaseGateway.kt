@@ -23,7 +23,7 @@ sealed interface NutritionAuthOutcome {
     data class Failure(val reason: NutritionGatewayFailure) : NutritionAuthOutcome
 }
 
-internal class NutritionSupabaseGateway(
+class NutritionSupabaseGateway(
     private val store: NutritionSupabaseStore,
     private val transport: NutritionHttpTransport = HttpsNutritionHttpTransport(),
 ) {

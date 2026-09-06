@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 rootProject.name = "PriceTraceReceiptOcr"
 include(":app")
 include(":receipt-scanner")
+include(":core")

@@ -31,7 +31,7 @@ fun interface PriceTraceProductRevisionReader {
  * Creates a retryable Fitness-owned link proposal only after PriceTrace has resolved a product
  * identity and its exact product-read revision, and Fitness has created NutritionFood.
  */
-internal class FitnessProductNutritionLinkProjectionSubmitter(
+class FitnessProductNutritionLinkProjectionSubmitter(
     private val nutritionGateway: NutritionSupabaseGateway,
     private val productRevisionReader: PriceTraceProductRevisionReader,
 ) : IngestionProjectionSubmitter {

@@ -8,23 +8,23 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
 
-internal data class NutritionHttpRequest(
+data class NutritionHttpRequest(
     val method: String,
     val url: String,
     val headers: Map<String, String>,
     val body: String? = null,
 )
 
-internal data class NutritionHttpResponse(
+data class NutritionHttpResponse(
     val statusCode: Int,
     val body: String,
 )
 
-internal fun interface NutritionHttpTransport {
+fun interface NutritionHttpTransport {
     suspend fun execute(request: NutritionHttpRequest): NutritionHttpResponse
 }
 
-internal class HttpsNutritionHttpTransport : NutritionHttpTransport {
+class HttpsNutritionHttpTransport : NutritionHttpTransport {
     override suspend fun execute(request: NutritionHttpRequest): NutritionHttpResponse = withContext(Dispatchers.IO) {
         require(request.url.startsWith("https://")) { "Only HTTPS Nutrition endpoints are allowed" }
         val connection = (URL(request.url).openConnection() as HttpURLConnection).apply {

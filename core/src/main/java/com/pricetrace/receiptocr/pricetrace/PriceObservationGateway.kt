@@ -35,7 +35,7 @@ sealed interface PriceObservationReadOutcome<out T> {
     ) : PriceObservationReadOutcome<Nothing>
 }
 
-internal class PriceObservationGateway(
+class PriceObservationGateway(
     private val store: PriceTraceSupabaseStore,
     private val transport: PriceObservationHttpTransport = HttpsPriceObservationHttpTransport(),
 ) : PriceObservationSubmitter, RestaurantReceiptSubmitter {

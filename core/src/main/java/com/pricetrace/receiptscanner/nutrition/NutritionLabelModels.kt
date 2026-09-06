@@ -1,7 +1,5 @@
 package com.pricetrace.receiptscanner.nutrition
 
-import com.pricetrace.receiptscanner.ocr.OcrLine
-
 const val FITNESS_NUTRITION_DRAFT_SCHEMA = "fitness-nutrition-draft.v1"
 const val FITNESS_NUTRITION_PARSER_VERSION = "nutrition-label-parser.v2"
 const val FITNESS_NUTRITION_DATA_VERSION = 2
@@ -17,7 +15,6 @@ enum class NutritionDraftStatus(val wireValue: String) {
         } ?: PARSED
     }
 }
-
 enum class NutritionField(
     val wireKey: String,
     val koreanLabel: String,
@@ -186,9 +183,3 @@ object NutritionLabelValidator {
     }
 }
 
-internal fun OcrLine.toNutritionEvidence(): NutritionFieldEvidence = NutritionFieldEvidence(
-    ocrLineId = id,
-    pageId = pageId,
-    rawText = text,
-    confidence = confidence,
-)
