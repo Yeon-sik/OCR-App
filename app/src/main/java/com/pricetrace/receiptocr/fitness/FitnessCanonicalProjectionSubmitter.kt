@@ -62,17 +62,47 @@ internal class FitnessCanonicalProjectionSubmitter(
                             priceTraceIdentity = priceTraceIdentity,
                         )
                     }
-                }
-                when (val result = gateway.importCanonical(payload)) {
-                    is NutritionCanonicalImportOutcome.Success -> {
-                        responses += result.rawResponse
-                        lastFoodId = result.response.nutritionFoodId
-                    }
-                    is NutritionCanonicalImportOutcome.Failure -> {
-                        return ProjectionSubmission.Failure(
-                            message = result.message ?: result.reason.name,
-                            retryable = result.reason.isRetryable(),
+                    is IngestionNutrition.MealComponentEstimate -> {
+                        val restaurantName = item.reference?.restaurantName
+                            ?: envelope.receipt?.merchant?.name
+                            ?: envelope.merchantCandidate?.name
+                            ?: return ProjectionSubmission.Failure(
+                                "restaurant_name_missing",
+                                retryable = false,
+                            )
+                        CanonicalNutritionPayloadFactory.fromMealComponentEstimate(
+                            localDocumentId = localDocumentId,
+                            revisionSeq = request.revisionSeq,
+                            idempotencyKey = itemKey,
+                            restaurantName = restaurantName,
+                            item = item,
                         )
+                    }
+                }
+                when (item) {
+                    is IngestionNutrition.MealComponentEstimate -> when (val result = gateway.importMealComponentEstimate(payload)) {
+                        is NutritionMealComponentImportOutcome.Success -> {
+                            responses += result.rawResponse
+                            lastFoodId = result.response.nutritionFoodId
+                        }
+                        is NutritionMealComponentImportOutcome.Failure -> {
+                            return ProjectionSubmission.Failure(
+                                message = result.message ?: result.reason.name,
+                                retryable = result.reason.isRetryable(),
+                            )
+                        }
+                    }
+                    else -> when (val result = gateway.importCanonical(payload)) {
+                        is NutritionCanonicalImportOutcome.Success -> {
+                            responses += result.rawResponse
+                            lastFoodId = result.response.nutritionFoodId
+                        }
+                        is NutritionCanonicalImportOutcome.Failure -> {
+                            return ProjectionSubmission.Failure(
+                                message = result.message ?: result.reason.name,
+                                retryable = result.reason.isRetryable(),
+                            )
+                        }
                     }
                 }
             }

@@ -128,11 +128,15 @@ object PriceObservationJson {
             },
         )
 
-    fun encodeProductReadRequest(query: String?, limit: Int = 50): String =
+    fun encodeProductReadRequest(
+        query: String?,
+        limit: Int = 50,
+        catalogProductId: String? = null,
+    ): String =
         json.encodeToString(
             JsonObject.serializer(),
             buildJsonObject {
-                put("p_catalog_product_id", JsonNull)
+                put("p_catalog_product_id", catalogProductId?.let(::JsonPrimitive) ?: JsonNull)
                 put("p_query", query?.trim()?.takeIf(String::isNotEmpty)?.let(::JsonPrimitive) ?: JsonNull)
                 put("p_limit", JsonPrimitive(limit.coerceIn(1, 100)))
             },

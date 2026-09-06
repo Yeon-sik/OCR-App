@@ -78,6 +78,57 @@ internal class NutritionSupabaseGateway(
         return importCanonicalOnce(payload, refreshed)
     }
 
+    /** Sends the verified item-level Meal to Fitness's canonical Meal boundary. */
+    suspend fun importVerifiedMeal(payload: FitnessMealCanonicalPayload): NutritionMealImportOutcome {
+        val initial = store.read()
+        if (!initial.isSignedIn) {
+            return NutritionMealImportOutcome.Failure(NutritionGatewayFailure.NOT_CONFIGURED)
+        }
+        val first = importVerifiedMealOnce(payload, initial)
+        if (first !is NutritionMealImportOutcome.Failure ||
+            first.reason != NutritionGatewayFailure.AUTHENTICATION
+        ) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return importVerifiedMealOnce(payload, refreshed)
+    }
+
+    /** Uses the separate Fitness audit boundary for free/estimated meal components. */
+    suspend fun importMealComponentEstimate(
+        payload: CanonicalNutritionImportPayload,
+    ): NutritionMealComponentImportOutcome {
+        val initial = store.read()
+        if (!initial.isSignedIn) {
+            return NutritionMealComponentImportOutcome.Failure(NutritionGatewayFailure.NOT_CONFIGURED)
+        }
+        val first = importMealComponentEstimateOnce(payload, initial)
+        if (first !is NutritionMealComponentImportOutcome.Failure ||
+            first.reason != NutritionGatewayFailure.AUTHENTICATION
+        ) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return importMealComponentEstimateOnce(payload, refreshed)
+    }
+
+    suspend fun proposeProductNutritionLink(
+        payload: ProductNutritionLinkProposalPayload,
+    ): NutritionProductLinkOutcome {
+        val initial = store.read()
+        if (!initial.isSignedIn) {
+            return NutritionProductLinkOutcome.Failure(NutritionGatewayFailure.NOT_CONFIGURED)
+        }
+        val first = proposeProductNutritionLinkOnce(payload, initial)
+        if (first !is NutritionProductLinkOutcome.Failure ||
+            first.reason != NutritionGatewayFailure.AUTHENTICATION
+        ) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return proposeProductNutritionLinkOnce(payload, refreshed)
+    }
+
     private suspend fun importCanonicalOnce(
         payload: CanonicalNutritionImportPayload,
         config: NutritionSupabaseConfig,
@@ -112,6 +163,114 @@ internal class NutritionSupabaseGateway(
         NutritionCanonicalImportOutcome.Failure(NutritionGatewayFailure.NETWORK)
     } catch (error: Exception) {
         NutritionCanonicalImportOutcome.Failure(NutritionGatewayFailure.CONTRACT, error.message)
+    }
+
+    private suspend fun proposeProductNutritionLinkOnce(
+        payload: ProductNutritionLinkProposalPayload,
+        config: NutritionSupabaseConfig,
+    ): NutritionProductLinkOutcome = try {
+        val response = transport.execute(
+            request(
+                config = config,
+                method = "POST",
+                path = "/rest/v1/rpc/propose_product_nutrition_link_v1",
+                body = payload.toRpcJson(),
+            ),
+        )
+        when {
+            response.statusCode == 401 || response.statusCode == 403 ->
+                NutritionProductLinkOutcome.Failure(NutritionGatewayFailure.AUTHENTICATION)
+            response.statusCode == 409 ->
+                NutritionProductLinkOutcome.Failure(NutritionGatewayFailure.CONFLICT, response.body.takeIf(String::isNotBlank))
+            response.statusCode == 429 ->
+                NutritionProductLinkOutcome.Failure(NutritionGatewayFailure.RATE_LIMITED, response.body.takeIf(String::isNotBlank))
+            response.statusCode in 500..599 ->
+                NutritionProductLinkOutcome.Failure(NutritionGatewayFailure.SERVER, response.body.takeIf(String::isNotBlank))
+            response.statusCode !in 200..299 ->
+                NutritionProductLinkOutcome.Failure(NutritionGatewayFailure.CONTRACT, response.body.takeIf(String::isNotBlank))
+            else -> NutritionProductLinkOutcome.Success(
+                response = ProductNutritionLinkProposalJson.decodeResponse(response.body),
+                rawResponse = response.body,
+            )
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: IOException) {
+        NutritionProductLinkOutcome.Failure(NutritionGatewayFailure.NETWORK)
+    } catch (error: Exception) {
+        NutritionProductLinkOutcome.Failure(NutritionGatewayFailure.CONTRACT, error.message)
+    }
+
+    private suspend fun importVerifiedMealOnce(
+        payload: FitnessMealCanonicalPayload,
+        config: NutritionSupabaseConfig,
+    ): NutritionMealImportOutcome = try {
+        val response = transport.execute(
+            request(
+                config = config,
+                method = "POST",
+                path = "/rest/v1/rpc/import_verified_meal_v1",
+                body = payload.toRpcJson(),
+            ),
+        )
+        when {
+            response.statusCode == 401 || response.statusCode == 403 ->
+                NutritionMealImportOutcome.Failure(NutritionGatewayFailure.AUTHENTICATION)
+            response.statusCode == 409 ->
+                NutritionMealImportOutcome.Failure(NutritionGatewayFailure.CONFLICT, response.body.takeIf(String::isNotBlank))
+            response.statusCode == 429 ->
+                NutritionMealImportOutcome.Failure(NutritionGatewayFailure.RATE_LIMITED, response.body.takeIf(String::isNotBlank))
+            response.statusCode in 500..599 ->
+                NutritionMealImportOutcome.Failure(NutritionGatewayFailure.SERVER, response.body.takeIf(String::isNotBlank))
+            response.statusCode !in 200..299 ->
+                NutritionMealImportOutcome.Failure(NutritionGatewayFailure.CONTRACT, response.body.takeIf(String::isNotBlank))
+            else -> NutritionMealImportOutcome.Success(
+                response = FitnessMealCanonicalJson.decodeResponse(response.body),
+                rawResponse = response.body,
+            )
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: IOException) {
+        NutritionMealImportOutcome.Failure(NutritionGatewayFailure.NETWORK)
+    } catch (error: Exception) {
+        NutritionMealImportOutcome.Failure(NutritionGatewayFailure.CONTRACT, error.message)
+    }
+
+    private suspend fun importMealComponentEstimateOnce(
+        payload: CanonicalNutritionImportPayload,
+        config: NutritionSupabaseConfig,
+    ): NutritionMealComponentImportOutcome = try {
+        val response = transport.execute(
+            request(
+                config = config,
+                method = "POST",
+                path = "/rest/v1/rpc/import_meal_component_estimate_v1",
+                body = MealComponentEstimateJson.encode(payload),
+            ),
+        )
+        when {
+            response.statusCode == 401 || response.statusCode == 403 ->
+                NutritionMealComponentImportOutcome.Failure(NutritionGatewayFailure.AUTHENTICATION)
+            response.statusCode == 409 ->
+                NutritionMealComponentImportOutcome.Failure(NutritionGatewayFailure.CONFLICT, response.body.takeIf(String::isNotBlank))
+            response.statusCode == 429 ->
+                NutritionMealComponentImportOutcome.Failure(NutritionGatewayFailure.RATE_LIMITED, response.body.takeIf(String::isNotBlank))
+            response.statusCode in 500..599 ->
+                NutritionMealComponentImportOutcome.Failure(NutritionGatewayFailure.SERVER, response.body.takeIf(String::isNotBlank))
+            response.statusCode !in 200..299 ->
+                NutritionMealComponentImportOutcome.Failure(NutritionGatewayFailure.CONTRACT, response.body.takeIf(String::isNotBlank))
+            else -> NutritionMealComponentImportOutcome.Success(
+                response = MealComponentEstimateJson.decodeResponse(response.body),
+                rawResponse = response.body,
+            )
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: IOException) {
+        NutritionMealComponentImportOutcome.Failure(NutritionGatewayFailure.NETWORK)
+    } catch (error: Exception) {
+        NutritionMealComponentImportOutcome.Failure(NutritionGatewayFailure.CONTRACT, error.message)
     }
 
     private suspend fun refresh(config: NutritionSupabaseConfig): NutritionSupabaseConfig? {

@@ -34,6 +34,8 @@ data class ProjectionRequest(
     /** Projection/domain revision, not the envelope's canonical revision. */
     val revisionSeq: Long = 1,
     val canonicalFingerprint: String? = null,
+    /** Durable metadata from already-uploaded dependencies, never source authority input. */
+    val dependencyMetadataJson: Map<IngestionProjection, String> = emptyMap(),
 )
 
 sealed interface ProjectionSubmission {
@@ -141,6 +143,7 @@ class IngestionOrchestrator(
         val previousArtifacts = current.verifiedArtifactFingerprints
         val nextArtifacts = artifactFingerprints(envelope)
         val affectedArtifactKeys = changedArtifactKeys(previousArtifacts, nextArtifacts)
+        val enabled = enabledProjections(envelope).toSet()
         val revised = current.copy(
             canonicalFingerprint = nextFingerprint,
             revisionSeq = current.revisionSeq + 1,
@@ -150,7 +153,20 @@ class IngestionOrchestrator(
             verifiedArtifactFingerprints = previousArtifacts.filter { (key, value) -> nextArtifacts[key] == value },
             updatedAt = nowValue,
             projections = current.projections.map { state ->
+                val shouldEnable = state.projection in enabled
                 when {
+                    state.projection == IngestionProjection.FITNESS_MEAL &&
+                        !shouldEnable && state.status != ProjectionStatus.DISABLED ->
+                        resetPending(state, nowValue).copy(
+                            status = ProjectionStatus.DISABLED,
+                            lastError = "consumption_artifact_incomplete",
+                            projectionPayloadFingerprint = null,
+                        )
+                    state.projection == IngestionProjection.FITNESS_MEAL &&
+                        state.status == ProjectionStatus.DISABLED && shouldEnable ->
+                        resetPending(state, nowValue).copy(
+                            projectionPayloadFingerprint = projectionPayloadFingerprint(state.projection, envelope),
+                        )
                     state.status == ProjectionStatus.DISABLED -> state.copy(updatedAt = nowValue)
                     else -> {
                         val nextProjectionFingerprint = projectionPayloadFingerprint(state.projection, envelope)
@@ -184,6 +200,7 @@ class IngestionOrchestrator(
     ): IngestionStartResult = when {
         envelope.receipt != null -> markReceiptVerified(ingestionId, envelope, evidence, inputOrigin)
         envelope.nutrition.isNotEmpty() -> markNutritionVerified(ingestionId, envelope, evidence, inputOrigin = inputOrigin)
+        envelope.productCandidates.isNotEmpty() -> markProductCandidatesVerified(ingestionId, envelope, evidence, inputOrigin = inputOrigin)
         envelope.merchantCandidate != null -> markMerchantCandidateVerified(ingestionId, envelope, evidence, inputOrigin)
         else -> IngestionStartResult.Failure(listOf("no_reviewable_artifact"))
     }
@@ -238,15 +255,36 @@ class IngestionOrchestrator(
     ): IngestionStartResult {
         val selected = envelope.consumption.filter { it.clientKey in consumptionClientKeys }
         if (selected.isEmpty()) return IngestionStartResult.Failure(listOf("consumption_artifact_missing"))
+        if (envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA && selected.any { !it.isCompleteForFitnessMeal() }) {
+            return IngestionStartResult.Failure(listOf("consumption_artifact_incomplete"))
+        }
         if (selected.any { it.status != ConsumptionVerificationStatus.USER_VERIFIED }) {
             return IngestionStartResult.Failure(listOf("consumption_artifact_not_user_verified"))
         }
-        val nutritionKeys = selected.flatMap { it.nutritionClientKeys }.map(IngestionArtifactKeys::nutrition).toSet()
+        val nutritionKeys = selected.flatMap { it.effectiveNutritionClientKeys }.map(IngestionArtifactKeys::nutrition).toSet()
         return markArtifactsVerified(
             ingestionId = ingestionId,
             envelope = envelope,
             evidence = evidence,
             artifactKeys = selected.map { IngestionArtifactKeys.consumption(it.clientKey) }.toSet() + nutritionKeys,
+            inputOrigin = inputOrigin,
+        )
+    }
+
+    suspend fun markProductCandidatesVerified(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+        evidence: List<LocalEvidence>,
+        productClientKeys: Set<String> = envelope.productCandidates.map { it.clientKey }.toSet(),
+        inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+    ): IngestionStartResult {
+        val requestedKeys = productClientKeys.map(IngestionArtifactKeys::productCandidate).toSet()
+        if (requestedKeys.isEmpty()) return IngestionStartResult.Failure(listOf("product_candidate_artifact_missing"))
+        return markArtifactsVerified(
+            ingestionId = ingestionId,
+            envelope = envelope,
+            evidence = evidence,
+            artifactKeys = requestedKeys,
             inputOrigin = inputOrigin,
         )
     }
@@ -322,6 +360,18 @@ class IngestionOrchestrator(
             val invalidated = invalidateVerification(session, envelope, "canonical_fingerprint_mismatch")
             return invalidated.projections.first { it.projection == projection }
         }
+        if (projection == IngestionProjection.FITNESS_MEAL &&
+            envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA &&
+            !fitnessMealValuesComplete(envelope)
+        ) {
+            return persistBlocked(session, projection, current, "consumption_artifact_incomplete")
+        }
+        if (projection == IngestionProjection.FITNESS_MEAL &&
+            envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA &&
+            envelope.consumption.any { it.status != ConsumptionVerificationStatus.USER_VERIFIED }
+        ) {
+            return persistBlocked(session, projection, current, "consumption_artifact_not_user_verified")
+        }
         val requiredArtifacts = requiredArtifactKeys(projection, envelope)
         val currentArtifacts = artifactFingerprints(envelope)
         if (requiredArtifacts.isEmpty() || requiredArtifacts.any {
@@ -344,6 +394,11 @@ class IngestionOrchestrator(
         val resolvedIdentity = resolvedIdentity(session)
         if (requiresPriceTraceIdentity(projection, envelope) && resolvedIdentity?.priceTrace == null) {
             return persistBlocked(session, projection, current, "pricetrace_identity_missing")
+        }
+        if (requiresProductCandidateIdentity(projection, envelope) &&
+            (resolvedIdentity == null || resolvedIdentity.productCandidates.isEmpty())
+        ) {
+            return persistBlocked(session, projection, current, "pricetrace_product_identity_missing")
         }
         require(current.status in setOf(ProjectionStatus.PENDING, ProjectionStatus.BLOCKED, ProjectionStatus.FAILED)) {
             "projection_not_retryable"
@@ -379,13 +434,16 @@ class IngestionOrchestrator(
         val request = ProjectionRequest(
             ingestionId = ingestionId,
             projection = projection,
-            canonicalPayload = YeonsikOcrEnvelopeJson.encode(envelope),
+            canonicalPayload = YeonsikOcrEnvelopeCodec.encode(envelope),
             resolvedIdentity = resolvedIdentity,
             idempotencyKey = key,
             envelope = envelope,
             localDocumentId = session.localDocumentId,
             revisionSeq = projectionRevisionSeq,
             canonicalFingerprint = session.canonicalFingerprint,
+            dependencyMetadataJson = session.projections
+                .filter { it.status == ProjectionStatus.UPLOADED && it.metadataJson != null }
+                .associate { it.projection to it.metadataJson!! },
         )
         return when (val result = submitter.submit(request)) {
             is ProjectionSubmission.Success -> persistSuccess(session, projection, attempted, key, result, envelope)
@@ -477,7 +535,7 @@ class IngestionOrchestrator(
     }
 
     private fun fingerprint(envelope: YeonsikOcrEnvelope): String =
-        StableIds.sha256("ingestion|${YeonsikOcrEnvelopeJson.canonicalize(envelope)}")
+        StableIds.sha256("ingestion|${YeonsikOcrEnvelopeCodec.canonicalize(envelope)}")
 
     private fun artifactFingerprints(envelope: YeonsikOcrEnvelope): Map<String, String> = buildMap {
         envelope.receipt?.let { receipt ->
@@ -502,7 +560,16 @@ class IngestionOrchestrator(
         envelope.consumption.forEach { item ->
             put(
                 IngestionArtifactKeys.consumption(item.clientKey),
-                StableIds.sha256("ingestion-artifact|consumption|" + consumptionPayloadDependency(item)),
+                StableIds.sha256(
+                    "ingestion-artifact|consumption|" +
+                        consumptionPayloadDependency(item, envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA),
+                ),
+            )
+        }
+        envelope.productCandidates.forEach { candidate ->
+            put(
+                IngestionArtifactKeys.productCandidate(candidate.clientKey),
+                StableIds.sha256("ingestion-artifact|product-candidate|${productCandidatePayloadDependency(candidate)}"),
             )
         }
         envelope.merchantCandidate?.let {
@@ -517,7 +584,7 @@ class IngestionOrchestrator(
             )
             put(
                 IngestionArtifactKeys.MERCHANT_CANDIDATE,
-                StableIds.sha256("ingestion-artifact|merchant|${YeonsikOcrEnvelopeJson.canonicalize(artifactEnvelope)}"),
+                StableIds.sha256("ingestion-artifact|merchant|${YeonsikOcrEnvelopeCodec.canonicalize(artifactEnvelope)}"),
             )
         }
     }
@@ -538,10 +605,23 @@ class IngestionOrchestrator(
                 mode = IngestionMode.RESTAURANT,
                 source = IngestionSource(producer = "fitness", sourceFiles = emptyList()),
                 nutrition = listOf(item),
+                schemaVersion = envelope.schemaVersion,
             )
             "restaurant_estimate|client_key=" + item.clientKey +
                 "|restaurant_name=" + (fitnessRestaurantName(envelope) ?: "<null>") +
-                "|" + YeonsikOcrEnvelopeJson.encode(artifactEnvelope, canonicalIds = true)
+                "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
+        }
+        is IngestionNutrition.MealComponentEstimate -> {
+            val artifactEnvelope = YeonsikOcrEnvelope(
+                mode = IngestionMode.RESTAURANT,
+                source = IngestionSource(producer = "fitness", sourceFiles = emptyList()),
+                nutrition = listOf(item),
+                schemaVersion = envelope.schemaVersion,
+            )
+            "meal_component_estimate|client_key=" + item.clientKey +
+                "|restaurant_name=" + (item.reference?.restaurantName ?: fitnessRestaurantName(envelope) ?: "<null>") +
+                "|branch_name=" + (item.reference?.branchName ?: "<null>") +
+                "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
         }
     }
 
@@ -575,7 +655,22 @@ class IngestionOrchestrator(
             IngestionProjection.FITNESS_MEAL ->
                 "fitness-meal|" + envelope.nutrition.joinToString("|") { item ->
                     nutritionPayloadDependency(envelope, item)
-                } + "|consumption=" + envelope.consumption.joinToString("|", transform = ::consumptionPayloadDependency)
+                } + "|consumption=" + envelope.consumption.joinToString("|") { consumption ->
+                    consumptionPayloadDependency(
+                        consumption,
+                        envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA,
+                    )
+                }
+            IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE ->
+                "pricetrace-product-candidate|" + envelope.productCandidates
+                    .sortedBy(ProductCandidate::clientKey)
+                    .joinToString("|", transform = ::productCandidatePayloadDependency)
+            IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK ->
+                "fitness-product-nutrition-link|products=" + envelope.productCandidates
+                    .sortedBy(ProductCandidate::clientKey)
+                    .joinToString("|", transform = ::productCandidatePayloadDependency) +
+                    "|nutrition=" + envelope.nutrition.sortedBy(IngestionNutrition::clientKey)
+                    .joinToString("|") { item -> nutritionPayloadDependency(envelope, item) }
             IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE ->
                 "merchant|" + merchantPayloadDependency(envelope.merchantCandidate)
         },
@@ -627,11 +722,70 @@ class IngestionOrchestrator(
             ).joinToString("|") { value -> value ?: "<null>" }
         } ?: "<none>"
 
-    private fun consumptionPayloadDependency(consumption: IngestionConsumption): String = listOf(
-        consumption.clientKey,
-        consumption.nutritionClientKeys.toSortedSet().joinToString(","),
-        consumption.consumedAt ?: "<null>",
-    ).joinToString("|")
+    private fun consumptionPayloadDependency(
+        consumption: IngestionConsumption,
+        includeV2Fields: Boolean,
+    ): String {
+        val itemDependency = consumption.items.joinToString(",") { item ->
+            if (includeV2Fields) {
+                listOf(item.nutritionClientKey, item.amount, item.unit, item.confidence, item.amountStatus)
+                    .joinToString("/")
+            } else {
+                listOf(item.nutritionClientKey, item.amount, item.unit, item.confidence)
+                    .joinToString("/")
+            }
+        }
+        return if (includeV2Fields) {
+            listOf(
+                consumption.clientKey,
+                consumption.effectiveNutritionClientKeys.toSortedSet().joinToString(","),
+                consumption.consumedAt ?: "<null>",
+                consumption.status.wireValue,
+                itemDependency,
+            ).joinToString("|")
+        } else {
+            listOf(
+                consumption.clientKey,
+                consumption.effectiveNutritionClientKeys.toSortedSet().joinToString(","),
+                consumption.consumedAt ?: "<null>",
+                itemDependency,
+            ).joinToString("|")
+        }
+    }
+
+    private fun productCandidatePayloadDependency(candidate: ProductCandidate): String = listOf<Any?>(
+        candidate.clientKey,
+        candidate.productName,
+        candidate.brand,
+        candidate.manufacturer,
+        candidate.specification,
+        candidate.contentAmount,
+        candidate.contentUnit,
+        candidate.packageCount,
+        candidate.variant,
+        candidate.barcodes.joinToString(",") { barcode ->
+            listOf(barcode.type, barcode.value).joinToString("/")
+        },
+        candidate.effectiveSourceAttachmentIds.sorted().joinToString(","),
+        candidate.confidence,
+        candidate.candidateType,
+        candidate.sourceVersion,
+        candidate.evidence.sortedWith(compareBy(
+            { it.sourceAttachmentIds.joinToString(",") },
+            { it.field },
+            { it.sourceRef.orEmpty() },
+        )).joinToString(",") { evidence ->
+            listOf(
+                evidence.sourceAttachmentIds.sorted().joinToString(","),
+                evidence.source,
+                evidence.sourceType,
+                evidence.sourceRef,
+                evidence.field,
+                evidence.observedValue,
+                evidence.contentHash,
+            ).joinToString("/") { it ?: "<null>" }
+        },
+    ).joinToString("|") { it?.toString() ?: "<null>" }
 
     private fun requiredArtifactKeys(
         projection: IngestionProjection,
@@ -649,6 +803,12 @@ class IngestionOrchestrator(
             addAll(envelope.nutrition.map { IngestionArtifactKeys.nutrition(it.clientKey) })
             addAll(envelope.consumption.map { IngestionArtifactKeys.consumption(it.clientKey) })
         }
+        IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE ->
+            envelope.productCandidates.map { IngestionArtifactKeys.productCandidate(it.clientKey) }.toSet()
+        IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK -> buildSet {
+            addAll(envelope.productCandidates.map { IngestionArtifactKeys.productCandidate(it.clientKey) })
+            addAll(envelope.nutrition.map { IngestionArtifactKeys.nutrition(it.clientKey) })
+        }
         IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> if (envelope.merchantCandidate != null && envelope.receipt == null) {
             setOf(IngestionArtifactKeys.MERCHANT_CANDIDATE)
         } else emptySet()
@@ -664,6 +824,12 @@ class IngestionOrchestrator(
         IngestionProjection.FITNESS_NUTRITION -> artifactKeys.any { it.startsWith("nutrition:") }
         IngestionProjection.FITNESS_MEAL -> artifactKeys.any {
             it.startsWith("nutrition:") || it.startsWith("${IngestionArtifactKeys.CONSUMPTION}:")
+        }
+        IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE -> artifactKeys.any {
+            it.startsWith("${IngestionArtifactKeys.PRODUCT_CANDIDATE}:")
+        }
+        IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK -> artifactKeys.any {
+            it.startsWith("${IngestionArtifactKeys.PRODUCT_CANDIDATE}:") || it.startsWith("nutrition:")
         }
         IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> IngestionArtifactKeys.MERCHANT_CANDIDATE in artifactKeys
     }
@@ -826,6 +992,11 @@ class IngestionOrchestrator(
 
     private fun enabledProjections(envelope: YeonsikOcrEnvelope): List<IngestionProjection> =
         withDependencies(envelope.targets.ifEmpty { inferredTargets(envelope) }, envelope)
+            .filterNot { projection ->
+                projection == IngestionProjection.FITNESS_MEAL &&
+                    envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA &&
+                    !fitnessMealReady(envelope)
+            }
             .sortedBy(IngestionProjection::wireValue)
 
     private fun withDependencies(
@@ -844,6 +1015,10 @@ class IngestionOrchestrator(
         if (requested.contains(IngestionProjection.FITNESS_MEAL)) {
             add(IngestionProjection.FITNESS_NUTRITION)
         }
+        if (requested.contains(IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK)) {
+            add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
+            add(IngestionProjection.FITNESS_NUTRITION)
+        }
     }
 
     private fun inferredTargets(envelope: YeonsikOcrEnvelope): Set<IngestionProjection> = buildSet {
@@ -856,11 +1031,32 @@ class IngestionOrchestrator(
             add(IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE)
         }
         if (envelope.nutrition.isNotEmpty()) add(IngestionProjection.FITNESS_NUTRITION)
-        if (envelope.consumption.isNotEmpty()) add(IngestionProjection.FITNESS_MEAL)
+        if (envelope.consumption.isNotEmpty() &&
+            (envelope.schemaVersion != YEONSIK_OCR_V2_SCHEMA ||
+                (envelope.nutrition.isNotEmpty() && fitnessMealReady(envelope)))
+        ) {
+            add(IngestionProjection.FITNESS_MEAL)
+        }
+        if (envelope.productCandidates.isNotEmpty()) add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
+        if (envelope.productCandidates.isNotEmpty() && envelope.nutrition.isNotEmpty()) {
+            add(IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK)
+        }
     }
 
     private fun disabledProjections(envelope: YeonsikOcrEnvelope): List<IngestionProjection> =
         IngestionProjection.entries - enabledProjections(envelope).toSet()
+
+    private fun fitnessMealValuesComplete(envelope: YeonsikOcrEnvelope): Boolean =
+        envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA &&
+            envelope.nutrition.isNotEmpty() &&
+            envelope.consumption.isNotEmpty() &&
+            envelope.consumption.all(IngestionConsumption::isCompleteForFitnessMeal)
+
+    private fun fitnessMealReady(envelope: YeonsikOcrEnvelope): Boolean =
+        fitnessMealValuesComplete(envelope) &&
+            envelope.consumption.all {
+                it.status == ConsumptionVerificationStatus.USER_VERIFIED
+            }
 
     private fun projectionDependencies(
         projection: IngestionProjection,
@@ -873,6 +1069,10 @@ class IngestionOrchestrator(
                 add(IngestionProjection.PRICETRACE_RECEIPT)
             }
             IngestionProjection.FITNESS_MEAL -> add(IngestionProjection.FITNESS_NUTRITION)
+            IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK -> {
+                add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
+                add(IngestionProjection.FITNESS_NUTRITION)
+            }
             else -> Unit
         }
     }
@@ -886,25 +1086,38 @@ class IngestionOrchestrator(
         IngestionProjection.FITNESS_MEAL,
     )
 
-    private fun resolvedIdentity(session: IngestionSession): ProjectionIdentity? =
-        session.projections.firstOrNull { it.projection == IngestionProjection.PRICETRACE_RECEIPT }
+    private fun requiresProductCandidateIdentity(
+        projection: IngestionProjection,
+        envelope: YeonsikOcrEnvelope,
+    ): Boolean = projection == IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK &&
+        envelope.productCandidates.isNotEmpty()
+
+    private fun resolvedIdentity(session: IngestionSession): ProjectionIdentity? {
+        val receiptState = session.projections.firstOrNull { it.projection == IngestionProjection.PRICETRACE_RECEIPT }
             ?.takeIf { it.status == ProjectionStatus.UPLOADED }
-            ?.let { state ->
-                val parsed = PriceTraceIdentityJson.tryDecode(state.metadataJson)
-                    ?: state.remoteId?.takeIf(String::isNotBlank)?.let(::PriceTraceIdentity)
-                ProjectionIdentity(priceTrace = parsed)
-            }
-            ?.takeIf { it.priceTrace != null }
+        val productState = session.projections.firstOrNull { it.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE }
+            ?.takeIf { it.status == ProjectionStatus.UPLOADED }
+        val priceTrace = receiptState?.let { state ->
+            PriceTraceIdentityJson.tryDecode(state.metadataJson)
+                ?: state.remoteId?.takeIf(String::isNotBlank)?.let(::PriceTraceIdentity)
+        }
+        val products = productState?.let { state -> PriceTraceProductIdentityJson.tryDecode(state.metadataJson) }.orEmpty()
+        return ProjectionIdentity(priceTrace = priceTrace, productCandidates = products)
+            .takeIf { it.priceTrace != null || it.productCandidates.isNotEmpty() }
+    }
 
     private fun projectionDependencyRank(projection: IngestionProjection): Int = when (projection) {
         IngestionProjection.PRICETRACE_RECEIPT,
-        IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> 0
+        IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE,
+        IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE -> 0
         IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> 1
         IngestionProjection.CASHOS_RECEIPT,
         IngestionProjection.FITNESS_NUTRITION -> 2
         IngestionProjection.FITNESS_MEAL -> 3
+        IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK -> 4
     }
 
     private fun String?.isDependencyRetryable(): Boolean = this == null ||
-        startsWith("dependency_pending:") || this == "pricetrace_identity_missing"
+        startsWith("dependency_pending:") || this == "pricetrace_identity_missing" ||
+        this == "pricetrace_product_identity_missing"
 }

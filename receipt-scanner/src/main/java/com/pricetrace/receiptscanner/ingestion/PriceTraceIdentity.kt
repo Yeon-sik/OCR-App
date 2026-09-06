@@ -31,10 +31,18 @@ data class PriceTraceLineIdentity(
 
 data class ProjectionIdentity(
     val priceTrace: PriceTraceIdentity? = null,
+    /** Product identity returned by PriceTrace after candidate review/resolution. */
+    val productCandidates: Map<String, PriceTraceProductIdentity> = emptyMap(),
 ) {
     val priceTraceIdentity: PriceTraceIdentity?
         get() = priceTrace
 }
+
+data class PriceTraceProductIdentity(
+    val candidateClientKey: String,
+    val catalogProductId: String,
+    val productRevision: String? = null,
+)
 
 object PriceTraceIdentityJson {
     fun decode(response: JsonObject): PriceTraceIdentity {
@@ -83,6 +91,42 @@ object PriceTraceIdentityJson {
             }
         }))
     }
+
+    private fun JsonObject.stringField(vararg keys: String): String? = keys.firstNotNullOfOrNull { key ->
+        (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+    }
+}
+
+/** Parses only server-returned product resolution metadata; it never reads IDs from OCR input. */
+object PriceTraceProductIdentityJson {
+    fun decode(response: JsonObject): Map<String, PriceTraceProductIdentity> {
+        val elements = sequenceOf("products", "productCandidates", "product_candidates")
+            .mapNotNull { key -> response[key] as? JsonArray }
+            .firstOrNull()
+            ?.toList()
+            ?: if (response.stringField("clientKey", "client_key") != null) listOf(response) else emptyList()
+        require(elements.isNotEmpty()) { "PriceTrace product response is missing products" }
+        return elements.map { element ->
+            val row = element.jsonObject
+            val identity = PriceTraceProductIdentity(
+                candidateClientKey = row.stringField("clientKey", "client_key")
+                    ?: error("PriceTrace product response is missing clientKey"),
+                catalogProductId = row.stringField("catalogProductId", "catalog_product_id")
+                    ?: error("PriceTrace product response is missing catalogProductId"),
+                productRevision = row.stringField("productRevision", "product_revision", "revision"),
+            )
+            identity.candidateClientKey to identity
+        }.toMap().also { identities ->
+            require(identities.size == elements.size) { "PriceTrace product client keys must be unique" }
+        }
+    }
+
+    fun tryDecode(response: String?): Map<String, PriceTraceProductIdentity> = response?.let { value ->
+        runCatching {
+            val root = kotlinx.serialization.json.Json.parseToJsonElement(value).jsonObject
+            decode(root)
+        }.getOrDefault(emptyMap())
+    }.orEmpty()
 
     private fun JsonObject.stringField(vararg keys: String): String? = keys.firstNotNullOfOrNull { key ->
         (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)

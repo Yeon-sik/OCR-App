@@ -60,10 +60,14 @@ object IngestionEvidenceGate {
                 when (item) {
                     is IngestionNutrition.ProductLabel -> add(SourceAttachmentType.NUTRITION_LABEL)
                     is IngestionNutrition.RestaurantEstimate -> add(SourceAttachmentType.FOOD_PHOTO)
+                    is IngestionNutrition.MealComponentEstimate -> add(SourceAttachmentType.FOOD_PHOTO)
                 }
             }
         if (artifactKeys == null || artifactKeys.any { it.startsWith("${IngestionArtifactKeys.CONSUMPTION}:") }) {
             if (envelope.consumption.isNotEmpty()) add(SourceAttachmentType.FOOD_PHOTO)
+        }
+        if (artifactKeys == null || artifactKeys.any { it.startsWith("${IngestionArtifactKeys.PRODUCT_CANDIDATE}:") }) {
+            if (envelope.productCandidates.isNotEmpty()) add(SourceAttachmentType.PRODUCT_PHOTO)
         }
     }
 }

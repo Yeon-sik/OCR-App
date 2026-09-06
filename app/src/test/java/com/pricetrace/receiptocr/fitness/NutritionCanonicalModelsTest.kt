@@ -1,6 +1,7 @@
 package com.pricetrace.receiptocr.fitness
 
 import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
+import com.pricetrace.receiptscanner.ingestion.MealComponentReference
 import com.pricetrace.receiptscanner.ingestion.NutritionNutrientProvenance
 import com.pricetrace.receiptscanner.ingestion.NutritionRange
 import com.pricetrace.receiptscanner.ingestion.RestaurantNutritionEstimate
@@ -119,6 +120,45 @@ class NutritionCanonicalModelsTest {
             assertTrue(item["evidence_refs"]!!.toString().contains("food-photo-1/${field.wireKey}"))
         }
         assertTrue(root["p_provenance"]!!.jsonObject["estimated"]!!.jsonPrimitive.content.toBoolean())
+    }
+
+    @Test
+    fun mealComponentRoleIsProvenanceOnlyAndNeverCreatesPriceTraceIdentity() {
+        val estimate = RestaurantNutritionEstimate(
+            nutrients = NutritionField.requiredFields.associateWith { 30.0 },
+            estimated = true,
+            confidence = "0.70",
+            nutrientProvenance = NutritionField.requiredFields.associateWith { field ->
+                NutritionNutrientProvenance(
+                    valueStatus = "estimated",
+                    sourceType = "food_image_estimate",
+                    evidenceRefs = listOf("food-side-1/${field.wireKey}"),
+                )
+            },
+        )
+        val payload = CanonicalNutritionPayloadFactory.fromMealComponentEstimate(
+            localDocumentId = "ocr-component-session",
+            revisionSeq = 2,
+            idempotencyKey = "component-key",
+            restaurantName = "Test Restaurant",
+            item = IngestionNutrition.MealComponentEstimate(
+                clientKey = "food-side-1",
+                menuName = "Complimentary kimchi",
+                componentRole = "complimentary_side",
+                reference = MealComponentReference(
+                    restaurantName = "Test Restaurant",
+                    branchName = "Main",
+                ),
+                estimate = estimate,
+            ),
+        )
+        val root = Json.parseToJsonElement(payload.toRpcJson()).jsonObject
+
+        assertEquals(
+            "complimentary_side",
+            root["p_provenance"]!!.jsonObject["component_role"]?.jsonPrimitive?.content,
+        )
+        assertEquals(JsonNull, root["p_pricetrace_identity"])
     }
 
     private fun verifiedDraft(): NutritionLabelDraft = NutritionLabelDraft(
