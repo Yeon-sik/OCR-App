@@ -7,6 +7,7 @@ import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
+import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -31,6 +32,9 @@ internal class FitnessMealProjectionSubmitter(
             ?: return ProjectionSubmission.Failure("canonical_envelope_missing", retryable = false)
         if (envelope.schemaVersion != YEONSIK_OCR_V2_SCHEMA) {
             return ProjectionSubmission.Failure("fitness_meal_requires_yeonsik_ocr_v2", retryable = false)
+        }
+        if (envelope.consumption.any { it.status != ConsumptionVerificationStatus.USER_VERIFIED }) {
+            return ProjectionSubmission.Failure("consumption_artifact_not_user_verified", retryable = false)
         }
         val localDocumentId = request.localDocumentId
             ?: return ProjectionSubmission.Failure("local_document_id_missing", retryable = false)
@@ -68,6 +72,7 @@ internal class FitnessMealProjectionSubmitter(
                         consumptionClientKey = consumption.clientKey,
                         nutritionClientKey = item.nutritionClientKey,
                         consumedAt = eatenAt,
+                        amountStatus = item.amountStatus,
                         nutrition = nutrition,
                     )
                     FitnessMealItemPayload(
@@ -148,6 +153,7 @@ internal class FitnessMealProjectionSubmitter(
         consumptionClientKey: String,
         nutritionClientKey: String,
         consumedAt: String,
+        amountStatus: String,
         nutrition: IngestionNutrition,
     ): JsonObject = buildJsonObject {
         put("source_app", JsonPrimitive("ocr-app"))
@@ -156,7 +162,11 @@ internal class FitnessMealProjectionSubmitter(
         put("consumption_client_key", JsonPrimitive(consumptionClientKey))
         put("nutrition_client_key", JsonPrimitive(nutritionClientKey))
         put("consumed_at", JsonPrimitive(consumedAt))
+        put("amount_status", JsonPrimitive(amountStatus))
         put("nutrition_kind", JsonPrimitive(nutritionKind(nutrition)))
+        if (nutrition is IngestionNutrition.MealComponentEstimate) {
+            put("component_role", JsonPrimitive(nutrition.componentRole))
+        }
     }
 
     private fun nutritionKind(item: IngestionNutrition): String = when (item) {

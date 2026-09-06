@@ -66,9 +66,9 @@
       "content_unit": "g",
       "package_count": 1,
       "variant": "Original",
-      "barcode": "8801234567890",
-      "ean": null,
-      "upc": null,
+      "barcodes": [
+        {"type": "ean13", "value": "8801234567890"}
+      ],
       "candidate_type": "retail_product",
       "source_version": "chatgpt-vision-v2",
       "evidence": [
@@ -93,10 +93,11 @@
           "nutrition_client_key": "product-1",
           "amount": 40,
           "unit": "g",
-          "confidence": 0.92
+          "confidence": 0.92,
+          "amount_status": "estimated"
         }
       ],
-      "status": "user_verified"
+      "status": "unverified"
     }
   ],
   "classification_hints": {"cashos": {}},

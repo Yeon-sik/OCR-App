@@ -7,6 +7,7 @@ import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 import com.pricetrace.receiptscanner.ingestion.ProductCandidate
+import com.pricetrace.receiptscanner.ingestion.ProductCandidateBarcode
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.ingestion.PriceTraceProductIdentityJson
 import com.pricetrace.receiptscanner.publisher.PriceObservationJson
@@ -249,7 +250,7 @@ internal class PriceTraceCanonicalGateway(
         put("source_version", candidate.sourceVersion?.let(::JsonPrimitive) ?: JsonNull)
         put("candidate_type", JsonPrimitive(candidate.candidateType))
         put("product_name", JsonPrimitive(candidate.productName))
-        put("brand", candidate.effectiveBrand?.let(::JsonPrimitive) ?: JsonNull)
+        put("brand", candidate.brand?.let(::JsonPrimitive) ?: JsonNull)
         put("manufacturer", candidate.manufacturer?.let(::JsonPrimitive) ?: JsonNull)
         put("specification", candidate.specification?.let(::JsonPrimitive) ?: JsonNull)
         put("content_amount", candidate.contentAmount?.let(::JsonPrimitive) ?: JsonNull)
@@ -279,15 +280,25 @@ internal class PriceTraceCanonicalGateway(
     }
 
     private fun candidateIdentifiers(candidate: ProductCandidate): List<JsonObject> {
-        val values = linkedMapOf<String, String>()
-        candidate.barcode?.let { values["gtin"] = it }
-        candidate.ean?.let { values["ean"] = it }
-        candidate.upc?.let { values["upc"] = it }
-        return values.map { (scheme, value) -> buildJsonObject {
-            put("scheme", JsonPrimitive(scheme))
-            put("value", JsonPrimitive(value))
+        return candidate.barcodes.map { barcode -> buildJsonObject {
+            put("scheme", JsonPrimitive(priceTraceIdentifierScheme(barcode)))
+            put("value", JsonPrimitive(barcode.value))
         }}
     }
+
+    /** Convert the Project's barcode observation type to PriceTrace's existing identifier scheme. */
+    private fun priceTraceIdentifierScheme(barcode: ProductCandidateBarcode): String =
+        when (barcode.type.lowercase().replace("-", "").replace("_", "")) {
+            "ean", "ean8", "ean13" -> "ean"
+            "upc", "upca", "upce" -> "upc"
+            "gtin", "gtin8", "gtin12", "gtin13", "gtin14", "barcode" -> "gtin"
+            else -> when (barcode.value.filterNot { it == ' ' || it == '-' }.length) {
+                8, 13 -> "ean"
+                12 -> "upc"
+                14 -> "gtin"
+                else -> error("unsupported product candidate barcode type: ${barcode.type}")
+            }
+        }
 
     private fun decodeResponse(value: String): JsonObject {
         val element = json.parseToJsonElement(value)

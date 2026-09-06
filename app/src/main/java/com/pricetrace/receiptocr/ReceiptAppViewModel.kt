@@ -49,6 +49,8 @@ import com.pricetrace.receiptscanner.importer.ExternalJsonImportErrorCode
 import com.pricetrace.receiptscanner.importer.ExternalJsonImportOutcome
 import com.pricetrace.receiptscanner.importer.ExternalJsonImporter
 import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
+import com.pricetrace.receiptscanner.ingestion.IngestionConsumption
+import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
 import com.pricetrace.receiptscanner.ingestion.IngestionOrchestrator
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus
@@ -64,6 +66,7 @@ import com.pricetrace.receiptscanner.ingestion.SourceAttachment
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA
 import com.pricetrace.receiptscanner.input.InputOrigin
 import com.pricetrace.receiptscanner.domain.StableIds
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
@@ -160,6 +163,7 @@ enum class AppScreen {
     PRICE_OBSERVATION_SUBMIT,
     RESTAURANT_RECEIPT_SUBMIT,
     NUTRITION_REVIEW,
+    CONSUMPTION_REVIEW,
     EVALUATION,
 }
 
@@ -172,6 +176,9 @@ data class ReceiptAppUiState(
     val canonicalNutritionArtifacts: List<IngestionNutrition> = emptyList(),
     val canonicalNutritionVerifiedCount: Int = 0,
     val canonicalNutritionVerifiedKeys: Set<String> = emptySet(),
+    val canonicalConsumptionArtifacts: List<IngestionConsumption> = emptyList(),
+    val canonicalConsumptionVerifiedCount: Int = 0,
+    val isConsumptionVerifying: Boolean = false,
     val merchantCandidate: MerchantCandidate? = null,
     val merchantCandidateVerified: Boolean = false,
     val isSubmittingMerchantCandidate: Boolean = false,
@@ -324,6 +331,7 @@ class ReceiptAppViewModel(
     private var reviewController: ReceiptReviewController? = null
     private var preflightPages: List<ReceiptPage> = emptyList()
     private var nutritionPersistenceJob: Job? = null
+    private var consumptionPersistenceJob: Job? = null
     private var pendingDocumentId: String?
         get() = savedStateHandle[PENDING_DOCUMENT_ID]
         set(value) { savedStateHandle[PENDING_DOCUMENT_ID] = value }
@@ -691,6 +699,7 @@ class ReceiptAppViewModel(
         if (session.workflowDraftStorageKey == null) return false
         val ingestionSession = container.ingestionSessionStore.get(ingestionIdFor(documentId)) ?: return false
         val envelope = loadIngestionEnvelope(documentId) ?: return false
+        val consumptionVerifiedCount = verifiedConsumptionCount(ingestionSession, envelope)
         val merchantCandidate = envelope.merchantCandidate
         if (merchantCandidate != null && envelope.receipt == null && envelope.nutrition.isEmpty()) {
             val canonicalVerified = ingestionSession.reviewStatus == IngestionReviewStatus.READY &&
@@ -707,6 +716,9 @@ class ReceiptAppViewModel(
                 merchantCandidateId = projection?.remoteId,
                 merchantCandidateLastError = projection?.lastError,
                 canonicalNutritionCount = 0,
+                canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(envelope),
+                canonicalConsumptionVerifiedCount = consumptionVerifiedCount,
+                isConsumptionVerifying = false,
                 isCanonicalIngestion = true,
             )
             return true
@@ -729,6 +741,9 @@ class ReceiptAppViewModel(
                 canonicalNutritionArtifacts = envelope.nutrition,
                 canonicalNutritionVerifiedCount = verifiedNutritionCount(ingestionSession, envelope),
                 canonicalNutritionVerifiedKeys = verifiedNutritionKeys(ingestionSession, envelope),
+                canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(envelope),
+                canonicalConsumptionVerifiedCount = consumptionVerifiedCount,
+                isConsumptionVerifying = false,
                 isSubmittingCanonicalPriceTrace = false,
                 canonicalPriceTraceReceiptId = priceTraceProjection?.remoteId,
                 canonicalPriceTraceLastError = priceTraceProjection?.lastError,
@@ -746,11 +761,15 @@ class ReceiptAppViewModel(
                 ocrDocument = restoredOcr,
                 message = "통합 nutrition 초안을 복원했습니다. 원본 라벨을 대조하세요.",
             ).copy(
+                screen = AppScreen.NUTRITION_REVIEW,
                 isCanonicalIngestion = true,
-                canonicalNutritionCount = 1,
+                canonicalNutritionCount = envelope.nutrition.size,
                 canonicalNutritionArtifacts = envelope.nutrition,
                 canonicalNutritionVerifiedCount = verifiedNutritionCount(ingestionSession, envelope),
                 canonicalNutritionVerifiedKeys = verifiedNutritionKeys(ingestionSession, envelope),
+                canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(envelope),
+                canonicalConsumptionVerifiedCount = consumptionVerifiedCount,
+                isConsumptionVerifying = false,
             )
             return true
         }
@@ -760,6 +779,7 @@ class ReceiptAppViewModel(
 
     fun selectSession(documentId: String) {
         nutritionPersistenceJob?.cancel()
+        consumptionPersistenceJob?.cancel()
         viewModelScope.launch {
             selectedDocumentId.value = documentId
             val session = repository.getSession(documentId)
@@ -894,6 +914,7 @@ class ReceiptAppViewModel(
 
     fun deleteSession(documentId: String) {
         nutritionPersistenceJob?.cancel()
+        consumptionPersistenceJob?.cancel()
         viewModelScope.launch {
             val workflow = repository.getSession(documentId)?.workflowType
                 ?: mutableUiState.value.selectedWorkflow
@@ -1592,6 +1613,9 @@ class ReceiptAppViewModel(
             }
             val ingestionSession = container.ingestionSessionStore.get(ingestionIdFor(documentId))
             val verifiedCount = ingestionSession?.let { verifiedNutritionCount(it, envelope) } ?: 0
+            val consumptionVerifiedCount = ingestionSession?.let {
+                verifiedConsumptionCount(it, envelope)
+            } ?: 0
             val productLabel = envelope.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>().firstOrNull()
             if (productLabel != null) {
                 mutableUiState.value = nutritionState(
@@ -1605,6 +1629,8 @@ class ReceiptAppViewModel(
                     canonicalNutritionArtifacts = envelope.nutrition,
                     canonicalNutritionVerifiedCount = verifiedCount,
                     canonicalNutritionVerifiedKeys = ingestionSession?.let { verifiedNutritionKeys(it, envelope) }.orEmpty(),
+                    canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(envelope),
+                    canonicalConsumptionVerifiedCount = consumptionVerifiedCount,
                 )
             } else {
                 mutableUiState.value = state.copy(
@@ -1615,8 +1641,282 @@ class ReceiptAppViewModel(
                     canonicalNutritionArtifacts = envelope.nutrition,
                     canonicalNutritionVerifiedCount = verifiedCount,
                     canonicalNutritionVerifiedKeys = ingestionSession?.let { verifiedNutritionKeys(it, envelope) }.orEmpty(),
+                    canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(envelope),
+                    canonicalConsumptionVerifiedCount = consumptionVerifiedCount,
                     isNutritionPublishing = false,
                     message = "각 음식 추정치를 원본 음식 사진과 대조한 뒤 항목별로 확인하세요. 아직 Fitness에는 전송하지 않습니다.",
+                )
+            }
+        }
+    }
+
+    /** Opens the explicit consumption review required before a Fitness Meal projection. */
+    fun showConsumptionReview() {
+        val state = mutableUiState.value
+        if (!state.isCanonicalIngestion) return
+        val documentId = state.currentDocumentId
+            ?: state.receipt?.document?.requireLocalDocumentId()
+            ?: return
+        viewModelScope.launch {
+            val envelope = loadIngestionEnvelope(documentId)
+            if (envelope != null && envelope.schemaVersion != YEONSIK_OCR_V2_SCHEMA) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = "consumption 항목별 검수는 yeonsik-ocr.v2에서만 지원합니다.",
+                )
+                return@launch
+            }
+            if (envelope == null || envelope.consumption.isEmpty()) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = "검수할 consumption artifact를 찾지 못했습니다.",
+                )
+                return@launch
+            }
+            val ingestionSession = container.ingestionSessionStore.get(ingestionIdFor(documentId))
+            mutableUiState.value = mutableUiState.value.copy(
+                screen = AppScreen.CONSUMPTION_REVIEW,
+                currentDocumentId = documentId,
+                canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(envelope),
+                canonicalConsumptionVerifiedCount = ingestionSession?.let {
+                    verifiedConsumptionCount(it, envelope)
+                } ?: 0,
+                isConsumptionVerifying = false,
+                message = "consumed_at과 각 항목의 amount, unit, amount_status를 원본과 대조하세요.",
+            )
+        }
+    }
+
+    fun updateConsumptionConsumedAt(consumptionClientKey: String, value: String) {
+        val consumedAt = value.trim()
+        if (consumedAt.isBlank() || runCatching { OffsetDateTime.parse(consumedAt) }.isFailure) return
+        updateConsumption(consumptionClientKey) { consumption ->
+            consumption.copy(consumedAt = consumedAt, status = ConsumptionVerificationStatus.UNVERIFIED)
+        }
+    }
+
+    fun updateConsumptionItemAmount(
+        consumptionClientKey: String,
+        nutritionClientKey: String,
+        value: String,
+    ) {
+        val amount = value.toDoubleOrNull()?.takeIf { it.isFinite() && it > 0 } ?: return
+        updateConsumption(consumptionClientKey) { consumption ->
+            consumption.copy(
+                status = ConsumptionVerificationStatus.UNVERIFIED,
+                items = consumption.items.map { item ->
+                    if (item.nutritionClientKey == nutritionClientKey) item.copy(amount = amount) else item
+                },
+            )
+        }
+    }
+
+    fun updateConsumptionItemUnit(
+        consumptionClientKey: String,
+        nutritionClientKey: String,
+        value: String,
+    ) {
+        val unit = value.trim()
+        if (unit.isBlank()) return
+        updateConsumption(consumptionClientKey) { consumption ->
+            consumption.copy(
+                status = ConsumptionVerificationStatus.UNVERIFIED,
+                items = consumption.items.map { item ->
+                    if (item.nutritionClientKey == nutritionClientKey) item.copy(unit = unit) else item
+                },
+            )
+        }
+    }
+
+    fun updateConsumptionItemAmountStatus(
+        consumptionClientKey: String,
+        nutritionClientKey: String,
+        value: String,
+    ) {
+        val amountStatus = value.trim()
+        if (amountStatus.isBlank()) return
+        updateConsumption(consumptionClientKey) { consumption ->
+            consumption.copy(
+                status = ConsumptionVerificationStatus.UNVERIFIED,
+                items = consumption.items.map { item ->
+                    if (item.nutritionClientKey == nutritionClientKey) {
+                        item.copy(amountStatus = amountStatus)
+                    } else {
+                        item
+                    }
+                },
+            )
+        }
+    }
+
+    private fun updateConsumption(
+        consumptionClientKey: String,
+        operation: (IngestionConsumption) -> IngestionConsumption,
+    ) {
+        val documentId = mutableUiState.value.currentDocumentId ?: return
+        consumptionPersistenceJob?.cancel()
+        consumptionPersistenceJob = viewModelScope.launch {
+            try {
+                val revision = canonicalRevisionMutex.withLock {
+                    val envelope = loadIngestionEnvelope(documentId)
+                        ?: return@withLock IngestionStartResult.Failure(listOf("canonical_envelope_missing"))
+                    val replaced = envelope.consumption.map { consumption ->
+                        if (consumption.clientKey == consumptionClientKey) operation(consumption) else consumption
+                    }
+                    if (replaced.none { it.clientKey == consumptionClientKey }) {
+                        return@withLock IngestionStartResult.Failure(listOf("consumption_artifact_not_found"))
+                    }
+                    val updated = envelope.copy(consumption = replaced)
+                    fileStore.writeText(
+                        "${documentId}/ingestion/yeonsik-ocr.json",
+                        YeonsikOcrEnvelopeCodec.encode(updated),
+                    )
+                    ingestionOrchestrator.reviseCanonicalDraft(ingestionIdFor(documentId), updated)
+                }
+                if (revision is IngestionStartResult.Failure) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        message = "수정된 consumption을 저장하지 못했습니다: ${revision.issues.joinToString()}",
+                    )
+                    return@launch
+                }
+                refreshConsumptionReviewState(documentId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = "수정된 consumption을 저장하지 못했습니다. 다시 검수하세요.",
+                )
+            }
+        }
+    }
+
+    /** Explicitly confirms all consumption artifacts; this is the only UI path to USER_VERIFIED. */
+    fun confirmConsumptionReview() {
+        val state = mutableUiState.value
+        if (!state.isCanonicalIngestion || state.isConsumptionVerifying) return
+        val documentId = state.currentDocumentId
+            ?: state.receipt?.document?.requireLocalDocumentId()
+            ?: return
+        viewModelScope.launch {
+            mutableUiState.value = mutableUiState.value.copy(isConsumptionVerifying = true, message = null)
+            try {
+                consumptionPersistenceJob?.join()
+                val envelope = loadIngestionEnvelope(documentId)
+                if (envelope == null || envelope.schemaVersion != YEONSIK_OCR_V2_SCHEMA || envelope.consumption.isEmpty()) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isConsumptionVerifying = false,
+                        message = "확정할 consumption artifact를 찾지 못했습니다.",
+                    )
+                    return@launch
+                }
+                val invalid = envelope.consumption.firstOrNull { consumption ->
+                    consumption.items.isEmpty() ||
+                        consumption.consumedAt == null ||
+                        runCatching { OffsetDateTime.parse(consumption.consumedAt) }.isFailure ||
+                        consumption.items.any { it.amountStatus.isBlank() }
+                }
+                if (invalid != null) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isConsumptionVerifying = false,
+                        message = "consumed_at과 각 항목의 amount, unit, amount_status를 모두 확인하세요.",
+                    )
+                    return@launch
+                }
+                val verifiedEnvelope = envelope.copy(
+                    consumption = envelope.consumption.map {
+                        it.copy(status = ConsumptionVerificationStatus.USER_VERIFIED)
+                    },
+                )
+                val evidence = localIngestionEvidence(documentId, verifiedEnvelope)
+                val inputOrigin = repository.getSession(documentId)?.inputOrigin ?: InputOrigin.EXTERNAL_JSON
+                val artifactKeys = verifiedEnvelope.consumption
+                    .map { IngestionArtifactKeys.consumption(it.clientKey) }
+                    .toSet() + verifiedEnvelope.consumption
+                    .flatMap { it.effectiveNutritionClientKeys }
+                    .map(IngestionArtifactKeys::nutrition)
+                    .toSet()
+                val gate = IngestionEvidenceGate.evaluate(
+                    envelope = verifiedEnvelope,
+                    evidence = evidence,
+                    inputOrigin = inputOrigin,
+                    artifactKeys = artifactKeys,
+                )
+                if (!gate.isAllowed) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isConsumptionVerifying = false,
+                        message = "섭취 정보 원본 증거를 먼저 첨부하세요: ${gate.blockingIssues.joinToString()}",
+                    )
+                    return@launch
+                }
+                when (val revision = syncCanonicalConsumptionRevision(documentId, verifiedEnvelope.consumption)) {
+                    is IngestionStartResult.Failure -> {
+                        mutableUiState.value = mutableUiState.value.copy(
+                            isConsumptionVerifying = false,
+                            message = "consumption 확정본을 저장하지 못했습니다: ${revision.issues.joinToString()}",
+                        )
+                        return@launch
+                    }
+                    else -> Unit
+                }
+                when (val verification = markIngestionConsumptionVerified(documentId)) {
+                    is IngestionStartResult.Failure -> {
+                        // Keep the explicit user action from becoming an unrecorded server-side
+                        // verification if a later lifecycle/evidence check rejects it.
+                        syncCanonicalConsumptionRevision(
+                            documentId,
+                            verifiedEnvelope.consumption.map {
+                                it.copy(status = ConsumptionVerificationStatus.UNVERIFIED)
+                            },
+                        )
+                        mutableUiState.value = mutableUiState.value.copy(
+                            isConsumptionVerifying = false,
+                            message = "consumption 검수를 완료하지 못했습니다: ${verification.issues.joinToString()}",
+                        )
+                    }
+                    is IngestionStartResult.Success,
+                    is IngestionStartResult.Duplicate -> {
+                        val latestEnvelope = loadIngestionEnvelope(documentId) ?: verifiedEnvelope
+                        val latestSession = container.ingestionSessionStore.get(ingestionIdFor(documentId))
+                        val latestReceipt = latestEnvelope.receipt
+                        val nextScreen = when {
+                            latestReceipt != null &&
+                                latestReceipt.document.source.transcriptionStatus != TranscriptionStatus.USER_VERIFIED ->
+                                AppScreen.FIELD_REVIEW
+                            latestReceipt != null -> AppScreen.JSON_PREVIEW
+                            latestEnvelope.nutrition.any {
+                                it is IngestionNutrition.ProductLabel &&
+                                    it.draft.status != NutritionDraftStatus.USER_VERIFIED
+                            } ->
+                                AppScreen.NUTRITION_REVIEW
+                            else -> AppScreen.JSON_PREVIEW
+                        }
+                        mutableUiState.value = mutableUiState.value.copy(
+                            screen = nextScreen,
+                            canonicalNutritionCount = latestEnvelope.nutrition.size,
+                            canonicalNutritionArtifacts = latestEnvelope.nutrition,
+                            canonicalNutritionVerifiedCount = latestSession?.let {
+                                verifiedNutritionCount(it, latestEnvelope)
+                            } ?: 0,
+                            canonicalNutritionVerifiedKeys = latestSession?.let {
+                                verifiedNutritionKeys(it, latestEnvelope)
+                            }.orEmpty(),
+                            canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(latestEnvelope),
+                            canonicalConsumptionVerifiedCount = latestSession?.let {
+                                verifiedConsumptionCount(it, latestEnvelope)
+                            } ?: 0,
+                            isConsumptionVerifying = false,
+                            message = "consumption 검수가 완료되었습니다. 이제 Fitness Meal을 포함한 projection을 실행할 수 있습니다.",
+                        )
+                    }
+                    null -> mutableUiState.value = mutableUiState.value.copy(
+                        isConsumptionVerifying = false,
+                        message = "consumption 검수 결과를 저장하지 못했습니다. 다시 확인하세요.",
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(
+                    isConsumptionVerifying = false,
+                    message = error.message ?: "consumption 검수 저장에 실패했습니다.",
                 )
             }
         }
@@ -1695,12 +1995,23 @@ class ReceiptAppViewModel(
                         }
                         val latestEnvelope = loadIngestionEnvelope(documentId) ?: envelope
                         val latestSession = container.ingestionSessionStore.get(ingestionIdFor(documentId))
+                        val latestConsumptionVerifiedCount = latestSession?.let {
+                            verifiedConsumptionCount(it, latestEnvelope)
+                        } ?: 0
+                        val needsConsumptionReview = latestSession?.let {
+                            consumptionNeedsReview(it, latestEnvelope)
+                        } ?: canonicalConsumptionArtifacts(latestEnvelope).isNotEmpty()
                         mutableUiState.value = nutritionState(
                             draft = verified,
                             ocrDocument = mutableUiState.value.ocrDocument,
-                            message = "ProductLabel과 연결된 상품 후보 검수가 완료되었습니다. 이제 JSON preview에서 projection을 별도로 실행하세요.",
+                            message = if (needsConsumptionReview) {
+                                "ProductLabel과 상품 후보 검수가 완료되었습니다. Fitness Meal 전송 전에 섭취 정보를 검수하세요."
+                            } else {
+                                "ProductLabel과 연결된 상품 후보 검수가 완료되었습니다. 이제 JSON preview에서 projection을 별도로 실행하세요."
+                            },
                             sessionDocumentId = documentId,
                         ).copy(
+                            screen = if (needsConsumptionReview) AppScreen.CONSUMPTION_REVIEW else AppScreen.NUTRITION_REVIEW,
                             isCanonicalIngestion = true,
                             canonicalNutritionCount = latestEnvelope.nutrition.size,
                             canonicalNutritionArtifacts = latestEnvelope.nutrition,
@@ -1710,6 +2021,8 @@ class ReceiptAppViewModel(
                             canonicalNutritionVerifiedKeys = latestSession?.let {
                                 verifiedNutritionKeys(it, latestEnvelope)
                             }.orEmpty(),
+                            canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(latestEnvelope),
+                            canonicalConsumptionVerifiedCount = latestConsumptionVerifiedCount,
                             isNutritionPublishing = false,
                         )
                     }
@@ -1767,13 +2080,19 @@ class ReceiptAppViewModel(
                         val verifiedCount = latestSession?.let {
                             verifiedNutritionCount(it, latestEnvelope)
                         } ?: 0
+                        val consumptionVerifiedCount = latestSession?.let {
+                            verifiedConsumptionCount(it, latestEnvelope)
+                        } ?: 0
+                        val needsConsumptionReview = latestSession?.let {
+                            consumptionNeedsReview(it, latestEnvelope)
+                        } ?: canonicalConsumptionArtifacts(latestEnvelope).isNotEmpty()
                         val artifactName = when (val item = artifact) {
                             is IngestionNutrition.RestaurantEstimate -> item.menuName
                             is IngestionNutrition.MealComponentEstimate -> item.menuName
                             else -> clientKey
                         }
                         mutableUiState.value = mutableUiState.value.copy(
-                            screen = AppScreen.NUTRITION_REVIEW,
+                            screen = if (needsConsumptionReview) AppScreen.CONSUMPTION_REVIEW else AppScreen.NUTRITION_REVIEW,
                             nutritionDraft = null,
                             canonicalNutritionCount = latestEnvelope.nutrition.size,
                             canonicalNutritionArtifacts = latestEnvelope.nutrition,
@@ -1781,9 +2100,15 @@ class ReceiptAppViewModel(
                             canonicalNutritionVerifiedKeys = latestSession?.let {
                                 verifiedNutritionKeys(it, latestEnvelope)
                             }.orEmpty(),
+                            canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(latestEnvelope),
+                            canonicalConsumptionVerifiedCount = consumptionVerifiedCount,
                             isNutritionPublishing = false,
                             message = if (verifiedCount == latestEnvelope.nutrition.size) {
-                                "모든 meal nutrition 검수가 완료되었습니다. 이제 JSON preview에서 Fitness 저장을 별도로 실행하세요."
+                                if (needsConsumptionReview) {
+                                    "모든 meal nutrition 검수가 완료되었습니다. Fitness Meal 전송 전에 섭취 정보를 검수하세요."
+                                } else {
+                                    "모든 meal nutrition 검수가 완료되었습니다. 이제 JSON preview에서 Fitness 저장을 별도로 실행하세요."
+                                }
                             } else {
                                 "${artifactName} nutrition 검수가 완료되었습니다. 남은 artifact도 확인하세요."
                             },
@@ -2015,6 +2340,23 @@ class ReceiptAppViewModel(
         .map { it.clientKey }
         .toSet()
 
+    private fun verifiedConsumptionCount(
+        session: IngestionSession,
+        envelope: YeonsikOcrEnvelope,
+    ): Int = canonicalConsumptionArtifacts(envelope).count { item ->
+        item.status == ConsumptionVerificationStatus.USER_VERIFIED &&
+            IngestionArtifactKeys.consumption(item.clientKey) in session.verifiedArtifactFingerprints
+    }
+
+    private fun consumptionNeedsReview(
+        session: IngestionSession,
+        envelope: YeonsikOcrEnvelope,
+    ): Boolean = canonicalConsumptionArtifacts(envelope).isNotEmpty() &&
+        verifiedConsumptionCount(session, envelope) < canonicalConsumptionArtifacts(envelope).size
+
+    private fun canonicalConsumptionArtifacts(envelope: YeonsikOcrEnvelope): List<IngestionConsumption> =
+        envelope.consumption.takeIf { envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA }.orEmpty()
+
     private suspend fun syncCanonicalReceiptRevision(documentId: String, receipt: ReceiptV2): IngestionStartResult? =
         canonicalRevisionMutex.withLock {
             val envelope = loadIngestionEnvelope(documentId) ?: return@withLock null
@@ -2042,6 +2384,31 @@ class ReceiptAppViewModel(
             fileStore.writeText(key, YeonsikOcrEnvelopeCodec.encode(updated))
             ingestionOrchestrator.reviseCanonicalDraft(ingestionIdFor(documentId), updated)
         }
+
+    private suspend fun syncCanonicalConsumptionRevision(
+        documentId: String,
+        consumption: List<IngestionConsumption>,
+    ): IngestionStartResult? = canonicalRevisionMutex.withLock {
+        val envelope = loadIngestionEnvelope(documentId) ?: return@withLock null
+        require(envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA) {
+            "consumption review requires yeonsik-ocr.v2"
+        }
+        val updated = envelope.copy(consumption = consumption)
+        val key = "${documentId}/ingestion/yeonsik-ocr.json"
+        fileStore.writeText(key, YeonsikOcrEnvelopeCodec.encode(updated))
+        ingestionOrchestrator.reviseCanonicalDraft(ingestionIdFor(documentId), updated)
+    }
+
+    private suspend fun refreshConsumptionReviewState(documentId: String) {
+        val envelope = loadIngestionEnvelope(documentId) ?: return
+        val session = container.ingestionSessionStore.get(ingestionIdFor(documentId)) ?: return
+        if (mutableUiState.value.currentDocumentId != documentId) return
+        mutableUiState.value = mutableUiState.value.copy(
+            canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(envelope),
+            canonicalConsumptionVerifiedCount = verifiedConsumptionCount(session, envelope),
+            isConsumptionVerifying = false,
+        )
+    }
 
     private suspend fun submitCanonicalProjectionToUi(
         documentId: String,
@@ -2226,6 +2593,28 @@ class ReceiptAppViewModel(
             envelope = envelope,
             evidence = evidence,
             nutritionClientKeys = requestedKeys,
+            inputOrigin = inputOrigin,
+        )
+    }
+
+    private suspend fun markIngestionConsumptionVerified(documentId: String): IngestionStartResult? {
+        val current = container.ingestionSessionStore.get(ingestionIdFor(documentId)) ?: return null
+        val envelope = loadIngestionEnvelope(documentId) ?: return null
+        if (envelope.schemaVersion != YEONSIK_OCR_V2_SCHEMA) {
+            return IngestionStartResult.Failure(listOf("fitness_meal_requires_yeonsik_ocr_v2"))
+        }
+        if (envelope.consumption.isEmpty()) {
+            return IngestionStartResult.Failure(listOf("consumption_artifact_missing"))
+        }
+        val evidence = localIngestionEvidence(documentId, envelope)
+        container.ingestionSessionStore.save(
+            current.copy(attachments = evidence, updatedAt = OffsetDateTime.now().toString()),
+        )
+        val inputOrigin = repository.getSession(documentId)?.inputOrigin ?: InputOrigin.EXTERNAL_JSON
+        return ingestionOrchestrator.markConsumptionVerified(
+            ingestionId = ingestionIdFor(documentId),
+            envelope = envelope,
+            evidence = evidence,
             inputOrigin = inputOrigin,
         )
     }
@@ -3489,12 +3878,31 @@ class ReceiptAppViewModel(
                 return@launch
             }
             val verifiedAt = OffsetDateTime.now().toString()
-            mutableUiState.value = stateFromReview(
-                screen = AppScreen.JSON_PREVIEW,
+            val latestEnvelope = loadIngestionEnvelope(documentId)
+            val latestSession = container.ingestionSessionStore.get(ingestionIdFor(documentId))
+            val needsConsumptionReview = latestEnvelope?.let { envelope ->
+                latestSession?.let { session -> consumptionNeedsReview(session, envelope) }
+                    ?: canonicalConsumptionArtifacts(envelope).isNotEmpty()
+            } ?: false
+            val reviewedState = stateFromReview(
+                screen = if (needsConsumptionReview) AppScreen.CONSUMPTION_REVIEW else AppScreen.JSON_PREVIEW,
                 ocrDocument = mutableUiState.value.ocrDocument,
-                message = "필수 검증을 통과했습니다. user_verified JSON을 내보낼 수 있습니다.",
+                message = if (needsConsumptionReview) {
+                    "영수증 검수가 완료되었습니다. Fitness Meal 전송 전에 섭취 정보를 검수하세요."
+                } else {
+                    "필수 검증을 통과했습니다. user_verified JSON을 내보낼 수 있습니다."
+                },
                 reviewedAt = verifiedAt,
             )
+            mutableUiState.value = if (latestEnvelope != null && latestSession != null) {
+                reviewedState.copy(
+                    canonicalConsumptionArtifacts = canonicalConsumptionArtifacts(latestEnvelope),
+                    canonicalConsumptionVerifiedCount = verifiedConsumptionCount(latestSession, latestEnvelope),
+                    isConsumptionVerifying = false,
+                )
+            } else {
+                reviewedState
+            }
             persistDraft()
         }
     }
@@ -3532,6 +3940,11 @@ class ReceiptAppViewModel(
             } else {
                 AppScreen.IMAGE_CONFIRM
             }
+            AppScreen.CONSUMPTION_REVIEW -> when {
+                state.nutritionDraft != null && state.receipt == null -> AppScreen.NUTRITION_REVIEW
+                state.receipt != null -> AppScreen.FIELD_REVIEW
+                else -> AppScreen.SESSION_LIST
+            }
             AppScreen.EVALUATION -> AppScreen.SESSION_LIST
         }
         if (destination == AppScreen.SESSION_LIST) {
@@ -3562,6 +3975,7 @@ class ReceiptAppViewModel(
 
     override fun onCleared() {
         nutritionPersistenceJob?.cancel()
+        consumptionPersistenceJob?.cancel()
         ocrEngine.close()
     }
 

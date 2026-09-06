@@ -122,6 +122,7 @@
       "kind": "meal_component_estimate",
       "line_id": null,
       "menu_name": "Complimentary kimchi",
+      "component_role": "complimentary_side",
       "restaurant_name": "Test Restaurant",
       "branch_name": "강남점",
       "restaurant_menu_id": null,
@@ -161,10 +162,10 @@
       "client_key": "meal-1",
       "consumed_at": "2026-08-27T19:30:00+09:00",
       "items": [
-        {"nutrition_client_key": "food-1", "amount": 1, "unit": "serving", "confidence": 0.9},
-        {"nutrition_client_key": "food-3", "amount": 1, "unit": "serving", "confidence": 0.7}
+        {"nutrition_client_key": "food-1", "amount": 1, "unit": "serving", "confidence": 0.9, "amount_status": "estimated"},
+        {"nutrition_client_key": "food-3", "amount": 1, "unit": "serving", "confidence": 0.7, "amount_status": "estimated"}
       ],
-      "status": "user_verified"
+      "status": "unverified"
     }
   ],
   "classification_hints": {"cashos": {"category_hint": "식비", "institution_hint": null, "payment_method_hint": "card"}},

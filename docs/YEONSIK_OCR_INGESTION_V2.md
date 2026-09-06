@@ -28,7 +28,7 @@ source attachment type에 `product_photo` (`PRODUCT_PHOTO`)를 추가했다. `pr
 - `brand` 또는 `manufacturer`
 - `specification`, `content_amount`, `content_unit`, `package_count`
 - `variant`
-- `barcode`, `ean`, `upc`
+- `barcodes[]` (`type`, `value`)
 - source attachment를 가리키는 `evidence`
 
 v2 입력에는 `catalog_product_id`, `standard_product_id`, `restaurant_menu_id`,
@@ -40,7 +40,7 @@ v2 입력에는 `catalog_product_id`, `standard_product_id`, `restaurant_menu_id
 ## Meal
 
 `consumption`은 `consumed_at`과 item 목록을 필수로 한다. 각 item은
-`nutrition_client_key`, `amount`, `unit`, `confidence`를 가진다. `consumed_at`은 ISO-8601
+`nutrition_client_key`, `amount`, `unit`, `confidence`, `amount_status`를 가진다. `consumed_at`은 ISO-8601
 offset을 포함한 실제 식사시각이며 receipt 결제시각이나 사진시각으로 자동 대체하지 않는다.
 
 `FITNESS_MEAL`은 사용자 검증 이후 Fitness의 `import_verified_meal_v1`로 전송한다. 각 item의
@@ -50,7 +50,8 @@ offset을 포함한 실제 식사시각이며 receipt 결제시각이나 사진�
 ## Side dish / meal component
 
 Nutrition kind `meal_component_estimate`는 음식 사진으로 추정한 무료 반찬처럼 receipt에
-없는 항목을 표현한다. `line_id`와 `restaurant_menu_id`는 null일 수 있고 receipt line 연결을
+없는 항목을 표현한다. `component_role`은 `complimentary_side` 같은 원본 역할을 보존한다.
+`line_id`와 `restaurant_menu_id`는 null일 수 있고 receipt line 연결을
 요구하지 않는다. 식당/지점은 `restaurant_name`, `branch_name` provenance/reference로만
 보존할 수 있다.
 
@@ -77,8 +78,10 @@ NutritionFood로 생성된 뒤에만 `FITNESS_PRODUCT_NUTRITION_LINK`를 실행�
 
 v2 codec은 root/nested key를 strict하게 검사하고, candidate evidence가 실제
 `PRODUCT_PHOTO` attachment를 참조하는지, component가 PriceTrace menu identity를 넣지
-않는지, consumption에 실제 offset 시각과 item 값을 갖는지 검증한다. 외부 `review.status`나
-`consumption.status`는 서버 권한으로 취급하지 않고 로컬 사용자 검증으로 다시 결정한다.
+않는지, consumption에 실제 offset 시각과 item 값을 갖는지 검증한다. `component_role`과
+`amount_status`는 Fitness provenance까지 전달한다. 외부 `review.status`나
+`consumption.status`는 서버 권한으로 취급하지 않고 항상 `UNVERIFIED`로 시작하며, production
+UI에서 명시적으로 확정한 뒤에만 `USER_VERIFIED`가 된다.
 
 - `examples/yeonsik-ocr.v2.packaged-product.example.json`
 - `examples/yeonsik-ocr.v2.restaurant.example.json`

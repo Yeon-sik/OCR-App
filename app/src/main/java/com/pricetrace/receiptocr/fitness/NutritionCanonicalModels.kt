@@ -417,6 +417,7 @@ object CanonicalNutritionPayloadFactory {
         artifactKey = item.clientKey,
         foodName = item.menuName,
         estimate = item.estimate,
+        componentRole = item.componentRole,
         // A free or estimated component is Fitness-owned. It must not carry a
         // PriceTrace RestaurantMenu identity into the Nutrition RPC.
         priceTraceIdentity = null,
@@ -431,6 +432,7 @@ object CanonicalNutritionPayloadFactory {
         artifactKey: String,
         foodName: String,
         estimate: RestaurantNutritionEstimate,
+        componentRole: String? = null,
         priceTraceIdentity: JsonObject?,
     ): CanonicalNutritionImportPayload {
         require(estimate.estimated) { "restaurant_estimate_required" }
@@ -473,6 +475,7 @@ object CanonicalNutritionPayloadFactory {
                 put("restaurant_name", JsonPrimitive(restaurantName))
                 put("branch_name", branchName?.let(::JsonPrimitive) ?: JsonNull)
                 put("restaurant_menu_id", JsonNull)
+                componentRole?.let { put("component_role", JsonPrimitive(it)) }
                 put("estimated", JsonPrimitive(true))
             },
             estimationEvidence = estimationEvidence,

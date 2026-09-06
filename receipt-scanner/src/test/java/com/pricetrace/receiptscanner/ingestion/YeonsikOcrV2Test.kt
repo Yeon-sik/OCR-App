@@ -6,6 +6,7 @@ import com.pricetrace.receiptscanner.importer.ExternalJsonImporter
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
@@ -28,9 +29,13 @@ class YeonsikOcrV2Test {
         val packagedEnvelope = (packaged.draft as CanonicalDraft.Envelope).value
         assertEquals(YEONSIK_OCR_V2_SCHEMA, packagedEnvelope.schemaVersion)
         assertEquals("product-1", packagedEnvelope.productCandidates.single().clientKey)
-        assertEquals("8801234567890", packagedEnvelope.productCandidates.single().barcode)
+        assertEquals(
+            ProductCandidateBarcode(type = "ean13", value = "8801234567890"),
+            packagedEnvelope.productCandidates.single().barcodes.single(),
+        )
         assertEquals("2026-08-27T08:10:00+09:00", packagedEnvelope.consumption.single().consumedAt)
         assertEquals(40.0, packagedEnvelope.consumption.single().items.single().amount, 0.0)
+        assertEquals("estimated", packagedEnvelope.consumption.single().items.single().amountStatus)
         assertEquals(ConsumptionVerificationStatus.UNVERIFIED, packagedEnvelope.consumption.single().status)
         assertEquals(
             setOf(
@@ -51,11 +56,52 @@ class YeonsikOcrV2Test {
         val component = restaurantEnvelope.nutrition.single { it.clientKey == "food-3" }
             as IngestionNutrition.MealComponentEstimate
         assertEquals(null, component.lineId)
+        assertEquals("complimentary_side", component.componentRole)
         assertEquals(null, component.reference?.restaurantMenuId)
         assertTrue(restaurantEnvelope.links.none { it.nutritionClientKey == component.clientKey })
         assertEquals("2026-08-27T19:30:00+09:00", restaurantEnvelope.consumption.single().consumedAt)
         assertTrue(IngestionProjection.FITNESS_MEAL in restaurantEnvelope.targets)
         assertFalse(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE in restaurantEnvelope.targets)
+    }
+
+    @Test
+    fun `v2 codec preserves amount status and only persisted reads restore verification`() {
+        val source = success(ExternalJsonImporter().import(
+            readExample("yeonsik-ocr.v2.packaged-product.example.json"),
+            "local-v2-round-trip",
+        )).let { (it.draft as CanonicalDraft.Envelope).value }
+        val userVerified = source.copy(
+            consumption = source.consumption.map { consumption ->
+                consumption.copy(
+                    status = ConsumptionVerificationStatus.USER_VERIFIED,
+                    items = consumption.items.map { item -> item.copy(amountStatus = "estimated") },
+                )
+            },
+        )
+
+        val encoded = YeonsikOcrV2Json.encode(userVerified)
+        val encodedItem = JsonSupport.parse(encoded)["consumption"]!!.jsonArray.single()
+            .jsonObject["items"]!!.jsonArray.single().jsonObject
+        assertEquals("estimated", encodedItem["amount_status"]?.jsonPrimitive?.content)
+        assertEquals(
+            ConsumptionVerificationStatus.UNVERIFIED,
+            YeonsikOcrV2Json.decode(encoded, "local-v2-external-read").consumption.single().status,
+        )
+        assertEquals(
+            ConsumptionVerificationStatus.USER_VERIFIED,
+            YeonsikOcrV2Json.decode(
+                encoded,
+                "local-v2-persisted-read",
+                preservePersistedVerification = true,
+            ).consumption.single().status,
+        )
+
+        val tamperedExternalStatus = readExample("yeonsik-ocr.v2.packaged-product.example.json")
+            .replace("\"status\": \"unverified\"", "\"status\": \"user_verified\"")
+        assertEquals(
+            ConsumptionVerificationStatus.UNVERIFIED,
+            YeonsikOcrV2Json.decode(tamperedExternalStatus, "local-v2-tampered").consumption.single().status,
+        )
     }
 
     @Test
@@ -74,7 +120,7 @@ class YeonsikOcrV2Test {
     @Test
     fun `v2 rejects malformed observable product identifiers`() {
         val invalid = readExample("yeonsik-ocr.v2.packaged-product.example.json")
-            .replace("\"barcode\": \"8801234567890\"", "\"barcode\": \"not-a-barcode\"")
+            .replace("\"value\": \"8801234567890\"", "\"value\": \"not-a-barcode\"")
 
         assertThrows(IllegalArgumentException::class.java) {
             YeonsikOcrV2Json.decode(invalid, "local-invalid-product-identifier")

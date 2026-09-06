@@ -5,6 +5,7 @@ import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionSource
 import com.pricetrace.receiptscanner.ingestion.ProductCandidate
+import com.pricetrace.receiptscanner.ingestion.ProductCandidateBarcode
 import com.pricetrace.receiptscanner.ingestion.ProductCandidateEvidence
 import com.pricetrace.receiptscanner.ingestion.PriceTraceProductIdentity
 import com.pricetrace.receiptscanner.ingestion.ProjectionIdentity
@@ -135,7 +136,7 @@ class FitnessProductNutritionLinkProjectionSubmitterTest {
                 contentUnit = "g",
                 packageCount = 1,
                 variant = "Original",
-                barcode = "8801234567890",
+                barcodes = listOf(ProductCandidateBarcode(type = "ean13", value = "8801234567890")),
                 evidence = listOf(
                     ProductCandidateEvidence(
                         sourceAttachmentIds = listOf("product-photo-1"),

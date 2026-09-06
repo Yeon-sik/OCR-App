@@ -80,43 +80,55 @@ data class ProductCandidateEvidence(
     val contentHash: String? = null,
 )
 
+/** A barcode observation from the OCR Project contract. Its value remains a source fact. */
+data class ProductCandidateBarcode(
+    val type: String,
+    val value: String,
+) {
+    init {
+        require(type.isNotBlank()) { "product candidate barcode type is required" }
+        require(value.isNotBlank()) { "product candidate barcode value is required" }
+        val normalized = value.filterNot { it == ' ' || it == '-' }
+        require(normalized.all(Char::isDigit) && normalized.length in SUPPORTED_LENGTHS) {
+            "product candidate barcode must contain a supported numeric identifier"
+        }
+    }
+
+    private companion object {
+        val SUPPORTED_LENGTHS = setOf(8, 12, 13, 14)
+    }
+}
+
 data class ProductCandidate(
     val clientKey: String,
     val productName: String,
-    val brandOrManufacturer: String? = null,
+    val brand: String? = null,
+    val manufacturer: String? = null,
     val specification: String? = null,
     val contentAmount: Double? = null,
     val contentUnit: String? = null,
     val packageCount: Int? = null,
     val variant: String? = null,
-    val barcode: String? = null,
-    val ean: String? = null,
-    val upc: String? = null,
+    val barcodes: List<ProductCandidateBarcode> = emptyList(),
     val evidence: List<ProductCandidateEvidence> = emptyList(),
-    val brand: String? = null,
-    val manufacturer: String? = null,
     val candidateType: String = "retail_product",
     val sourceVersion: String? = null,
 ) {
-    val effectiveBrand: String?
-        get() = brand ?: brandOrManufacturer
-
     init {
         require(clientKey.isNotBlank() && productName.isNotBlank())
         require(productName.length <= 300)
         require(candidateType in setOf("retail_product", "complimentary_side", "meal_component_estimate"))
         listOf(
-            brandOrManufacturer,
+            brand,
+            manufacturer,
             specification,
             contentUnit,
             variant,
-            barcode,
-            ean,
-            upc,
             sourceVersion,
         ).forEach { value ->
             require(value == null || value.isNotBlank()) { "product candidate text facts must not be blank" }
         }
+        require(barcodes.distinct().size == barcodes.size) { "product candidate barcodes must be unique" }
         require(evidence.isNotEmpty()) { "product candidate evidence is required" }
         evidence.forEach { item ->
             require(item.sourceAttachmentIds.isNotEmpty()) { "product candidate evidence requires a source" }
@@ -142,17 +154,6 @@ data class ProductCandidate(
         require(contentAmount == null || contentAmount.isFinite() && contentAmount > 0)
         require(contentUnit == null || contentUnit in setOf("g", "ml", "each"))
         require(packageCount == null || packageCount > 0)
-        validateIdentifier("barcode", barcode, setOf(8, 12, 13, 14))
-        validateIdentifier("ean", ean, setOf(8, 13))
-        validateIdentifier("upc", upc, setOf(12))
-    }
-
-    private fun validateIdentifier(name: String, value: String?, lengths: Set<Int>) {
-        if (value == null) return
-        val normalized = value.filterNot { it == ' ' || it == '-' }
-        require(normalized.all(Char::isDigit) && normalized.length in lengths) {
-            "$name must contain a supported numeric identifier"
-        }
     }
 
     private companion object {
@@ -217,8 +218,13 @@ sealed interface IngestionNutrition {
         override val lineId: String? = null,
         val menuName: String,
         val estimate: RestaurantNutritionEstimate,
+        val componentRole: String = "complimentary_side",
         val reference: MealComponentReference? = null,
-    ) : IngestionNutrition
+    ) : IngestionNutrition {
+        init {
+            require(componentRole.isNotBlank()) { "meal component role is required" }
+        }
+    }
 }
 
 data class MealComponentReference(
@@ -256,12 +262,14 @@ data class IngestionConsumptionItem(
     val amount: Double,
     val unit: String,
     val confidence: Double,
+    val amountStatus: String = "estimated",
 ) {
     init {
         require(nutritionClientKey.isNotBlank())
         require(amount.isFinite() && amount > 0)
         require(unit.isNotBlank())
         require(confidence.isFinite() && confidence in 0.0..1.0)
+        require(amountStatus.isNotBlank())
     }
 }
 

@@ -45,6 +45,9 @@ import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.importer.CanonicalDraft
 import com.pricetrace.receiptscanner.importer.ExternalJsonImportResult
 import com.pricetrace.receiptscanner.input.InputOrigin
+import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
+import com.pricetrace.receiptscanner.ingestion.IngestionConsumption
+import com.pricetrace.receiptscanner.ingestion.IngestionConsumptionItem
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
@@ -711,6 +714,70 @@ class ReceiptUiInstrumentedTest {
             assertTrue(cancelled)
         }
     }
+
+    @Test
+    fun consumptionReviewShowsCanonicalFieldsAndRequiresExplicitConfirmation() {
+        var consumedAt: String? = null
+        var amount: String? = null
+        var unit: String? = null
+        var amountStatus: String? = null
+        var confirmed = 0
+        val state = ReceiptAppUiState(
+            screen = AppScreen.CONSUMPTION_REVIEW,
+            isCanonicalIngestion = true,
+            currentDocumentId = "doc-consumption-ui",
+            canonicalConsumptionArtifacts = listOf(
+                IngestionConsumption(
+                    clientKey = "meal-1",
+                    consumedAt = "2026-09-06T08:10:00+09:00",
+                    status = ConsumptionVerificationStatus.UNVERIFIED,
+                    items = listOf(
+                        IngestionConsumptionItem(
+                            nutritionClientKey = "product-1",
+                            amount = 40.0,
+                            unit = "g",
+                            confidence = 0.92,
+                            amountStatus = "estimated",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        composeRule.setContent {
+            ReceiptOcrTheme {
+                ReceiptOcrContent(
+                    uiState = state,
+                    onConsumptionConsumedAtChanged = { _, value -> consumedAt = value },
+                    onConsumptionItemAmountChanged = { _, _, value -> amount = value },
+                    onConsumptionItemUnitChanged = { _, _, value -> unit = value },
+                    onConsumptionItemAmountStatusChanged = { _, _, value -> amountStatus = value },
+                    onConfirmConsumption = { confirmed += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("consumption_review").assertIsDisplayed()
+        composeRule.onNodeWithText("UNVERIFIED").assertIsDisplayed()
+        composeRule.onNodeWithTag("consumption_review").performScrollToNode(
+            hasTestTag("consumption_item_amount_status_meal-1_product-1"),
+        )
+        composeRule.onNodeWithTag("consumption_consumed_at_meal-1").performTextReplacement(
+            "2026-09-06T09:10:00+09:00",
+        )
+        composeRule.onNodeWithTag("consumption_item_amount_meal-1_product-1").performTextReplacement("45")
+        composeRule.onNodeWithTag("consumption_item_unit_meal-1_product-1").performTextReplacement("g")
+        composeRule.onNodeWithTag("consumption_item_amount_status_meal-1_product-1")
+            .performTextReplacement("measured")
+        composeRule.onNodeWithTag("confirm_consumption_review").performClick()
+        composeRule.runOnIdle {
+            assertEquals("2026-09-06T09:10:00+09:00", consumedAt)
+            assertEquals("45", amount)
+            assertEquals("g", unit)
+            assertEquals("measured", amountStatus)
+            assertEquals(1, confirmed)
+        }
+    }
+
     private fun receipt(verified: Boolean): ReceiptV2 {
         val transcriptionStatus = if (verified) TranscriptionStatus.USER_VERIFIED else TranscriptionStatus.PARSED
         return ReceiptV2(

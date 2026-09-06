@@ -343,6 +343,12 @@ class IngestionOrchestrator(
             val invalidated = invalidateVerification(session, envelope, "canonical_fingerprint_mismatch")
             return invalidated.projections.first { it.projection == projection }
         }
+        if (projection == IngestionProjection.FITNESS_MEAL &&
+            envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA &&
+            envelope.consumption.any { it.status != ConsumptionVerificationStatus.USER_VERIFIED }
+        ) {
+            return persistBlocked(session, projection, current, "consumption_artifact_not_user_verified")
+        }
         val requiredArtifacts = requiredArtifactKeys(projection, envelope)
         val currentArtifacts = artifactFingerprints(envelope)
         if (requiredArtifacts.isEmpty() || requiredArtifacts.any {
@@ -531,7 +537,10 @@ class IngestionOrchestrator(
         envelope.consumption.forEach { item ->
             put(
                 IngestionArtifactKeys.consumption(item.clientKey),
-                StableIds.sha256("ingestion-artifact|consumption|" + consumptionPayloadDependency(item)),
+                StableIds.sha256(
+                    "ingestion-artifact|consumption|" +
+                        consumptionPayloadDependency(item, envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA),
+                ),
             )
         }
         envelope.productCandidates.forEach { candidate ->
@@ -623,7 +632,12 @@ class IngestionOrchestrator(
             IngestionProjection.FITNESS_MEAL ->
                 "fitness-meal|" + envelope.nutrition.joinToString("|") { item ->
                     nutritionPayloadDependency(envelope, item)
-                } + "|consumption=" + envelope.consumption.joinToString("|", transform = ::consumptionPayloadDependency)
+                } + "|consumption=" + envelope.consumption.joinToString("|") { consumption ->
+                    consumptionPayloadDependency(
+                        consumption,
+                        envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA,
+                    )
+                }
             IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE ->
                 "pricetrace-product-candidate|" + envelope.productCandidates
                     .sortedBy(ProductCandidate::clientKey)
@@ -685,20 +699,40 @@ class IngestionOrchestrator(
             ).joinToString("|") { value -> value ?: "<null>" }
         } ?: "<none>"
 
-    private fun consumptionPayloadDependency(consumption: IngestionConsumption): String = listOf(
-        consumption.clientKey,
-        consumption.effectiveNutritionClientKeys.toSortedSet().joinToString(","),
-        consumption.consumedAt ?: "<null>",
-        consumption.items.joinToString(",") { item ->
-            listOf(item.nutritionClientKey, item.amount, item.unit, item.confidence).joinToString("/")
-        },
-    ).joinToString("|")
+    private fun consumptionPayloadDependency(
+        consumption: IngestionConsumption,
+        includeV2Fields: Boolean,
+    ): String {
+        val itemDependency = consumption.items.joinToString(",") { item ->
+            if (includeV2Fields) {
+                listOf(item.nutritionClientKey, item.amount, item.unit, item.confidence, item.amountStatus)
+                    .joinToString("/")
+            } else {
+                listOf(item.nutritionClientKey, item.amount, item.unit, item.confidence)
+                    .joinToString("/")
+            }
+        }
+        return if (includeV2Fields) {
+            listOf(
+                consumption.clientKey,
+                consumption.effectiveNutritionClientKeys.toSortedSet().joinToString(","),
+                consumption.consumedAt ?: "<null>",
+                consumption.status.wireValue,
+                itemDependency,
+            ).joinToString("|")
+        } else {
+            listOf(
+                consumption.clientKey,
+                consumption.effectiveNutritionClientKeys.toSortedSet().joinToString(","),
+                consumption.consumedAt ?: "<null>",
+                itemDependency,
+            ).joinToString("|")
+        }
+    }
 
     private fun productCandidatePayloadDependency(candidate: ProductCandidate): String = listOf<Any?>(
         candidate.clientKey,
         candidate.productName,
-        candidate.effectiveBrand,
-        candidate.brandOrManufacturer,
         candidate.brand,
         candidate.manufacturer,
         candidate.specification,
@@ -706,9 +740,9 @@ class IngestionOrchestrator(
         candidate.contentUnit,
         candidate.packageCount,
         candidate.variant,
-        candidate.barcode,
-        candidate.ean,
-        candidate.upc,
+        candidate.barcodes.joinToString(",") { barcode ->
+            listOf(barcode.type, barcode.value).joinToString("/")
+        },
         candidate.candidateType,
         candidate.sourceVersion,
         candidate.evidence.sortedWith(compareBy(

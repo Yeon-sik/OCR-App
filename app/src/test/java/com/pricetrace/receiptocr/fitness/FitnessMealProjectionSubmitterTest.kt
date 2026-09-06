@@ -65,6 +65,7 @@ class FitnessMealProjectionSubmitterTest {
         assertEquals(40.0, item["consumed_amount"]?.jsonPrimitive?.content?.toDouble())
         assertEquals("g", item["consumed_unit"]?.jsonPrimitive?.content)
         assertEquals(0.92, item["confidence"]?.jsonPrimitive?.content?.toDouble())
+        assertEquals("estimated", item["source_provenance"]!!.jsonObject["amount_status"]?.jsonPrimitive?.content)
         assertEquals(JsonNull, body["p_pricetrace_identity"])
     }
 
@@ -96,7 +97,33 @@ class FitnessMealProjectionSubmitterTest {
         assertEquals(JsonNull, body["p_pricetrace_identity"])
         val item = body["p_items"]!!.jsonArray.single().jsonObject
         assertFalse(item.containsKey("pricetrace_identity"))
-        assertEquals("meal_component_estimate", item["source_provenance"]!!.jsonObject["nutrition_kind"]?.jsonPrimitive?.content)
+        val provenance = item["source_provenance"]!!.jsonObject
+        assertEquals("meal_component_estimate", provenance["nutrition_kind"]?.jsonPrimitive?.content)
+        assertEquals("complimentary_side", provenance["component_role"]?.jsonPrimitive?.content)
+        assertEquals("estimated", provenance["amount_status"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun unverifiedConsumptionCannotReachFitnessMealRpc() = runTest {
+        val transport = QueueTransport()
+        val result = FitnessMealProjectionSubmitter(
+            NutritionSupabaseGateway(FakeStore(signedIn()), transport),
+        ).submit(
+            request(
+                envelope = packagedEnvelope("2026-09-06T08:10:00+09:00").copy(
+                    consumption = packagedEnvelope("2026-09-06T08:10:00+09:00").consumption.map {
+                        it.copy(status = ConsumptionVerificationStatus.UNVERIFIED)
+                    },
+                ),
+                dependencyMetadata = """[{"nutrition_food_id":"food-1"}]""",
+            ),
+        )
+
+        assertEquals(
+            "consumption_artifact_not_user_verified",
+            (result as ProjectionSubmission.Failure).message,
+        )
+        assertTrue(transport.requests.isEmpty())
     }
 
     @Test

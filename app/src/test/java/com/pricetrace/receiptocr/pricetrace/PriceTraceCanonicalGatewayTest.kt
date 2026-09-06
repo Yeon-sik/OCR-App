@@ -116,7 +116,7 @@ class PriceTraceCanonicalGatewayTest {
             contentUnit = "g",
             packageCount = 1,
             variant = "Original",
-            barcode = "8801234567890",
+            barcodes = listOf(ProductCandidateBarcode(type = "ean13", value = "8801234567890")),
             sourceVersion = "chatgpt-vision-v2",
             evidence = listOf(
                 ProductCandidateEvidence(
@@ -152,7 +152,9 @@ class PriceTraceCanonicalGatewayTest {
         assertEquals(setOf("p_idempotency_key", "p_candidate"), body.keys)
         assertEquals("PRICETRACE_PRODUCT_CANDIDATE", sent["schema_version"]?.jsonPrimitive?.content)
         assertEquals("product-candidate.v1", sent["contract_version"]?.jsonPrimitive?.content)
-        assertEquals("8801234567890", sent["identifiers"]!!.jsonArray.single().jsonObject["value"]?.jsonPrimitive?.content)
+        val identifier = sent["identifiers"]!!.jsonArray.single().jsonObject
+        assertEquals("ean", identifier["scheme"]?.jsonPrimitive?.content)
+        assertEquals("8801234567890", identifier["value"]?.jsonPrimitive?.content)
         assertFalse(sent.containsKey("catalog_product_id"))
         assertFalse(sent.containsKey("standard_product_id"))
         assertFalse(sent.containsKey("restaurant_menu_id"))

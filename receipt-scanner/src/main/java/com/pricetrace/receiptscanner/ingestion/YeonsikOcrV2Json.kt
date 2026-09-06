@@ -123,16 +123,19 @@ object YeonsikOcrV2Json {
     private fun productCandidateJson(value: ProductCandidate): JsonObject = buildJsonObject {
         put("client_key", JsonPrimitive(value.clientKey))
         put("product_name", JsonPrimitive(value.productName))
-        put("brand", value.effectiveBrand?.let(::JsonPrimitive) ?: JsonNull)
+        put("brand", value.brand?.let(::JsonPrimitive) ?: JsonNull)
         put("manufacturer", value.manufacturer?.let(::JsonPrimitive) ?: JsonNull)
         put("specification", value.specification?.let(::JsonPrimitive) ?: JsonNull)
         put("content_amount", value.contentAmount?.let(::JsonPrimitive) ?: JsonNull)
         put("content_unit", value.contentUnit?.let(::JsonPrimitive) ?: JsonNull)
         put("package_count", value.packageCount?.let(::JsonPrimitive) ?: JsonNull)
         put("variant", value.variant?.let(::JsonPrimitive) ?: JsonNull)
-        put("barcode", value.barcode?.let(::JsonPrimitive) ?: JsonNull)
-        put("ean", value.ean?.let(::JsonPrimitive) ?: JsonNull)
-        put("upc", value.upc?.let(::JsonPrimitive) ?: JsonNull)
+        put("barcodes", JsonArray(value.barcodes.map { barcode ->
+            buildJsonObject {
+                put("type", JsonPrimitive(barcode.type))
+                put("value", JsonPrimitive(barcode.value))
+            }
+        }))
         put("candidate_type", JsonPrimitive(value.candidateType))
         put("source_version", value.sourceVersion?.let(::JsonPrimitive) ?: JsonNull)
         put("evidence", JsonArray(value.evidence.map { evidence -> buildJsonObject {
@@ -172,6 +175,7 @@ object YeonsikOcrV2Json {
             put("menu_name", JsonPrimitive(item.menuName))
             put("payload", JsonNull)
             put("estimate", estimateJson(item.estimate))
+            put("component_role", JsonPrimitive(item.componentRole))
             put("restaurant_name", item.reference?.restaurantName?.let(::JsonPrimitive) ?: JsonNull)
             put("branch_name", item.reference?.branchName?.let(::JsonPrimitive) ?: JsonNull)
             put("restaurant_menu_id", JsonNull)
@@ -227,9 +231,14 @@ object YeonsikOcrV2Json {
                 value.toInt()
             },
             variant = root.nullableString("variant"),
-            barcode = root.nullableString("barcode"),
-            ean = root.nullableString("ean"),
-            upc = root.nullableString("upc"),
+            barcodes = root.arrayValue("barcodes").map { barcodeElement ->
+                val barcode = barcodeElement.jsonObject
+                requireKeys(barcode, BARCODE_KEYS)
+                ProductCandidateBarcode(
+                    type = barcode.string("type"),
+                    value = barcode.string("value"),
+                )
+            },
             evidence = evidence,
             candidateType = root.string("candidate_type"),
             sourceVersion = root.nullableString("source_version"),
@@ -289,6 +298,7 @@ object YeonsikOcrV2Json {
                     lineId = root.nullableString("line_id"),
                     menuName = root.string("menu_name"),
                     estimate = decodeEstimate(root.objectValue("estimate")),
+                    componentRole = root.string("component_role"),
                     reference = MealComponentReference(
                         restaurantName = root.nullableString("restaurant_name"),
                         branchName = root.nullableString("branch_name"),
@@ -313,6 +323,7 @@ object YeonsikOcrV2Json {
                 amount = item.number("amount"),
                 unit = item.string("unit"),
                 confidence = item.number("confidence").also { require(it in 0.0..1.0) },
+                amountStatus = item.string("amount_status"),
             )
         }
         require(items.isNotEmpty()) { "v2 consumption must contain at least one item" }
@@ -572,6 +583,7 @@ object YeonsikOcrV2Json {
                 put("amount", JsonPrimitive(item.amount))
                 put("unit", JsonPrimitive(item.unit))
                 put("confidence", JsonPrimitive(item.confidence))
+                put("amount_status", JsonPrimitive(item.amountStatus))
             }
         }))
         put("status", JsonPrimitive(value.status.wireValue))
@@ -650,16 +662,18 @@ object YeonsikOcrV2Json {
     )
     private val PRODUCT_CANDIDATE_KEYS = setOf(
         "client_key", "product_name", "brand", "manufacturer", "specification",
-        "content_amount", "content_unit", "package_count", "variant", "barcode", "ean", "upc",
+        "content_amount", "content_unit", "package_count", "variant", "barcodes",
         "candidate_type", "source_version", "evidence",
     )
+    private val BARCODE_KEYS = setOf("type", "value")
     private val EVIDENCE_KEYS = setOf(
         "source_attachment_ids", "source", "source_type", "source_ref", "field", "observed_value", "content_hash",
     )
     private val NUTRITION_KEYS = setOf("client_key", "kind", "line_id", "menu_name", "payload", "estimate")
-    private val MEAL_COMPONENT_NUTRITION_KEYS = NUTRITION_KEYS + setOf("restaurant_name", "branch_name", "restaurant_menu_id")
+    private val MEAL_COMPONENT_NUTRITION_KEYS = NUTRITION_KEYS +
+        setOf("component_role", "restaurant_name", "branch_name", "restaurant_menu_id")
     private val CONSUMPTION_KEYS = setOf("client_key", "consumed_at", "items", "status")
-    private val CONSUMPTION_ITEM_KEYS = setOf("nutrition_client_key", "amount", "unit", "confidence")
+    private val CONSUMPTION_ITEM_KEYS = setOf("nutrition_client_key", "amount", "unit", "confidence", "amount_status")
     private val LINK_KEYS = setOf("receipt_line_id", "nutrition_client_key")
     private val ESTIMATE_KEYS = setOf("estimated", "confidence", "nutrients", "ranges")
     private val RANGE_KEYS = setOf("min", "point", "max")
