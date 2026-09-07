@@ -78,6 +78,22 @@ class NutritionSupabaseGateway(
         return importCanonicalOnce(payload, refreshed)
     }
 
+    /** Fitness v3 boundary used by the shared yeonsik-ocr.v3 Core projection. */
+    suspend fun importCanonicalV3(payload: CanonicalNutritionImportPayload): NutritionCanonicalImportOutcome {
+        val initial = store.read()
+        if (!initial.isSignedIn) {
+            return NutritionCanonicalImportOutcome.Failure(NutritionGatewayFailure.NOT_CONFIGURED)
+        }
+        val first = importCanonicalOnce(payload, initial, "/rest/v1/rpc/import_canonical_nutrition_v3")
+        if (first !is NutritionCanonicalImportOutcome.Failure ||
+            first.reason != NutritionGatewayFailure.AUTHENTICATION
+        ) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return importCanonicalOnce(payload, refreshed, "/rest/v1/rpc/import_canonical_nutrition_v3")
+    }
+
     /** Sends the verified item-level Meal to Fitness's canonical Meal boundary. */
     suspend fun importVerifiedMeal(payload: FitnessMealCanonicalPayload): NutritionMealImportOutcome {
         val initial = store.read()
@@ -132,12 +148,13 @@ class NutritionSupabaseGateway(
     private suspend fun importCanonicalOnce(
         payload: CanonicalNutritionImportPayload,
         config: NutritionSupabaseConfig,
+        path: String = "/rest/v1/rpc/import_canonical_nutrition_v2",
     ): NutritionCanonicalImportOutcome = try {
         val response = transport.execute(
             request(
                 config = config,
                 method = "POST",
-                path = "/rest/v1/rpc/import_canonical_nutrition_v2",
+                path = path,
                 body = payload.toRpcJson(),
             ),
         )

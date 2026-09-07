@@ -36,6 +36,7 @@ import com.pricetrace.receiptscanner.storage.RoomPriceObservationQueueRepository
 import com.pricetrace.receiptscanner.storage.RoomReceiptSessionRepository
 import com.pricetrace.receiptscanner.storage.RoomIngestionSessionStore
 import com.pricetrace.receiptscanner.ingestion.IngestionOrchestrator
+import com.pricetrace.receiptscanner.ingestion.CanonicalIngestionUseCase
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 
@@ -110,6 +111,10 @@ class AppContainer(application: Application) {
     internal val ingestionOrchestrator = IngestionOrchestrator(
         store = ingestionSessionStore,
         identityResolver = null,
+        submitters = canonicalProjectionSubmitters,
+    )
+    internal val canonicalIngestionUseCase = CanonicalIngestionUseCase(
+        store = ingestionSessionStore,
         submitters = canonicalProjectionSubmitters,
     )
     internal val priceObservationProcessor = PriceObservationQueueProcessor(

@@ -20,10 +20,12 @@ fun ReceiptOcrApp(
     onLaunchScanner: (IntentSender) -> Unit,
     onLaunchImagePicker: (Boolean) -> Unit,
     onLaunchJsonPicker: () -> Unit,
+    onLaunchCanonicalJsonPicker: () -> Unit,
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
     val uiState by viewModel.uiState.collectAsState()
+    val canonicalJsonValidatorState by viewModel.canonicalJsonValidatorState.collectAsState()
     val sessions by viewModel.sessions.collectAsState()
     val pages by viewModel.selectedPages.collectAsState()
 
@@ -72,6 +74,7 @@ fun ReceiptOcrApp(
         },
         onPickImages = { onLaunchImagePicker(false) },
         onPickJson = onLaunchJsonPicker,
+        onPickCanonicalJson = onLaunchCanonicalJsonPicker,
         onWorkflowSelected = viewModel::selectWorkflow,
         onAppendScan = {
             activity?.let { viewModel.prepareScanner(it, onLaunchScanner, appendToCurrent = true) }
@@ -80,6 +83,14 @@ fun ReceiptOcrApp(
         onStartImportReview = viewModel::startImportReview,
         onAttachImportImage = { onLaunchImagePicker(true) },
         onCancelImport = viewModel::cancelImportPreview,
+        canonicalJsonValidatorState = canonicalJsonValidatorState,
+        onCanonicalJsonChanged = viewModel::updateCanonicalJsonValidatorRawJson,
+        onCanonicalJsonBasisChanged = viewModel::setCanonicalJsonValidatorBasis,
+        onCanonicalJsonParse = viewModel::parseCanonicalJsonValidator,
+        onCanonicalJsonConfirm = viewModel::confirmCanonicalJsonValidator,
+        onCanonicalJsonProjectionSelected = viewModel::selectCanonicalJsonProjection,
+        onCanonicalJsonSubmit = viewModel::submitCanonicalJsonValidator,
+        onCanonicalJsonRetry = viewModel::retryCanonicalJsonValidator,
         onSelectSession = viewModel::selectSession,
         onDeleteSession = viewModel::deleteSession,
         onShowApiSettings = viewModel::showApiSettings,

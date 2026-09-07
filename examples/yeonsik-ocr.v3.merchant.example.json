@@ -1,0 +1,41 @@
+{
+  "schema_version": "yeonsik-ocr.v3",
+  "mode": "merchant",
+  "source": {
+    "producer": "chatgpt",
+    "source_files": [],
+    "user_text": "merchant-only canonical review"
+  },
+  "merchant_candidate": {
+    "name": "Demo Merchant",
+    "business_kind": "retail",
+    "branch_name": "Main",
+    "address": null,
+    "phone": null,
+    "business_registration_number": null,
+    "source_attachment_ids": [],
+    "source_namespace": "demo",
+    "source_location_code": "main"
+  },
+  "receipt": null,
+  "product_candidates": [],
+  "price_observations": [],
+  "nutrition": [],
+  "consumption": [],
+  "classification_hints": {
+    "cashos": {
+      "category_hint": null,
+      "institution_hint": null,
+      "payment_method_hint": null
+    }
+  },
+  "links": [],
+  "projection_targets": ["cashos_receipt"],
+  "review": {
+    "status": "ready",
+    "blocking_issues": [],
+    "warnings": [],
+    "verification_basis": "SOURCE_EVIDENCE",
+    "user_verified": true
+  }
+}

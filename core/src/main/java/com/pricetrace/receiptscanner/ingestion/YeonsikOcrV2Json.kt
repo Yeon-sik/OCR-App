@@ -161,6 +161,9 @@ object YeonsikOcrV2Json {
             put("payload", JsonNull)
             put("estimate", estimateJson(item.estimate))
         }
+        is IngestionNutrition.RestaurantMenuEstimate -> error(
+            "restaurant_menu_estimate requires yeonsik-ocr.v3"
+        )
         is IngestionNutrition.MealComponentEstimate -> buildJsonObject {
             put("client_key", JsonPrimitive(item.clientKey))
             put("kind", JsonPrimitive("meal_component_estimate"))

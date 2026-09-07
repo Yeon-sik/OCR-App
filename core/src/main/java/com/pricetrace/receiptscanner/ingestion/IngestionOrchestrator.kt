@@ -197,11 +197,21 @@ class IngestionOrchestrator(
         envelope: YeonsikOcrEnvelope,
         evidence: List<LocalEvidence>,
         inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+        verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+        explicitUserConfirmation: Boolean = false,
     ): IngestionStartResult = when {
-        envelope.receipt != null -> markReceiptVerified(ingestionId, envelope, evidence, inputOrigin)
-        envelope.nutrition.isNotEmpty() -> markNutritionVerified(ingestionId, envelope, evidence, inputOrigin = inputOrigin)
-        envelope.productCandidates.isNotEmpty() -> markProductCandidatesVerified(ingestionId, envelope, evidence, inputOrigin = inputOrigin)
-        envelope.merchantCandidate != null -> markMerchantCandidateVerified(ingestionId, envelope, evidence, inputOrigin)
+        envelope.receipt != null -> markReceiptVerified(ingestionId, envelope, evidence, inputOrigin, verificationBasis, explicitUserConfirmation)
+        envelope.nutrition.isNotEmpty() -> markNutritionVerified(ingestionId, envelope, evidence, inputOrigin = inputOrigin, verificationBasis = verificationBasis, explicitUserConfirmation = explicitUserConfirmation)
+        envelope.priceObservations.isNotEmpty() -> markPriceObservationsVerified(
+            ingestionId = ingestionId,
+            envelope = envelope,
+            evidence = evidence,
+            inputOrigin = inputOrigin,
+            verificationBasis = verificationBasis,
+            explicitUserConfirmation = explicitUserConfirmation,
+        )
+        envelope.productCandidates.isNotEmpty() -> markProductCandidatesVerified(ingestionId, envelope, evidence, inputOrigin = inputOrigin, verificationBasis = verificationBasis, explicitUserConfirmation = explicitUserConfirmation)
+        envelope.merchantCandidate != null -> markMerchantCandidateVerified(ingestionId, envelope, evidence, inputOrigin, verificationBasis, explicitUserConfirmation)
         else -> IngestionStartResult.Failure(listOf("no_reviewable_artifact"))
     }
 
@@ -210,6 +220,8 @@ class IngestionOrchestrator(
         envelope: YeonsikOcrEnvelope,
         evidence: List<LocalEvidence>,
         inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+        verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+        explicitUserConfirmation: Boolean = false,
     ): IngestionStartResult = markArtifactsVerified(
         ingestionId = ingestionId,
         envelope = envelope,
@@ -219,6 +231,8 @@ class IngestionOrchestrator(
             if (envelope.receipt != null) add(IngestionArtifactKeys.CASHOS_HINTS)
         },
         inputOrigin = inputOrigin,
+        verificationBasis = verificationBasis,
+        explicitUserConfirmation = explicitUserConfirmation,
     )
 
     suspend fun markNutritionVerified(
@@ -227,6 +241,8 @@ class IngestionOrchestrator(
         evidence: List<LocalEvidence>,
         nutritionClientKeys: Set<String> = envelope.nutrition.map { it.clientKey }.toSet(),
         inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+        verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+        explicitUserConfirmation: Boolean = false,
     ): IngestionStartResult {
         val requestedKeys = nutritionClientKeys.map(IngestionArtifactKeys::nutrition).toSet()
         if (requestedKeys.isEmpty()) return IngestionStartResult.Failure(listOf("nutrition_artifact_missing"))
@@ -243,6 +259,30 @@ class IngestionOrchestrator(
             evidence = evidence,
             artifactKeys = requestedKeys,
             inputOrigin = inputOrigin,
+            verificationBasis = verificationBasis,
+            explicitUserConfirmation = explicitUserConfirmation,
+        )
+    }
+
+    suspend fun markPriceObservationsVerified(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+        evidence: List<LocalEvidence>,
+        priceObservationClientKeys: Set<String> = envelope.priceObservations.map { it.clientKey }.toSet(),
+        inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+        verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+        explicitUserConfirmation: Boolean = false,
+    ): IngestionStartResult {
+        val requestedKeys = priceObservationClientKeys.map(IngestionArtifactKeys::priceObservation).toSet()
+        if (requestedKeys.isEmpty()) return IngestionStartResult.Failure(listOf("price_observation_artifact_missing"))
+        return markArtifactsVerified(
+            ingestionId = ingestionId,
+            envelope = envelope,
+            evidence = evidence,
+            artifactKeys = requestedKeys,
+            inputOrigin = inputOrigin,
+            verificationBasis = verificationBasis,
+            explicitUserConfirmation = explicitUserConfirmation,
         )
     }
 
@@ -252,10 +292,12 @@ class IngestionOrchestrator(
         evidence: List<LocalEvidence>,
         consumptionClientKeys: Set<String> = envelope.consumption.map { it.clientKey }.toSet(),
         inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+        verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+        explicitUserConfirmation: Boolean = false,
     ): IngestionStartResult {
         val selected = envelope.consumption.filter { it.clientKey in consumptionClientKeys }
         if (selected.isEmpty()) return IngestionStartResult.Failure(listOf("consumption_artifact_missing"))
-        if (envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA && selected.any { !it.isCompleteForFitnessMeal() }) {
+        if (envelope.schemaVersion in setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V3_SCHEMA) && selected.any { !it.isCompleteForFitnessMeal() }) {
             return IngestionStartResult.Failure(listOf("consumption_artifact_incomplete"))
         }
         if (selected.any { it.status != ConsumptionVerificationStatus.USER_VERIFIED }) {
@@ -268,6 +310,8 @@ class IngestionOrchestrator(
             evidence = evidence,
             artifactKeys = selected.map { IngestionArtifactKeys.consumption(it.clientKey) }.toSet() + nutritionKeys,
             inputOrigin = inputOrigin,
+            verificationBasis = verificationBasis,
+            explicitUserConfirmation = explicitUserConfirmation,
         )
     }
 
@@ -277,6 +321,8 @@ class IngestionOrchestrator(
         evidence: List<LocalEvidence>,
         productClientKeys: Set<String> = envelope.productCandidates.map { it.clientKey }.toSet(),
         inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+        verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+        explicitUserConfirmation: Boolean = false,
     ): IngestionStartResult {
         val requestedKeys = productClientKeys.map(IngestionArtifactKeys::productCandidate).toSet()
         if (requestedKeys.isEmpty()) return IngestionStartResult.Failure(listOf("product_candidate_artifact_missing"))
@@ -286,20 +332,26 @@ class IngestionOrchestrator(
             evidence = evidence,
             artifactKeys = requestedKeys,
             inputOrigin = inputOrigin,
+            verificationBasis = verificationBasis,
+            explicitUserConfirmation = explicitUserConfirmation,
         )
     }
 
-    private suspend fun markMerchantCandidateVerified(
+    suspend fun markMerchantCandidateVerified(
         ingestionId: String,
         envelope: YeonsikOcrEnvelope,
         evidence: List<LocalEvidence>,
         inputOrigin: InputOrigin,
+        verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+        explicitUserConfirmation: Boolean = false,
     ): IngestionStartResult = markArtifactsVerified(
         ingestionId = ingestionId,
         envelope = envelope,
         evidence = evidence,
         artifactKeys = setOf(IngestionArtifactKeys.MERCHANT_CANDIDATE),
         inputOrigin = inputOrigin,
+        verificationBasis = verificationBasis,
+        explicitUserConfirmation = explicitUserConfirmation,
     )
 
     private suspend fun markArtifactsVerified(
@@ -308,6 +360,8 @@ class IngestionOrchestrator(
         evidence: List<LocalEvidence>,
         artifactKeys: Set<String>,
         inputOrigin: InputOrigin,
+        verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+        explicitUserConfirmation: Boolean = false,
     ): IngestionStartResult {
         val current = store.get(ingestionId) ?: return IngestionStartResult.Failure(listOf("ingestion_not_found"))
         val currentFingerprint = fingerprint(envelope)
@@ -320,6 +374,8 @@ class IngestionOrchestrator(
             evidence = evidence,
             inputOrigin = inputOrigin,
             artifactKeys = artifactKeys,
+            verificationBasis = verificationBasis,
+            explicitUserConfirmation = explicitUserConfirmation,
         )
         if (!gate.isAllowed) return IngestionStartResult.Failure(gate.blockingIssues)
         val artifacts = artifactFingerprints(envelope)
@@ -361,13 +417,13 @@ class IngestionOrchestrator(
             return invalidated.projections.first { it.projection == projection }
         }
         if (projection == IngestionProjection.FITNESS_MEAL &&
-            envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA &&
+            envelope.schemaVersion in setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V3_SCHEMA) &&
             !fitnessMealValuesComplete(envelope)
         ) {
             return persistBlocked(session, projection, current, "consumption_artifact_incomplete")
         }
         if (projection == IngestionProjection.FITNESS_MEAL &&
-            envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA &&
+            envelope.schemaVersion in setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V3_SCHEMA) &&
             envelope.consumption.any { it.status != ConsumptionVerificationStatus.USER_VERIFIED }
         ) {
             return persistBlocked(session, projection, current, "consumption_artifact_not_user_verified")
@@ -475,6 +531,38 @@ class IngestionOrchestrator(
         return requireNotNull(store.get(ingestionId)).projections
     }
 
+    /** Submit only user-selected eligible sinks and their required dependencies. */
+    suspend fun submitSelectedProjections(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+        selectedProjections: Set<IngestionProjection>,
+    ): List<ProjectionState> {
+        val plan = CanonicalProjectionPlanner.plan(envelope)
+        val selected = selectedProjections.intersect(plan.eligible)
+        val closure = buildSet {
+            fun addWithDependencies(projection: IngestionProjection) {
+                if (!add(projection)) return
+                projectionDependencies(projection, envelope).forEach(::addWithDependencies)
+            }
+            selected.forEach(::addWithDependencies)
+        }
+        closure.sortedWith(compareBy({ projectionDependencyRank(it) }, { it.wireValue })).forEach { projection ->
+            val current = store.get(ingestionId)?.projections?.firstOrNull { it.projection == projection }
+                ?: return@forEach
+            val retryable = current.status == ProjectionStatus.PENDING ||
+                current.status == ProjectionStatus.FAILED ||
+                (current.status == ProjectionStatus.BLOCKED && current.lastError.isDependencyRetryable())
+            if (retryable) submitProjection(ingestionId, projection, envelope)
+        }
+        return requireNotNull(store.get(ingestionId)).projections
+    }
+
+    suspend fun retrySelectedProjections(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+        selectedProjections: Set<IngestionProjection>,
+    ): List<ProjectionState> = submitSelectedProjections(ingestionId, envelope, selectedProjections)
+
     suspend fun retryFailed(ingestionId: String, envelope: YeonsikOcrEnvelope): List<ProjectionState> {
         val session = requireNotNull(store.get(ingestionId)) { "ingestion_not_found" }
         return session.projections.filter { it.status == ProjectionStatus.FAILED || it.status == ProjectionStatus.BLOCKED }.map {
@@ -551,6 +639,14 @@ class IngestionOrchestrator(
                 StableIds.sha256("ingestion-artifact|cashos-hints|" + cashosHintsInput(envelope)),
             )
         }
+        envelope.priceObservations.forEach { observation ->
+            put(
+                IngestionArtifactKeys.priceObservation(observation.clientKey),
+                StableIds.sha256(
+                    "ingestion-artifact|price-observation|" + standalonePriceObservationDependency(observation),
+                ),
+            )
+        }
         envelope.nutrition.forEach { item ->
             put(
                 IngestionArtifactKeys.nutrition(item.clientKey),
@@ -562,7 +658,10 @@ class IngestionOrchestrator(
                 IngestionArtifactKeys.consumption(item.clientKey),
                 StableIds.sha256(
                     "ingestion-artifact|consumption|" +
-                        consumptionPayloadDependency(item, envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA),
+                        consumptionPayloadDependency(
+                            item,
+                            envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA || envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA,
+                        ),
                 ),
             )
         }
@@ -611,6 +710,19 @@ class IngestionOrchestrator(
                 "|restaurant_name=" + (fitnessRestaurantName(envelope) ?: "<null>") +
                 "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
         }
+
+        is IngestionNutrition.RestaurantMenuEstimate -> {
+            val artifactEnvelope = YeonsikOcrEnvelope(
+                mode = IngestionMode.RESTAURANT,
+                source = IngestionSource(producer = "fitness", sourceFiles = emptyList()),
+                nutrition = listOf(item),
+                schemaVersion = envelope.schemaVersion,
+            )
+            "restaurant_menu_estimate|client_key=" + item.clientKey +
+                "|price_observation=" + item.priceObservationClientKey +
+                "|restaurant_name=" + (fitnessRestaurantName(envelope) ?: "<null>") +
+                "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
+        }
         is IngestionNutrition.MealComponentEstimate -> {
             val artifactEnvelope = YeonsikOcrEnvelope(
                 mode = IngestionMode.RESTAURANT,
@@ -640,9 +752,16 @@ class IngestionOrchestrator(
         envelope: YeonsikOcrEnvelope,
     ): String = StableIds.sha256(
         when (projection) {
-            IngestionProjection.PRICETRACE_RECEIPT,
-            IngestionProjection.PRICETRACE_PRICE_OBSERVATION ->
+            IngestionProjection.PRICETRACE_RECEIPT ->
                 "pricetrace-receipt|" + priceTraceReceiptPayload(envelope.receipt)
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION ->
+                if (envelope.priceObservations.isNotEmpty()) {
+                    "pricetrace-standalone-price|" + envelope.priceObservations
+                        .sortedBy(StandalonePriceObservation::clientKey)
+                        .joinToString("|", transform = ::standalonePriceObservationDependency)
+                } else {
+                    "pricetrace-receipt-price|" + priceTraceReceiptPayload(envelope.receipt)
+                }
             IngestionProjection.CASHOS_RECEIPT ->
                 "cashos-receipt|" +
                     (envelope.receipt?.let { ReceiptV2Json.encodeCanonical(it) } ?: "<none>") +
@@ -658,7 +777,7 @@ class IngestionOrchestrator(
                 } + "|consumption=" + envelope.consumption.joinToString("|") { consumption ->
                     consumptionPayloadDependency(
                         consumption,
-                        envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA,
+                        envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA || envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA,
                     )
                 }
             IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE ->
@@ -753,10 +872,27 @@ class IngestionOrchestrator(
         }
     }
 
+    private fun standalonePriceObservationDependency(observation: StandalonePriceObservation): String = listOf(
+        observation.clientKey,
+        observation.kind.wireValue,
+        observation.productClientKey,
+        observation.itemName,
+        observation.observedOn,
+        observation.observedAt,
+        observation.quantity,
+        observation.unitPrice,
+        observation.gross,
+        observation.discount,
+        observation.net,
+        observation.evidence.sorted().joinToString(","),
+        observation.confidence,
+    ).joinToString("|") { it?.toString() ?: "<null>" }
+
     private fun productCandidatePayloadDependency(candidate: ProductCandidate): String = listOf<Any?>(
         candidate.clientKey,
         candidate.productName,
         candidate.brand,
+        candidate.subBrand,
         candidate.manufacturer,
         candidate.specification,
         candidate.contentAmount,
@@ -791,8 +927,12 @@ class IngestionOrchestrator(
         projection: IngestionProjection,
         envelope: YeonsikOcrEnvelope,
     ): Set<String> = when (projection) {
-        IngestionProjection.PRICETRACE_RECEIPT,
-        IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> if (envelope.receipt != null) {
+        IngestionProjection.PRICETRACE_RECEIPT -> if (envelope.receipt != null) {
+            setOf(IngestionArtifactKeys.RECEIPT)
+        } else emptySet()
+        IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> if (envelope.priceObservations.isNotEmpty()) {
+            envelope.priceObservations.map { IngestionArtifactKeys.priceObservation(it.clientKey) }.toSet()
+        } else if (envelope.receipt != null) {
             setOf(IngestionArtifactKeys.RECEIPT)
         } else emptySet()
         IngestionProjection.CASHOS_RECEIPT -> if (envelope.receipt != null) {
@@ -818,8 +958,10 @@ class IngestionOrchestrator(
         projection: IngestionProjection,
         artifactKeys: Set<String>,
     ): Boolean = when (projection) {
-        IngestionProjection.PRICETRACE_RECEIPT,
-        IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> IngestionArtifactKeys.RECEIPT in artifactKeys
+        IngestionProjection.PRICETRACE_RECEIPT -> IngestionArtifactKeys.RECEIPT in artifactKeys
+        IngestionProjection.PRICETRACE_PRICE_OBSERVATION ->
+            IngestionArtifactKeys.RECEIPT in artifactKeys ||
+                artifactKeys.any { it.startsWith("${IngestionArtifactKeys.PRICE_OBSERVATION}:") }
         IngestionProjection.CASHOS_RECEIPT -> IngestionArtifactKeys.RECEIPT in artifactKeys || IngestionArtifactKeys.CASHOS_HINTS in artifactKeys
         IngestionProjection.FITNESS_NUTRITION -> artifactKeys.any { it.startsWith("nutrition:") }
         IngestionProjection.FITNESS_MEAL -> artifactKeys.any {
@@ -991,13 +1133,11 @@ class IngestionOrchestrator(
         map { if (it.projection == value.projection) value else it }
 
     private fun enabledProjections(envelope: YeonsikOcrEnvelope): List<IngestionProjection> =
-        withDependencies(envelope.targets.ifEmpty { inferredTargets(envelope) }, envelope)
-            .filterNot { projection ->
-                projection == IngestionProjection.FITNESS_MEAL &&
-                    envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA &&
-                    !fitnessMealReady(envelope)
-            }
-            .sortedBy(IngestionProjection::wireValue)
+        CanonicalProjectionPlanner.plan(envelope).eligible.sortedBy(IngestionProjection::wireValue)
+
+    /** Shared planning API used by both Android and Desktop review surfaces. */
+    fun planProjections(envelope: YeonsikOcrEnvelope): CanonicalProjectionPlan =
+        CanonicalProjectionPlanner.plan(envelope)
 
     private fun withDependencies(
         requested: Set<IngestionProjection>,
@@ -1047,7 +1187,7 @@ class IngestionOrchestrator(
         IngestionProjection.entries - enabledProjections(envelope).toSet()
 
     private fun fitnessMealValuesComplete(envelope: YeonsikOcrEnvelope): Boolean =
-        envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA &&
+        envelope.schemaVersion in setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V3_SCHEMA) &&
             envelope.nutrition.isNotEmpty() &&
             envelope.consumption.isNotEmpty() &&
             envelope.consumption.all(IngestionConsumption::isCompleteForFitnessMeal)
@@ -1063,7 +1203,8 @@ class IngestionOrchestrator(
         envelope: YeonsikOcrEnvelope,
     ): Set<IngestionProjection> = buildSet {
         when (projection) {
-            IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> add(IngestionProjection.PRICETRACE_RECEIPT)
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION ->
+                if (envelope.receipt != null) add(IngestionProjection.PRICETRACE_RECEIPT)
             IngestionProjection.CASHOS_RECEIPT,
             IngestionProjection.FITNESS_NUTRITION -> if (envelope.receipt != null) {
                 add(IngestionProjection.PRICETRACE_RECEIPT)

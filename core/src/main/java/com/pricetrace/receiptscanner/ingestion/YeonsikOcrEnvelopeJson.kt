@@ -141,6 +141,9 @@ object YeonsikOcrEnvelopeJson {
                 put("payload", JsonNull)
                 put("estimate", estimateJson(item.estimate))
             }
+            is IngestionNutrition.RestaurantMenuEstimate -> error(
+                "restaurant_menu_estimate requires yeonsik-ocr.v3"
+            )
             is IngestionNutrition.MealComponentEstimate -> error(
                 "meal_component_estimate requires yeonsik-ocr.v2"
             )

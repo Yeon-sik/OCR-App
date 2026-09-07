@@ -27,6 +27,56 @@ import org.junit.Test
 
 class FitnessCanonicalProjectionSubmitterTest {
     @Test
+    fun restaurantMenuEstimateUsesFitnessV3RpcAndCarriesStandalonePriceLink() = runTest {
+        val transport = QueueTransport(
+            NutritionHttpResponse(
+                200,
+                """[{"canonical_import_id":"canonical-menu-1","idempotent_replay":false,"nutrition_food_id":"food-menu-1","input_contract":"food-estimate.v3","projection_source_type":"ocr_app","projection_import_id":"canonical-menu-1-projection","catalog_product_id":null,"estimation_evidence_id":"canonical-menu-1-evidence","visibility":"private"}]""",
+            ),
+        )
+        val item = IngestionNutrition.RestaurantMenuEstimate(
+            clientKey = "menu-1",
+            menuName = "Noodles",
+            priceObservationClientKey = "price-1",
+            estimate = estimate("menu-1").estimate,
+        )
+        val result = FitnessCanonicalProjectionSubmitter(
+            NutritionSupabaseGateway(FakeStore(signedIn()), transport),
+        ).submit(
+            ProjectionRequest(
+                ingestionId = "ingestion-menu-1",
+                projection = IngestionProjection.FITNESS_NUTRITION,
+                canonicalPayload = "{}",
+                envelope = YeonsikOcrEnvelope(
+                    mode = com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT,
+                    source = IngestionSource(producer = "chatgpt", sourceFiles = emptyList()),
+                    merchantCandidate = MerchantCandidate(name = "Test Restaurant"),
+                    nutrition = listOf(item),
+                    schemaVersion = com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V3_SCHEMA,
+                ),
+                localDocumentId = "ocr-menu-1",
+                revisionSeq = 1,
+                idempotencyKey = "menu-key",
+            ),
+        )
+
+        assertTrue(result is ProjectionSubmission.Success)
+        assertEquals("food-menu-1", (result as ProjectionSubmission.Success).remoteId)
+        val request = transport.requests.single()
+        assertEquals(
+            "https://nutrition.example.com/rest/v1/rpc/import_canonical_nutrition_v3",
+            request.url,
+        )
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        assertEquals(FOOD_ESTIMATE_V3, body["p_input_contract"]?.jsonPrimitive?.content)
+        assertTrue(body["p_category_hierarchy"]!!.jsonArray.isEmpty())
+        assertEquals(
+            "price-1",
+            body["p_provenance"]!!.jsonObject["price_observation_client_key"]?.jsonPrimitive?.content,
+        )
+    }
+
+    @Test
     fun restaurantBundlePublishesEveryEstimateThroughIndependentCanonicalRpcCalls() = runTest {
         val store = FakeStore(signedIn())
         val transport = QueueTransport(response("canonical-1", "food-1"), response("canonical-2", "food-2"))

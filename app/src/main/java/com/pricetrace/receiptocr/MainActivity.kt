@@ -13,6 +13,7 @@ import com.pricetrace.receiptscanner.capture.MlKitDocumentCaptureProvider
 class MainActivity : ComponentActivity() {
     private val viewModel: ReceiptAppViewModel by viewModels()
     private var pickImagesForAppend = false
+    private var pickJsonForCanonicalValidator = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -34,7 +35,13 @@ class MainActivity : ComponentActivity() {
         val jsonPickerLauncher = registerForActivityResult(
             ActivityResultContracts.OpenDocument(),
         ) { uri ->
-            uri?.let(viewModel::importExternalJson)
+            val canonicalValidator = pickJsonForCanonicalValidator
+            pickJsonForCanonicalValidator = false
+            if (canonicalValidator) {
+                uri?.let(viewModel::importCanonicalJsonValidator)
+            } else {
+                uri?.let(viewModel::importExternalJson)
+            }
         }
 
         setContent {
@@ -51,6 +58,11 @@ class MainActivity : ComponentActivity() {
                         )
                     },
                     onLaunchJsonPicker = {
+                        jsonPickerLauncher.launch(arrayOf("application/json", "text/json"))
+                    },
+                    onLaunchCanonicalJsonPicker = {
+                        viewModel.showCanonicalJsonValidator()
+                        pickJsonForCanonicalValidator = true
                         jsonPickerLauncher.launch(arrayOf("application/json", "text/json"))
                     },
                 )

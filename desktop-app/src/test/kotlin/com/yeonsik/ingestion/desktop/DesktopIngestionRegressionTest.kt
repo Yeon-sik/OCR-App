@@ -5,6 +5,9 @@ import com.pricetrace.receiptscanner.ingestion.InMemoryIngestionSessionStore
 import com.pricetrace.receiptscanner.ingestion.IngestionOrchestrator
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionStartResult
+import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner
+import com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus
+import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -117,6 +120,31 @@ class DesktopIngestionRegressionTest {
             coreSession.projections.filter { it.status.wireValue != "disabled" }.map { it.projection }.toSet(),
             desktopSession.projections.filter { it.status.wireValue != "disabled" }.map { it.projection }.toSet(),
         )
+    }
+
+    @Test
+    fun `desktop v3 uses the core plan and allows no image manual confirmation`() = runBlocking {
+        val source = readExample("yeonsik-ocr.v3.merchant.example.json")
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-console-v3-parity"))
+        val controller = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env"))),
+        )
+
+        controller.importJson(source)
+        val before = controller.state.value
+        val envelope = YeonsikOcrEnvelopeCodec.decode(source, before.localDocumentId!!)
+        val plan = CanonicalProjectionPlanner.plan(envelope)
+        assertEquals(
+            plan.eligible,
+            before.session!!.projections.filter { it.status.wireValue != "disabled" }.map { it.projection }.toSet(),
+        )
+        assertTrue(IngestionProjection.CASHOS_RECEIPT !in plan.eligible)
+
+        controller.verify(VerificationBasis.MANUAL_CANONICAL_REVIEW)
+        val confirmed = controller.state.value
+        assertEquals(IngestionReviewStatus.READY, confirmed.session?.reviewStatus)
+        assertEquals(confirmed.session?.canonicalFingerprint, confirmed.session?.verifiedCanonicalFingerprint)
     }
 
     private fun readExample(name: String): String {

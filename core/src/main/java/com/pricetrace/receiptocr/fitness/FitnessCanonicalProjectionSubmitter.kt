@@ -7,6 +7,7 @@ import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V3_SCHEMA
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonArray
@@ -30,6 +31,7 @@ class FitnessCanonicalProjectionSubmitter(
             return ProjectionSubmission.Failure("pricetrace_identity_missing", retryable = false)
         }
         val priceTraceIdentity = request.resolvedIdentity?.priceTrace?.let(PriceTraceIdentityJson::encode)
+        val useV3Contract = envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA && envelope.receipt == null
 
         val responses = mutableListOf<String>()
         var lastFoodId: String? = null
@@ -45,6 +47,8 @@ class FitnessCanonicalProjectionSubmitter(
                         // submitProjection() verifies the persisted envelope fingerprint first.
                         envelopeVerified = false,
                         priceTraceIdentity = priceTraceIdentity,
+                        productLabelHierarchy = item.productLabelHierarchy,
+                        useV3Contract = useV3Contract,
                     )
                     is IngestionNutrition.RestaurantEstimate -> {
                         val restaurantName = envelope.receipt?.merchant?.name
@@ -60,6 +64,19 @@ class FitnessCanonicalProjectionSubmitter(
                             restaurantName = restaurantName,
                             item = item,
                             priceTraceIdentity = priceTraceIdentity,
+                            useV3Contract = useV3Contract,
+                        )
+                    }
+                    is IngestionNutrition.RestaurantMenuEstimate -> {
+                        val restaurantName = envelope.receipt?.merchant?.name
+                            ?: envelope.merchantCandidate?.name
+                            ?: return ProjectionSubmission.Failure("restaurant_name_missing", retryable = false)
+                        CanonicalNutritionPayloadFactory.fromRestaurantMenuEstimate(
+                            localDocumentId = localDocumentId,
+                            revisionSeq = request.revisionSeq,
+                            idempotencyKey = itemKey,
+                            restaurantName = restaurantName,
+                            item = item,
                         )
                     }
                     is IngestionNutrition.MealComponentEstimate -> {
@@ -92,7 +109,13 @@ class FitnessCanonicalProjectionSubmitter(
                             )
                         }
                     }
-                    else -> when (val result = gateway.importCanonical(payload)) {
+                    else -> when (val result = if (payload.inputContract == NUTRITION_LABEL_V3 ||
+                        payload.inputContract == FOOD_ESTIMATE_V3
+                    ) {
+                        gateway.importCanonicalV3(payload)
+                    } else {
+                        gateway.importCanonical(payload)
+                    }) {
                         is NutritionCanonicalImportOutcome.Success -> {
                             responses += result.rawResponse
                             lastFoodId = result.response.nutritionFoodId

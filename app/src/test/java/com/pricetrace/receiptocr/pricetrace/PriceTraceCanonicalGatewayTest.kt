@@ -105,6 +105,150 @@ class PriceTraceCanonicalGatewayTest {
     }
 
     @Test
+    fun standalonePriceObservationUsesDedicatedRpcAndKeepsCashOsOutOfThePayload() = runTest {
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(200, """{"observationId":"observation-1","replayed":false}"""),
+        )
+        val candidate = ProductCandidate(
+            clientKey = "product-1",
+            productName = "Test Drink",
+            brand = "Test Brand",
+            subBrand = "Test Sub Brand",
+            manufacturer = "Test Foods",
+            variant = "Zero",
+            sourceAttachmentIds = listOf("product-photo-1"),
+            evidence = listOf(
+                ProductCandidateEvidence(
+                    sourceAttachmentIds = listOf("product-photo-1"),
+                    sourceType = "product_photo",
+                    sourceRef = "product-photo-1",
+                    field = "product_name",
+                    observedValue = "Test Drink",
+                ),
+            ),
+        )
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.PACKAGED_PRODUCT,
+            source = IngestionSource(
+                producer = "chatgpt",
+                sourceFiles = listOf(SourceAttachment("product-photo-1", SourceAttachmentType.PRODUCT_PHOTO)),
+            ),
+            merchantCandidate = MerchantCandidate(
+                name = "Test Mart",
+                branchName = "Main",
+                businessKind = BusinessKind.RETAIL,
+                sourceNamespace = "demo",
+                sourceLocationCode = "store-1",
+            ),
+            productCandidates = listOf(candidate),
+            priceObservations = listOf(
+                StandalonePriceObservation(
+                    clientKey = "price-1",
+                    kind = StandalonePriceObservationKind.RETAIL_PURCHASE,
+                    productClientKey = "product-1",
+                    observedOn = "2026-09-07",
+                    quantity = 2.0,
+                    unitPrice = 500,
+                    gross = 1_000,
+                    discount = 0,
+                    net = 1_000,
+                    evidence = listOf("product-photo-1"),
+                    confidence = 0.9,
+                ),
+            ),
+            review = IngestionReview(
+                status = IngestionReviewStatus.READY,
+                verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+            ),
+            schemaVersion = YEONSIK_OCR_V3_SCHEMA,
+        )
+
+        val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .submitStandalonePriceObservations("standalone-price-key", envelope)
+        val success = result as PriceTraceCanonicalOutcome.Success
+        assertEquals("observation-1", success.response["observations"]!!.jsonArray.single()
+            .jsonObject["observationId"]?.jsonPrimitive?.content)
+
+        val request = transport.requests.single()
+        assertEquals(
+            "https://pricetrace.example.com/rest/v1/rpc/ingest_verified_standalone_price_observation_v1",
+            request.url,
+        )
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        assertEquals(setOf("p_idempotency_key", "p_observation"), body.keys)
+        val sentIdempotencyKey = body["p_idempotency_key"]?.jsonPrimitive?.content
+        assertTrue(!sentIdempotencyKey.isNullOrBlank())
+        assertTrue(sentIdempotencyKey != "standalone-price-key")
+        val observation = body["p_observation"]!!.jsonObject
+        assertEquals("receipt-independent-price-observation.v3", observation["schema_version"]?.jsonPrimitive?.content)
+        assertEquals("price-observation.v3", observation["contract_version"]?.jsonPrimitive?.content)
+        assertEquals("retail_purchase", observation["kind"]?.jsonPrimitive?.content)
+        assertEquals("manual_canonical_review", observation["verification_basis"]?.jsonPrimitive?.content)
+        assertEquals("user_verified", observation["transcription_status"]?.jsonPrimitive?.content)
+        assertEquals("2", observation["quantity"]?.jsonPrimitive?.content)
+        assertEquals("1000", observation["net_price"]?.jsonPrimitive?.content)
+        assertEquals("Test Mart", observation["merchant"]!!.jsonObject["merchant_name"]?.jsonPrimitive?.content)
+        assertEquals("store-1", observation["merchant"]!!.jsonObject["source_code"]?.jsonPrimitive?.content)
+        assertEquals("product-1", observation["product"]!!.jsonObject["merchant_sku"]?.jsonPrimitive?.content)
+        assertFalse(observation.containsKey("cashos"))
+        assertFalse(observation.containsKey("user_verified"))
+    }
+
+    @Test
+    fun standaloneRestaurantObservationUsesItemAndRestaurantLocationContract() = runTest {
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(200, """{"observationId":"restaurant-observation-1","replayed":false}"""),
+        )
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.RESTAURANT,
+            source = IngestionSource("chatgpt", emptyList()),
+            merchantCandidate = MerchantCandidate(
+                name = "Test Noodle House",
+                branchName = "Main",
+                businessKind = BusinessKind.FOOD_SERVICE,
+                sourceNamespace = "demo",
+                sourceLocationCode = "restaurant-location-1",
+            ),
+            priceObservations = listOf(
+                StandalonePriceObservation(
+                    clientKey = "restaurant-price-1",
+                    kind = StandalonePriceObservationKind.RESTAURANT_PURCHASE,
+                    itemName = "Noodles",
+                    observedOn = "2026-09-07",
+                    quantity = 1.0,
+                    unitPrice = 11_000,
+                    gross = 11_000,
+                    discount = 0,
+                    net = 11_000,
+                    evidence = listOf("menu-photo-1"),
+                    confidence = 0.9,
+                ),
+            ),
+            review = IngestionReview(
+                status = IngestionReviewStatus.READY,
+                verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+            ),
+            schemaVersion = YEONSIK_OCR_V3_SCHEMA,
+        )
+
+        val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .submitStandalonePriceObservations("restaurant-price-key", envelope)
+        val success = result as PriceTraceCanonicalOutcome.Success
+        assertEquals("restaurant-observation-1", success.response["observations"]!!.jsonArray.single()
+            .jsonObject["observationId"]?.jsonPrimitive?.content)
+
+        val request = transport.requests.single()
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        val observation = body["p_observation"]!!.jsonObject
+        assertEquals("restaurant_purchase", observation["kind"]?.jsonPrimitive?.content)
+        assertEquals("restaurant-location-1", observation["merchant"]!!.jsonObject["source_location_code"]?.jsonPrimitive?.content)
+        assertFalse(observation["merchant"]!!.jsonObject.containsKey("source_code"))
+        assertEquals("Noodles", observation["item"]!!.jsonObject["item_name"]?.jsonPrimitive?.content)
+        assertFalse(observation.containsKey("product"))
+        assertFalse(observation.containsKey("cashos"))
+    }
+
+    @Test
     fun productCandidateSendsObservableFactsAndAcceptsServerIdentityOnly() = runTest {
         val candidate = ProductCandidate(
             clientKey = "product-1",
