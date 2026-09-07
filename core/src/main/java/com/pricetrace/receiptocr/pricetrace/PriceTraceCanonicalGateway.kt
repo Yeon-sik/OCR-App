@@ -38,7 +38,7 @@ sealed interface PriceTraceProductReadOutcome {
 }
 
 /** PriceTrace's verified receipt.v2 and merchant-only candidate RPC boundary. */
-internal class PriceTraceCanonicalGateway(
+class PriceTraceCanonicalGateway(
     private val store: PriceTraceSupabaseStore,
     private val transport: PriceObservationHttpTransport = HttpsPriceObservationHttpTransport(),
 ) {
@@ -378,7 +378,7 @@ internal class PriceTraceCanonicalGateway(
     }
 }
 
-internal class PriceTraceCanonicalProjectionSubmitter(
+class PriceTraceCanonicalProjectionSubmitter(
     private val gateway: PriceTraceCanonicalGateway,
 ) : IngestionProjectionSubmitter {
     override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {

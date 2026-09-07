@@ -86,8 +86,8 @@ Fitness 전송 계약, 설정 절차와 실패 경계는 [Fitness 영양성분 �
 ## 프로젝트 구조
 
 ```text
-app/                 Compose 앱, 워크플로 상태, Gemini/Fitness HTTPS adapter·Keystore, FileProvider 공유
-receipt-scanner/     재사용 Android Library
+core/                Android/Desktop 비종속 canonical JSON·ingestion·projection 공통 영역
+receipt-scanner/     기존 Android OCR/ML Kit/Room library
   capture/           스캔 경계와 ML Kit Android adapter
   ocr/               모든 워크플로가 공유하는 OCR interface와 순수 DTO
   workflow/          세션 워크플로 식별자
@@ -99,11 +99,15 @@ receipt-scanner/     재사용 Android Library
   correction/        vendor-neutral AI 제안 계약, prompt, 검증 정책
   export/            strict/canonical receipt.v2, manifest, private OCR debug
   publisher/         LocalOnly 구현과 향후 서버 경계
+app/                 기존 Android Compose UI 및 Android adapter
+desktop-app/         Yeonsik Ingestion Console (Kotlin/JVM + Compose Desktop)
 docs/                평가·기기 검증·개인정보·연결 설계
 examples/            합성 receipt.v2 예제
 ```
 
 ML Kit, Room entity, Android URI는 `receipt.v2` 도메인 모델이나 `ReceiptPublisher` 계약에 포함되지 않습니다. Android의 `Activity`/`IntentSender`는 문서 스캐너 adapter 진입부에만 남습니다.
+
+모듈 의존 방향은 `app -> core`, `app -> receipt-scanner`, `receipt-scanner -> core`, `desktop-app -> core`이며 `core`는 Android/Desktop/UI를 참조하지 않습니다.
 
 ## 빌드
 
@@ -125,6 +129,14 @@ ML Kit, Room entity, Android URI는 `receipt.v2` 도메인 모델이나 `Receipt
 ```text
 app/build/outputs/apk/debug/app-debug.apk
 ```
+
+Desktop 실행:
+
+```powershell
+.\gradlew.bat :desktop-app:run --no-daemon
+```
+
+Desktop credential은 저장소 밖 `.env` 또는 환경변수에서 런타임에 읽습니다. 기본 경로는 `%LOCALAPPDATA%\YeonsikIngestionConsole\.env`이며 `YEONSIK_INGESTION_ENV_FILE`로 바꿀 수 있습니다. 이름 목록은 [desktop-app/.env.example](desktop-app/.env.example)에 있습니다.
 
 ### 로컬 `.env` 빌드 연결
 

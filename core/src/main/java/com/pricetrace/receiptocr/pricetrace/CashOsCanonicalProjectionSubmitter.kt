@@ -22,7 +22,7 @@ import kotlinx.serialization.json.buildJsonObject
 import java.time.OffsetDateTime
 
 /** Maps a verified OCR receipt to CashOS's authenticated v3 RPC only. */
-internal class CashOsCanonicalProjectionSubmitter(
+class CashOsCanonicalProjectionSubmitter(
     private val gateway: CashOsReceiptGateway,
 ) : IngestionProjectionSubmitter {
     override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {

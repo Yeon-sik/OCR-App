@@ -21,7 +21,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.time.OffsetDateTime
 
 /** Routes only v2 item-level consumption to Fitness's canonical Meal RPC. */
-internal class FitnessMealProjectionSubmitter(
+class FitnessMealProjectionSubmitter(
     private val gateway: NutritionSupabaseGateway,
 ) : IngestionProjectionSubmitter {
     override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {

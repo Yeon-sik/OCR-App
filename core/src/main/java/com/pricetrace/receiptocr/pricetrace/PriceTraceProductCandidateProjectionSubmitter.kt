@@ -11,7 +11,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
 /** Routes fact-only product observations to PriceTrace; identity is accepted only from its response. */
-internal class PriceTraceProductCandidateProjectionSubmitter(
+class PriceTraceProductCandidateProjectionSubmitter(
     private val gateway: PriceTraceCanonicalGateway,
 ) : IngestionProjectionSubmitter {
     override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {

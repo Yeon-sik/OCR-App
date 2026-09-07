@@ -39,6 +39,7 @@ android {
 
 dependencies {
     coreLibraryDesugaring(libs.desugar.jdk.libs)
+    implementation(project(":core"))
     implementation(libs.androidx.core.ktx)
     api(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)

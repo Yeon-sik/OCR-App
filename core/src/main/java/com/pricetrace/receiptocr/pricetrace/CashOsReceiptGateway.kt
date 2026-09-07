@@ -33,7 +33,7 @@ sealed interface CashOsAuthOutcome {
 }
 
 /** CashOS is an independent authenticated target; it never shares PriceTrace credentials. */
-internal class CashOsReceiptGateway(
+class CashOsReceiptGateway(
     private val store: CashOsSupabaseStore,
     private val transport: PriceObservationHttpTransport = HttpsPriceObservationHttpTransport(),
 ) : CashOsReceiptSubmitter {

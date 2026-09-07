@@ -8,7 +8,7 @@ import java.time.LocalTime
 import java.time.OffsetDateTime
 import java.time.format.DateTimeFormatter
 
-internal const val GROUPED_INTEGER_PATTERN = """(?:\d{1,3}(?:\s*,\s*\d{3})+|\d+)"""
+const val GROUPED_INTEGER_PATTERN = """(?:\d{1,3}(?:\s*,\s*\d{3})+|\d+)"""
 
 object AmountParser {
     private val amountToken = Regex(
@@ -171,6 +171,6 @@ object ReceiptDateTimeParser {
     }.getOrNull()
 }
 
-internal fun multiplyExactMinor(quantity: String, unitPrice: Long): Long? = runCatching {
+fun multiplyExactMinor(quantity: String, unitPrice: Long): Long? = runCatching {
     BigDecimal(quantity).multiply(BigDecimal.valueOf(unitPrice)).longValueExact()
 }.getOrNull()

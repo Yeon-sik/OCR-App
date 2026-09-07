@@ -243,6 +243,7 @@ android {
 
 dependencies {
     coreLibraryDesugaring(libs.desugar.jdk.libs)
+    implementation(project(":core"))
     implementation(project(":receipt-scanner"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.fragment)
