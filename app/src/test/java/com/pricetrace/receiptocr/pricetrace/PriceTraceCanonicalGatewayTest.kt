@@ -665,7 +665,7 @@ class PriceTraceCanonicalGatewayTest {
         val sent = body["p_candidate"]!!.jsonObject
         assertEquals("Sub-brand fact", sent["sub_brand"]?.jsonPrimitive?.content)
         assertEquals(
-            listOf("product_name", "brand", "manufacturer", "variant", "specification"),
+            listOf("product_name", "brand", "manufacturer", "variant", "specification", "sub_brand"),
             sent["evidence"]!!.jsonArray.map { it.jsonObject["field"]!!.jsonPrimitive.content },
         )
         assertFalse(sent.toString().contains("brand_name"))

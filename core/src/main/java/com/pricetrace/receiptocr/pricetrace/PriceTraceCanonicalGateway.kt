@@ -527,9 +527,8 @@ class PriceTraceCanonicalGateway(
             "manufacturer_name" -> "manufacturer"
             "variant_name" -> "variant"
             "specification_text" -> "specification"
-            // PriceTrace's current order_history allowlist excludes sub_brand;
-            // the candidate-level sub_brand fact is already sent separately.
-            "barcodes", "sub_brand_name" -> null
+            "sub_brand_name" -> "sub_brand"
+            "barcodes" -> null
             else -> evidence.field
         }
     }
