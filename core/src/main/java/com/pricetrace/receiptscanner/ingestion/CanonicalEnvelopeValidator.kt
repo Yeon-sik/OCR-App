@@ -7,6 +7,10 @@ object CanonicalEnvelopeValidator {
             .exceptionOrNull()
             ?.let { listOf("canonical_domain_invalid: ${it.message ?: "invalid v3 envelope"}") }
             .orEmpty()
+        YEONSIK_OCR_V4_SCHEMA -> runCatching { YeonsikOcrV4Json.validate(envelope) }
+            .exceptionOrNull()
+            ?.let { listOf("canonical_domain_invalid: ${it.message ?: "invalid v4 envelope"}") }
+            .orEmpty()
         else -> emptyList()
     }
 }

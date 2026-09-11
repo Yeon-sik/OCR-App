@@ -6,6 +6,7 @@ import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlan
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionSession
 import com.pricetrace.receiptscanner.ingestion.IngestionStartResult
+import com.pricetrace.receiptscanner.ingestion.LocalEvidence
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec
@@ -19,6 +20,8 @@ data class AndroidCanonicalJsonValidatorState(
     val envelope: YeonsikOcrEnvelope? = null,
     val session: IngestionSession? = null,
     val plan: CanonicalProjectionPlan? = null,
+    /** Local evidence is supplied by the Android capture layer; JSON alone never creates it. */
+    val evidence: List<LocalEvidence> = emptyList(),
     val selectedProjections: Set<IngestionProjection> = emptySet(),
     val verificationBasis: VerificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
     val busy: Boolean = false,
@@ -60,6 +63,7 @@ class AndroidCanonicalJsonValidator(
                     envelope = result.envelope,
                     session = result.session,
                     plan = plan,
+                    evidence = previous.evidence,
                     selectedProjections = selected,
                     error = null,
                     notice = "JSON을 파싱하고 canonical 초안을 저장했습니다. 내용을 확인한 뒤 확정하세요.",
@@ -76,6 +80,7 @@ class AndroidCanonicalJsonValidator(
         val confirmation = useCase.confirm(
             ingestionId = ingestionId,
             envelope = envelope,
+            evidence = state.evidence,
             verificationBasis = state.verificationBasis,
         )
         val result = confirmation.result

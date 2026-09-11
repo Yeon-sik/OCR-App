@@ -1,0 +1,143 @@
+{
+  "schema_version": "yeonsik-ocr.v4",
+  "mode": "purchase",
+  "source": {
+    "producer": "chatgpt",
+    "source_files": [
+      {
+        "id": "order-history-1",
+        "type": "order_history",
+        "label": "주문내역 캡처"
+      },
+      {
+        "id": "payment-history-1",
+        "type": "payment_history",
+        "label": "결제내역 캡처"
+      }
+    ],
+    "user_text": null
+  },
+  "merchant_candidate": null,
+  "receipt": null,
+  "product_candidates": [
+    {
+      "client_key": "product-client-1",
+      "product_name": "생수",
+      "merchant_sku": null,
+      "brand_name": null,
+      "sub_brand_name": null,
+      "manufacturer_name": null,
+      "variant_name": null,
+      "specification_text": null,
+      "content_amount": null,
+      "content_unit": null,
+      "package_count": null,
+      "barcodes": [],
+      "source_attachment_ids": ["order-history-1"],
+      "evidence": [
+        {
+          "source_type": "order_history",
+          "source_ref": "order-line-1",
+          "field": "product_name",
+          "observed_value": "생수",
+          "content_hash": null
+        }
+      ],
+      "confidence": 0.98
+    }
+  ],
+  "price_observations": [],
+  "purchase_records": [
+    {
+      "client_key": "purchase-1",
+      "platform": "쿠팡",
+      "platform_code": "coupang",
+      "seller": "공식 판매자",
+      "seller_branch_name": null,
+      "seller_source_namespace": null,
+      "seller_source_code": null,
+      "seller_business_kind": "retail",
+      "source_version": "chatgpt-purchase-v4-example",
+      "order_reference": "order-example-1",
+      "purchase_kind": "retail",
+      "ordered_on": "2026-09-11",
+      "ordered_at": null,
+      "paid_on": "2026-09-11",
+      "paid_at": null,
+      "status": "paid",
+      "currency": "KRW",
+      "totals": {
+        "subtotal_amount_krw": 1100,
+        "discount_amount_krw": 0,
+        "shipping_amount_krw": 0,
+        "tax_amount_krw": 0,
+        "grand_total_amount_krw": 1100,
+        "paid_amount_krw": 1100
+      },
+      "payment": {
+        "method": "card",
+        "provider": null,
+        "status": "paid"
+      },
+      "line_items": [
+        {
+          "line_key": null,
+          "product_client_key": "product-client-1",
+          "description": "생수",
+          "seller_override": null,
+          "option_text": null,
+          "price_status": "itemized",
+          "merchant_sku": null,
+          "quantity": 2,
+          "unit_price_amount_krw": 550,
+          "gross_amount_krw": 1100,
+          "discount_amount_krw": 0,
+          "net_amount_krw": 1100
+        }
+      ],
+      "evidence": [
+        {
+          "source_type": "order_history",
+          "source_attachment_ids": ["order-history-1"],
+          "source_ref": "order-header",
+          "field": "platform",
+          "observed_value": "쿠팡"
+        },
+        {
+          "source_type": "order_history",
+          "source_attachment_ids": ["order-history-1"],
+          "source_ref": "order-total",
+          "field": "grand_total_amount_krw",
+          "observed_value": "1100"
+        },
+        {
+          "source_type": "payment_history",
+          "source_attachment_ids": ["payment-history-1"],
+          "source_ref": "payment-status",
+          "field": "payment.status",
+          "observed_value": "paid"
+        }
+      ],
+      "confidence": 0.98
+    }
+  ],
+  "nutrition": [],
+  "consumption": [],
+  "classification_hints": {
+    "cashos": {
+      "category_hint": "shopping",
+      "institution_hint": null,
+      "payment_method_hint": "card"
+    }
+  },
+  "links": [],
+  "projection_targets": [
+    "pricetrace_price_observation",
+    "cashos_transaction"
+  ],
+  "review": {
+    "status": "needs_review",
+    "blocking_issues": [],
+    "warnings": []
+  }
+}

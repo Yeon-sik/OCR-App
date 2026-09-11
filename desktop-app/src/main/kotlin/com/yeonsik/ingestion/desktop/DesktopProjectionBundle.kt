@@ -59,6 +59,7 @@ class DesktopProjectionBundle(
             productRevisionReader = productRevisionReader,
         ),
         IngestionProjection.CASHOS_RECEIPT to CashOsCanonicalProjectionSubmitter(cashOsReceiptGateway),
+        IngestionProjection.CASHOS_TRANSACTION to CashOsCanonicalProjectionSubmitter(cashOsReceiptGateway),
     )
 
     suspend fun ensureAuthenticated(
@@ -72,7 +73,9 @@ class DesktopProjectionBundle(
         }
         if (activeProjections.any(::usesPriceTrace) || priceTraceIdentityNeeded) ensurePriceTrace()?.let(::add)
         if (activeProjections.any(::usesNutrition)) ensureNutrition()?.let(::add)
-        if (activeProjections.contains(IngestionProjection.CASHOS_RECEIPT)) ensureCashOs()?.let(::add)
+        if (activeProjections.any { it == IngestionProjection.CASHOS_RECEIPT || it == IngestionProjection.CASHOS_TRANSACTION }) {
+            ensureCashOs()?.let(::add)
+        }
     }
 
     private suspend fun ensurePriceTrace(): String? {

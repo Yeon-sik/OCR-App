@@ -9,6 +9,7 @@ import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner
 import com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec
+import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -178,6 +179,65 @@ class DesktopIngestionRegressionTest {
         assertEquals(confirmed.session?.canonicalFingerprint, confirmed.session?.verifiedCanonicalFingerprint)
         assertTrue(confirmed.artifacts.isNotEmpty())
         assertTrue(confirmed.artifacts.all { it.evidenceReady })
+    }
+
+    @Test
+    fun `desktop v4 attaches history evidence by logical source id and verifies both purchase projections`() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-console-v4-photo"))
+        val bundle = DesktopProjectionBundle(DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")))
+        val controller = DesktopIngestionController(store = store, bundle = bundle)
+
+        controller.importJson(readExample("yeonsik-ocr.v4.purchase.example.json"))
+        val imported = controller.state.value
+        assertEquals("yeonsik-ocr.v4", imported.schema)
+        assertTrue(imported.session!!.projections.any {
+            it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION
+        })
+        assertTrue(imported.session!!.projections.any {
+            it.projection == IngestionProjection.CASHOS_TRANSACTION
+        })
+        assertTrue(imported.session!!.projections.any {
+            it.projection == IngestionProjection.FITNESS_NUTRITION &&
+                it.status == com.pricetrace.receiptscanner.ingestion.ProjectionStatus.DISABLED
+        })
+
+        val orderImage = store.directory.resolve("order-history.jpg").also { Files.writeString(it, "order") }
+        val paymentImage = store.directory.resolve("payment-history.jpg").also { Files.writeString(it, "payment") }
+        controller.attachEvidence(listOf(orderImage), SourceAttachmentType.ORDER_HISTORY)
+        controller.attachEvidence(listOf(paymentImage), SourceAttachmentType.PAYMENT_HISTORY)
+        assertEquals(
+            setOf("order-history-1", "payment-history-1"),
+            controller.state.value.evidence.map { it.attachmentId }.toSet(),
+        )
+
+        controller.verify(VerificationBasis.SOURCE_EVIDENCE)
+        val verified = controller.state.value
+        assertEquals(IngestionReviewStatus.READY, verified.session?.reviewStatus)
+        assertEquals(verified.session?.canonicalFingerprint, verified.session?.verifiedCanonicalFingerprint)
+        assertTrue(verified.artifacts.isNotEmpty())
+        assertTrue(verified.artifacts.all { it.evidenceReady })
+        assertTrue(bundle.submitters.containsKey(IngestionProjection.CASHOS_TRANSACTION))
+    }
+
+    @Test
+    fun `desktop v4 text-only payment record remains CashOS-only`() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-console-v4-text"))
+        val controller = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env"))),
+        )
+
+        controller.importJson(readExample("yeonsik-ocr.v4.purchase.text-only.example.json"))
+        val imported = controller.state.value
+        assertEquals(
+            setOf(IngestionProjection.CASHOS_TRANSACTION),
+            imported.session!!.projections.filter { it.status != com.pricetrace.receiptscanner.ingestion.ProjectionStatus.DISABLED }
+                .map { it.projection }.toSet(),
+        )
+        controller.verify(VerificationBasis.SOURCE_EVIDENCE)
+        val verified = controller.state.value
+        assertEquals(IngestionReviewStatus.READY, verified.session?.reviewStatus)
+        assertEquals(verified.session?.canonicalFingerprint, verified.session?.verifiedCanonicalFingerprint)
     }
 
     private fun readExample(name: String): String {

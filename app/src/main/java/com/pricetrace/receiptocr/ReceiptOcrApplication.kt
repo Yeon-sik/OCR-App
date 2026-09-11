@@ -107,6 +107,7 @@ class AppContainer(application: Application) {
             productRevisionReader = productRevisionReader,
         ),
         IngestionProjection.CASHOS_RECEIPT to CashOsCanonicalProjectionSubmitter(cashOsReceiptGateway),
+        IngestionProjection.CASHOS_TRANSACTION to CashOsCanonicalProjectionSubmitter(cashOsReceiptGateway),
     )
     internal val ingestionOrchestrator = IngestionOrchestrator(
         store = ingestionSessionStore,

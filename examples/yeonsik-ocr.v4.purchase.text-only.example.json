@@ -1,0 +1,76 @@
+{
+  "schema_version": "yeonsik-ocr.v4",
+  "mode": "purchase",
+  "source": {
+    "producer": "chatgpt",
+    "source_files": [],
+    "user_text": "쿠팡 결제내역에서 2026-09-11에 1100원을 결제한 사실을 확인했습니다."
+  },
+  "merchant_candidate": null,
+  "receipt": null,
+  "product_candidates": [],
+  "price_observations": [],
+  "purchase_records": [
+    {
+      "client_key": "payment-only-1",
+      "platform": "쿠팡",
+      "platform_code": "coupang",
+      "seller": null,
+      "seller_branch_name": null,
+      "seller_source_namespace": null,
+      "seller_source_code": null,
+      "seller_business_kind": null,
+      "source_version": null,
+      "order_reference": null,
+      "purchase_kind": "unknown",
+      "ordered_on": null,
+      "ordered_at": null,
+      "paid_on": "2026-09-11",
+      "paid_at": null,
+      "status": "paid",
+      "currency": "KRW",
+      "totals": {
+        "subtotal_amount_krw": null,
+        "discount_amount_krw": null,
+        "shipping_amount_krw": null,
+        "tax_amount_krw": null,
+        "grand_total_amount_krw": 1100,
+        "paid_amount_krw": 1100
+      },
+      "payment": {
+        "method": "card",
+        "provider": null,
+        "status": "paid"
+      },
+      "line_items": [],
+      "evidence": [
+        {
+          "source_type": "user_statement",
+          "source_attachment_ids": [],
+          "source_ref": "user-text-payment-only-1",
+          "field": "total_price",
+          "observed_value": "1100"
+        }
+      ],
+      "confidence": 0.9
+    }
+  ],
+  "nutrition": [],
+  "consumption": [],
+  "classification_hints": {
+    "cashos": {
+      "category_hint": "shopping",
+      "institution_hint": null,
+      "payment_method_hint": "card"
+    }
+  },
+  "links": [],
+  "projection_targets": [
+    "cashos_transaction"
+  ],
+  "review": {
+    "status": "needs_review",
+    "blocking_issues": [],
+    "warnings": []
+  }
+}

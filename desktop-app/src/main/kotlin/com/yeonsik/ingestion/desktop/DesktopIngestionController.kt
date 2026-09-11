@@ -18,6 +18,10 @@ import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.OffsetDateTime
@@ -103,7 +107,33 @@ class DesktopIngestionController(
         try {
             val current = _state.value
             val session = current.session ?: error("Import JSON before attaching evidence.")
-            val added = paths.map { path -> store.copyEvidence(session.ingestionId, path, type, pageId) }
+            val envelope = currentEnvelope()
+            val isV4Purchase = envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA
+            val v4SourceIds = if (isV4Purchase) {
+                envelope.source.sourceFiles.filter { it.type == type }.map { it.id }
+            } else {
+                emptyList()
+            }
+            val usedIds = current.evidence.map { it.attachmentId }.toMutableSet()
+            if (isV4Purchase) {
+                require(v4SourceIds.isNotEmpty()) {
+                    "No V4 source file is declared for evidence type ${type.wireValue}."
+                }
+                require(paths.size <= v4SourceIds.count { it !in usedIds }) {
+                    "Too many evidence files for V4 source type ${type.wireValue}."
+                }
+            }
+            val added = paths.map { path ->
+                val logicalId = if (isV4Purchase) {
+                    v4SourceIds.firstOrNull { it !in usedIds }
+                        ?: error("No unused V4 source file is available for evidence type ${type.wireValue}.")
+                } else {
+                    null
+                }
+                val copied = store.copyEvidence(session.ingestionId, path, type, pageId, logicalId)
+                usedIds += copied.attachmentId
+                copied
+            }
             val evidence = current.evidence + added
             val localEvidence = evidence.map(::toLocalEvidence)
             val savedSession = session.copy(
@@ -390,6 +420,9 @@ class DesktopIngestionController(
         envelope.productCandidates.forEach {
             addArtifact(IngestionArtifactKeys.productCandidate(it.clientKey), "Product: ${it.clientKey}")
         }
+        envelope.purchaseRecords.forEach {
+            addArtifact(IngestionArtifactKeys.purchaseRecord(it.clientKey), "Purchase: ${it.platform}")
+        }
     }
 
     private fun localEvidence(evidence: List<DesktopEvidenceAttachment>): List<LocalEvidence> = evidence.map(::toLocalEvidence)
@@ -403,7 +436,21 @@ class DesktopIngestionController(
 
     private fun projectionSummary(projections: List<ProjectionState>): String = projections
         .filterNot { it.status == ProjectionStatus.DISABLED }
-        .joinToString(", ") { "${it.projection.wireValue}=${it.status.wireValue}" }
+        .joinToString(", ") { state ->
+            val base = "${state.projection.wireValue}=${state.status.wireValue}"
+            if (state.projection != IngestionProjection.PRICETRACE_PRICE_OBSERVATION) {
+                base
+            } else {
+                val metadata = state.metadataJson?.let {
+                    runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull()
+                }
+                val sourceSaved = (metadata?.get("sourceSaved") as? JsonPrimitive)
+                    ?.contentOrNull ?: "unknown"
+                val observationCreated = (metadata?.get("observationCreated") as? JsonPrimitive)
+                    ?.contentOrNull ?: "unknown"
+                "$base(source_saved=$sourceSaved,observation_created=$observationCreated)"
+            }
+        }
 
     private fun failWithSession(message: String) {
         _state.value = _state.value.copy(error = message, notice = null)

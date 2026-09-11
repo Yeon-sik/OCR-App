@@ -22,10 +22,16 @@ object CanonicalProjectionPlanner {
             ) {
                 add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
             }
+            if (envelope.purchaseRecords.any(PurchaseRecord::priceTraceSourceEligible)) {
+                add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+            }
+            if (envelope.purchaseRecords.any(PurchaseRecord::cashOsTransactionEligible)) {
+                add(IngestionProjection.CASHOS_TRANSACTION)
+            }
             if (envelope.productCandidates.isNotEmpty()) {
                 add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
             }
-            if (envelope.nutrition.isNotEmpty()) {
+            if (envelope.purchaseRecords.isEmpty() && envelope.nutrition.isNotEmpty()) {
                 add(IngestionProjection.FITNESS_NUTRITION)
             }
             val mealValuesComplete = envelope.consumption.all(IngestionConsumption::isCompleteForFitnessMeal)
@@ -39,10 +45,15 @@ object CanonicalProjectionPlanner {
                 YEONSIK_OCR_V3_SCHEMA -> mealValuesComplete
                 else -> mealValuesComplete
             }
-            if (envelope.nutrition.isNotEmpty() && envelope.consumption.isNotEmpty() && mealEligible) {
+            if (envelope.purchaseRecords.isEmpty() &&
+                envelope.nutrition.isNotEmpty() &&
+                envelope.consumption.isNotEmpty() &&
+                mealEligible
+            ) {
                 add(IngestionProjection.FITNESS_MEAL)
             }
-            if (envelope.productCandidates.isNotEmpty() &&
+            if (envelope.purchaseRecords.isEmpty() &&
+                envelope.productCandidates.isNotEmpty() &&
                 envelope.nutrition.any { it is IngestionNutrition.ProductLabel }
             ) {
                 add(IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK)
@@ -77,6 +88,17 @@ object CanonicalProjectionPlanner {
                     it == IngestionProjection.FITNESS_MEAL
             }) {
             add(IngestionProjection.PRICETRACE_RECEIPT)
+        }
+        if (requested.contains(IngestionProjection.PRICETRACE_PRICE_OBSERVATION) &&
+            envelope.purchaseRecords.any { record ->
+                record.priceTraceSourceEligible &&
+                    record.purchaseKind == PurchaseKind.RETAIL &&
+                    record.lineItems.any { line ->
+                        line.productClientKey in envelope.productCandidates.map(ProductCandidate::clientKey).toSet()
+                    }
+            }
+        ) {
+            add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
         }
         if (requested.contains(IngestionProjection.PRICETRACE_PRICE_OBSERVATION) &&
             envelope.priceObservations.isNotEmpty() &&
@@ -115,6 +137,16 @@ object CanonicalProjectionPlanner {
                 if (envelope.priceObservations.any {
                         it.kind == StandalonePriceObservationKind.RETAIL_PURCHASE
                     }) {
+                    add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
+                }
+                if (envelope.purchaseRecords.any { record ->
+                        record.priceTraceSourceEligible &&
+                            record.purchaseKind == PurchaseKind.RETAIL &&
+                            record.lineItems.any { line ->
+                                line.productClientKey in envelope.productCandidates.map(ProductCandidate::clientKey).toSet()
+                            }
+                    }
+                ) {
                     add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
                 }
             }

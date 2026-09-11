@@ -4,10 +4,14 @@ import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.domain.StableIds
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
+import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Contract
+import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Json
+import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Payload
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 import com.pricetrace.receiptscanner.ingestion.ProductCandidate
 import com.pricetrace.receiptscanner.ingestion.ProductCandidateBarcode
+import com.pricetrace.receiptscanner.ingestion.ProductCandidateEvidence
 import com.pricetrace.receiptscanner.ingestion.StandalonePriceObservation
 import com.pricetrace.receiptscanner.ingestion.StandalonePriceObservationKind
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
@@ -27,6 +31,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.IOException
 import java.net.SocketTimeoutException
 
@@ -90,6 +95,24 @@ class PriceTraceCanonicalGateway(
         }
         val refreshed = refresh(initial) ?: return first
         return submitStandaloneOnce(idempotencyKey, envelope, refreshed)
+    }
+
+    /** Publishes one or more purchase records through PriceTrace's confirmed V4 RPC. */
+    suspend fun submitPurchasePriceObservationsV4(
+        idempotencyKey: String,
+        envelope: YeonsikOcrEnvelope,
+        contract: PriceTracePurchaseObservationV4Contract = PriceTracePurchaseObservationV4Contract(),
+    ): PriceTraceCanonicalOutcome {
+        val initial = store.read()
+        if (!initial.isSignedIn) return PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
+        val first = submitPurchaseV4Once(idempotencyKey, envelope, initial, contract)
+        if (first !is PriceTraceCanonicalOutcome.Failure ||
+            first.kind != PriceObservationFailureKind.AUTHENTICATION
+        ) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return submitPurchaseV4Once(idempotencyKey, envelope, refreshed, contract)
     }
 
     /** Reads the exact PriceTrace product revision required by the cross-service link contract. */
@@ -304,6 +327,65 @@ class PriceTraceCanonicalGateway(
         PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.CONTRACT, error.message)
     }
 
+    private suspend fun submitPurchaseV4Once(
+        idempotencyKey: String,
+        envelope: YeonsikOcrEnvelope,
+        config: PriceTraceSupabaseConfig,
+        contract: PriceTracePurchaseObservationV4Contract,
+    ): PriceTraceCanonicalOutcome = try {
+        val records = envelope.purchaseRecords.filter { it.priceTraceSourceEligible }
+        require(records.isNotEmpty()) { "purchase_price_observation_missing" }
+        val responses = records.map { record ->
+            val recordKey = StableIds.sha256("$idempotencyKey|purchase_record=${record.clientKey}")
+            val payload = PriceTracePurchaseObservationV4Payload(
+                contract = contract,
+                purchaseRecord = record,
+                verificationBasis = envelope.review.verificationBasis,
+            )
+            val response = transport.execute(
+                request(
+                    config = config,
+                    method = "POST",
+                    path = contract.rpcPath,
+                    body = buildJsonObject {
+                        put("p_idempotency_key", JsonPrimitive(recordKey))
+                        put("p_purchase", payload.toJson())
+                    }.encode(),
+                ),
+            )
+            if (response.statusCode !in 200..299) {
+                return PriceTraceCanonicalOutcome.Failure(
+                    classify(response),
+                    response.body.takeIf(String::isNotBlank),
+                )
+            }
+            PriceTracePurchaseObservationV4Json.decodeResponse(response.body)
+        }
+        PriceTraceCanonicalOutcome.Success(buildJsonObject {
+            put("schemaVersion", JsonPrimitive("purchase-price-observation.v4"))
+            put("contractVersion", JsonPrimitive("purchase-price.v4"))
+            put("sourceSaved", JsonPrimitive(true))
+            put("observationCreated", JsonPrimitive(responses.any { it.observationCreated }))
+            put(
+                "observationCount",
+                JsonPrimitive(responses.sumOf { it.observationIds.size }),
+            )
+            put("purchaseSourceIds", JsonArray(responses.map {
+                JsonPrimitive(it.purchaseSourceId)
+            }))
+            put("observationIds", JsonArray(responses.flatMap { it.observationIds }.map(::JsonPrimitive)))
+            put("sources", JsonArray(responses.map { it.raw }))
+        })
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: SocketTimeoutException) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NETWORK_TIMEOUT)
+    } catch (_: IOException) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NETWORK)
+    } catch (error: Exception) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.CONTRACT, error.message)
+    }
+
     private fun standaloneObservationJson(
         observation: StandalonePriceObservation,
         envelope: YeonsikOcrEnvelope,
@@ -406,17 +488,22 @@ class PriceTraceCanonicalGateway(
         put("package_count", candidate.packageCount?.let(::JsonPrimitive) ?: JsonNull)
         put("variant", candidate.variant?.let(::JsonPrimitive) ?: JsonNull)
         put("identifiers", JsonArray(candidateIdentifiers(candidate)))
-        put("evidence", JsonArray(candidate.evidence.map { evidence ->
-            val sourceRef = evidence.sourceRef?.takeIf(String::isNotBlank)
-                ?: evidence.source?.takeIf(String::isNotBlank)
-                ?: evidence.sourceAttachmentIds.firstOrNull()
-                ?: error("product candidate evidence source_ref is required")
-            buildJsonObject {
-                put("source_type", JsonPrimitive(evidence.sourceType))
-                put("source_ref", JsonPrimitive(sourceRef))
-                put("field", JsonPrimitive(evidence.field))
-                put("observed_value", evidence.observedValue?.let(::JsonPrimitive) ?: JsonNull)
-                put("content_hash", evidence.contentHash?.let(::JsonPrimitive) ?: JsonNull)
+        put("evidence", JsonArray(candidate.evidence.mapNotNull { evidence ->
+            val field = priceTraceProductCandidateEvidenceField(evidence)
+            if (field == null) {
+                null
+            } else {
+                val sourceRef = evidence.sourceRef?.takeIf(String::isNotBlank)
+                    ?: evidence.source?.takeIf(String::isNotBlank)
+                    ?: evidence.sourceAttachmentIds.firstOrNull()
+                    ?: error("product candidate evidence source_ref is required")
+                buildJsonObject {
+                    put("source_type", JsonPrimitive(evidence.sourceType))
+                    put("source_ref", JsonPrimitive(sourceRef))
+                    put("field", JsonPrimitive(field))
+                    put("observed_value", evidence.observedValue?.let(::JsonPrimitive) ?: JsonNull)
+                    put("content_hash", evidence.contentHash?.let(::JsonPrimitive) ?: JsonNull)
+                }
             }
         }))
         put("provenance", buildJsonObject {
@@ -427,6 +514,23 @@ class PriceTraceCanonicalGateway(
             candidate.sourceVersion?.let { put("extractor_version", JsonPrimitive(it)) }
             candidate.sourceVersion?.let { put("source_revision", JsonPrimitive(it)) }
         })
+    }
+
+    /** Normalize only the V4 order-history aliases at the PriceTrace boundary. */
+    private fun priceTraceProductCandidateEvidenceField(
+        evidence: ProductCandidateEvidence,
+    ): String? = if (evidence.sourceType != "order_history") {
+        evidence.field
+    } else {
+        when (evidence.field) {
+            "brand_name" -> "brand"
+            "manufacturer_name" -> "manufacturer"
+            "variant_name" -> "variant"
+            "specification_text" -> "specification"
+            "sub_brand_name" -> "sub_brand"
+            "barcodes" -> null
+            else -> evidence.field
+        }
     }
 
     private fun candidateIdentifiers(candidate: ProductCandidate): List<JsonObject> {
@@ -549,6 +653,41 @@ class PriceTraceCanonicalProjectionSubmitter(
             IngestionProjection.PRICETRACE_RECEIPT,
             IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> {
                 if (request.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
+                    envelope.purchaseRecords.isNotEmpty()
+                ) {
+                    if (envelope.review.status != com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus.READY) {
+                        return ProjectionSubmission.Failure("canonical_review_required", retryable = false)
+                    }
+                    return when (val result = gateway.submitPurchasePriceObservationsV4(
+                        request.idempotencyKey,
+                        envelope,
+                    )) {
+                        is PriceTraceCanonicalOutcome.Success -> {
+                            val remoteId = (result.response["sources"] as? JsonArray)
+                                ?.firstOrNull()
+                                ?.let { it as? JsonObject }
+                                ?.purchaseSourceId()
+                                ?: return ProjectionSubmission.Failure(
+                                    "pricetrace_purchase_source_identity_invalid",
+                                    retryable = false,
+                                )
+                            ProjectionSubmission.Success(
+                                remoteId = remoteId,
+                                metadataJson = result.response.encode(),
+                                primaryUploaded = result.response["observationCreated"]
+                                    ?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() == true,
+                                primaryPendingReason = result.response["observationCreated"]
+                                    ?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull()
+                                    ?.let { created -> if (created) null else "price_observation_not_created" },
+                            )
+                        }
+                        is PriceTraceCanonicalOutcome.Failure -> ProjectionSubmission.Failure(
+                            message = result.message ?: result.kind.name,
+                            retryable = result.kind.retryable,
+                        )
+                    }
+                }
+                if (request.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
                     envelope.priceObservations.isNotEmpty()
                 ) {
                     if (envelope.priceObservations.any { it.netAmountMinor == null }) {
@@ -641,6 +780,9 @@ class PriceTraceCanonicalProjectionSubmitter(
     ).firstNotNullOfOrNull { key ->
         (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
     }
+
+    private fun JsonObject.purchaseSourceId(): String? =
+        (this["purchaseSourceId"] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
 
     private fun JsonObject.hasCompleteObservations(receipt: ReceiptV2): Boolean {
         val observationIds = (this["observationIds"] as? JsonArray)

@@ -636,6 +636,7 @@ object YeonsikOcrV2Json {
                     (nutrition.isNotEmpty() || productCandidates.isNotEmpty()) &&
                     nutrition.all { it is IngestionNutrition.ProductLabel } && links.isEmpty(),
             )
+            IngestionMode.PURCHASE -> error("purchase mode requires yeonsik-ocr.v4")
         }
     }
 
