@@ -76,7 +76,7 @@ data class MerchantCandidate(
 
 /** A fact-only product observation. PriceTrace identity is resolved after this leaves OCR-App. */
 data class ProductCandidateEvidence(
-    val sourceAttachmentIds: List<String>,
+    val sourceAttachmentIds: List<String> = emptyList(),
     val source: String? = null,
     val sourceType: String = "product_photo",
     val sourceRef: String? = null,
@@ -158,12 +158,16 @@ data class ProductCandidate(
         require(barcodes.distinct().size == barcodes.size) { "product candidate barcodes must be unique" }
         require(evidence.isNotEmpty()) { "product candidate evidence is required" }
         evidence.forEach { item ->
-            require(item.sourceAttachmentIds.isNotEmpty()) { "product candidate evidence requires a source" }
             require(item.sourceAttachmentIds.all(String::isNotBlank)) {
                 "product candidate evidence source IDs must be non-empty"
             }
             require(item.sourceType in PRODUCT_EVIDENCE_SOURCE_TYPES && item.field.isNotBlank()) {
                 "product candidate evidence source type and field are required"
+            }
+            if (item.sourceType in ATTACHMENT_BACKED_SOURCE_TYPES) {
+                require(item.sourceAttachmentIds.isNotEmpty()) {
+                    "attachment-backed product candidate evidence requires source attachment IDs"
+                }
             }
             require(item.source == null || item.source.isNotBlank()) {
                 "product candidate evidence source must be non-empty"
@@ -207,6 +211,12 @@ data class ProductCandidate(
             "official_listing",
             "manufacturer",
             "user_statement",
+            "ocr",
+        )
+        val ATTACHMENT_BACKED_SOURCE_TYPES = setOf(
+            "product_photo",
+            "package_label",
+            "receipt",
             "ocr",
         )
     }

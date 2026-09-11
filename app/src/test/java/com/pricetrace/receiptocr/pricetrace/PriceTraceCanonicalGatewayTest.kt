@@ -389,6 +389,57 @@ class PriceTraceCanonicalGatewayTest {
     }
 
     @Test
+    fun textOnlyProductCandidateAndStandalonePricePreserveUserStatementEvidence() = runTest {
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(
+                200,
+                """{"schemaVersion":"product-candidate.v1","contract":"PRICETRACE_PRODUCT_CANDIDATE","outcome":"pending_review","catalogProductId":null}""",
+            ),
+            PriceObservationHttpResponse(
+                200,
+                """{"observationId":"text-only-observation-1","replayed":false}""",
+            ),
+        )
+        val envelope = textOnlyEnvelope()
+
+        val productResult = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .submitProductCandidates("text-only-product-key", envelope.productCandidates)
+        assertTrue(productResult is PriceTraceCanonicalOutcome.Success)
+
+        val candidateRequest = transport.requests[0]
+        assertEquals(
+            "https://pricetrace.example.com/rest/v1/rpc/submit_product_candidate_v1",
+            candidateRequest.url,
+        )
+        val candidateBody = Json.parseToJsonElement(requireNotNull(candidateRequest.body)).jsonObject
+        val sentCandidate = candidateBody["p_candidate"]!!.jsonObject
+        assertFalse(sentCandidate.containsKey("merchant_sku"))
+        val sentEvidence = sentCandidate["evidence"]!!.jsonArray
+        assertEquals(2, sentEvidence.size)
+        assertTrue(sentEvidence.all {
+            it.jsonObject["source_type"]?.jsonPrimitive?.content == "user_statement"
+        })
+        assertTrue(sentEvidence.all {
+            it.jsonObject["source_ref"]?.jsonPrimitive?.content == "user-statement:purchase-20260910-1"
+        })
+        assertTrue(sentEvidence.all { it.jsonObject["content_hash"] == JsonNull })
+        assertFalse(requireNotNull(candidateRequest.body).contains("product-photo"))
+
+        val priceResult = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .submitStandalonePriceObservations("text-only-price-key", envelope)
+        assertTrue(priceResult is PriceTraceCanonicalOutcome.Success)
+
+        val priceBody = Json.parseToJsonElement(requireNotNull(transport.requests[1].body)).jsonObject
+        val observation = priceBody["p_observation"]!!.jsonObject
+        assertEquals("manual_canonical_review", observation["verification_basis"]?.jsonPrimitive?.content)
+        val product = observation["product"]!!.jsonObject
+        assertEquals("product-brandx-chicken-20260910", product["product_client_key"]?.jsonPrimitive?.content)
+        assertEquals(JsonNull, product["merchant_sku"])
+        assertEquals("브랜드X 닭가슴살", product["product_name"]?.jsonPrimitive?.content)
+        assertEquals("2900", observation["net_price"]?.jsonPrimitive?.content)
+    }
+
+    @Test
     fun exactProductReadUsesCatalogScopedRpcAndRefreshesExpiredSession() = runTest {
         val revision = "sha256:" + "d".repeat(64)
         val transport = QueueTransport(
@@ -570,6 +621,19 @@ class PriceTraceCanonicalGatewayTest {
         accessToken = "access-token",
         refreshToken = "refresh-token",
     )
+
+    private fun textOnlyEnvelope(): YeonsikOcrEnvelope {
+        val file = sequenceOf(
+            java.io.File("examples", "yeonsik-ocr.v3.text-only-retail.example.json"),
+            java.io.File("../examples", "yeonsik-ocr.v3.text-only-retail.example.json"),
+        ).firstOrNull(java.io.File::isFile) ?: error("text-only retail example not found")
+        return YeonsikOcrV3Json.decode(file.readText(), "gateway-text-only").copy(
+            review = IngestionReview(
+                status = IngestionReviewStatus.READY,
+                verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+            ),
+        )
+    }
 
     private fun productReadJson() =
         """{"schemaVersion":"product-read.v1","namespace":"pricetrace","revision":"revision-1","products":[{"standardProduct":{"id":"$STANDARD_PRODUCT_ID","name":"Coffee","brand":null,"updatedAt":"2026-08-01T00:00:00Z"},"catalogProduct":{"id":"$CATALOG_PRODUCT_ID","name":"Coffee 500g","specificationText":"500g","contentAmount":500,"contentUnit":"g","packageCount":1,"referenceUnit":"g","listingReferenceUrl":null,"updatedAt":"2026-08-01T00:00:00Z"},"sellerProducts":[],"observations":[] }]}"""

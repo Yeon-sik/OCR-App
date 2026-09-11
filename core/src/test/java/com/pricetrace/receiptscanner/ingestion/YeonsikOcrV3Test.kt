@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -29,6 +30,11 @@ class YeonsikOcrV3Test {
 
         assertEquals(YEONSIK_OCR_V3_SCHEMA, envelope.schemaVersion)
         assertEquals("Brand Sub", envelope.productCandidates.single().subBrandName)
+        assertEquals("product_photo", envelope.productCandidates.single().evidence.first().sourceType)
+        assertEquals(
+            listOf("product-photo-1"),
+            envelope.productCandidates.single().effectiveSourceAttachmentIds,
+        )
         assertEquals(
             setOf(
                 "schema_version", "mode", "source", "merchant_candidate", "receipt",
@@ -47,6 +53,101 @@ class YeonsikOcrV3Test {
         assertEquals(null, roundTripped.productCandidates.single().merchantSku)
         val encodedReview = parse(YeonsikOcrV3Json.encode(envelope))["review"]!!.jsonObject
         assertEquals(setOf("status", "blocking_issues", "warnings"), encodedReview.keys)
+    }
+
+    @Test
+    fun `v3 strict decode accepts text-only retail evidence without attachments`() {
+        val envelope = YeonsikOcrV3Json.decode(textOnlyRetailJson(), "v3-text-only")
+        val candidate = envelope.productCandidates.single()
+        val evidence = candidate.evidence
+
+        assertTrue(envelope.source.sourceFiles.isEmpty())
+        assertTrue(candidate.sourceAttachmentIds.isEmpty())
+        assertEquals("user_statement", evidence.first().sourceType)
+        assertEquals("user-statement:purchase-20260910-1", evidence.first().sourceRef)
+        assertTrue(evidence.all { it.sourceAttachmentIds.isEmpty() })
+        assertEquals(2900L, envelope.priceObservations.single().net)
+
+        val candidateWire = parse(YeonsikOcrV3Json.encode(envelope))
+            .getValue("product_candidates").jsonArray.single().jsonObject
+        assertTrue(candidateWire.getValue("source_attachment_ids").jsonArray.isEmpty())
+        val evidenceWire = candidateWire.getValue("evidence").jsonArray
+        assertEquals(2, evidenceWire.size)
+        assertTrue(evidenceWire.all { it.jsonObject.getValue("source_type").jsonPrimitive.content == "user_statement" })
+        assertTrue(evidenceWire.all { it.jsonObject.getValue("source_ref").jsonPrimitive.content == "user-statement:purchase-20260910-1" })
+        assertTrue(evidenceWire.all { it.jsonObject.getValue("content_hash") == JsonNull })
+        assertEquals(IngestionReviewStatus.NEEDS_REVIEW, envelope.review.status)
+
+        val persisted = YeonsikOcrV3Json.decode(
+            textOnlyRetailJson(),
+            "v3-text-only-persisted",
+            preservePersistedVerification = true,
+        )
+        assertEquals(IngestionReviewStatus.READY, persisted.review.status)
+    }
+
+    @Test
+    fun `v3 text-only candidate without explicit evidence derives a logical user statement ref`() {
+        val root = parse(textOnlyRetailJson())
+        val originalCandidate = root.getValue("product_candidates").jsonArray.single().jsonObject
+        val legacyCandidate = JsonObject(originalCandidate.toMutableMap().apply { remove("evidence") })
+        val input = JsonObject(root.toMutableMap().apply {
+            put("product_candidates", JsonArray(listOf(legacyCandidate)))
+        })
+
+        val envelope = YeonsikOcrV3Json.decode(encode(input), "v3-text-only-derived-ref")
+        val candidate = envelope.productCandidates.single()
+        assertTrue(candidate.sourceAttachmentIds.isEmpty())
+        assertTrue(candidate.evidence.all { it.sourceType == "user_statement" })
+        assertTrue(candidate.evidence.all {
+            it.sourceRef?.startsWith("user-statement:sha256:") == true
+        })
+    }
+
+    @Test
+    fun `v3 user statement evidence may derive missing ref and nullable hash from source text`() {
+        val root = parse(textOnlyRetailJson())
+        val candidate = root.getValue("product_candidates").jsonArray.single().jsonObject
+        val evidence = candidate.getValue("evidence").jsonArray.map { item ->
+            JsonObject(item.jsonObject.toMutableMap().apply {
+                remove("source_ref")
+                remove("content_hash")
+            })
+        }
+        val input = JsonObject(root.toMutableMap().apply {
+            put(
+                "product_candidates",
+                JsonArray(listOf(JsonObject(candidate.toMutableMap().apply {
+                    put("evidence", JsonArray(evidence))
+                }))),
+            )
+        })
+
+        val decoded = YeonsikOcrV3Json.decode(encode(input), "v3-text-only-missing-optional-evidence")
+        assertTrue(decoded.productCandidates.single().evidence.all {
+            it.sourceRef?.startsWith("user-statement:sha256:") == true
+        })
+    }
+
+    @Test
+    fun `user statement evidence without source ref or user text is rejected`() {
+        val root = parse(textOnlyRetailJson())
+        val source = root.getValue("source").jsonObject
+        val invalidSource = JsonObject(source.toMutableMap().apply { put("user_text", JsonNull) })
+        val candidate = root.getValue("product_candidates").jsonArray.single().jsonObject
+        val evidence = candidate.getValue("evidence").jsonArray.first().jsonObject
+        val invalidEvidence = JsonObject(evidence.toMutableMap().apply { put("source_ref", JsonNull) })
+        val invalidCandidate = JsonObject(candidate.toMutableMap().apply {
+            put("evidence", JsonArray(listOf(invalidEvidence)))
+        })
+        val invalid = JsonObject(root.toMutableMap().apply {
+            put("source", invalidSource)
+            put("product_candidates", JsonArray(listOf(invalidCandidate)))
+        })
+
+        assertThrows(IllegalStateException::class.java) {
+            YeonsikOcrV3Json.decode(encode(invalid), "v3-text-only-missing-source")
+        }
     }
 
     @Test
@@ -106,6 +207,33 @@ class YeonsikOcrV3Test {
                 explicitUserConfirmation = true,
             ).isAllowed,
         )
+    }
+
+    @Test
+    fun `text-only source evidence still requires the existing product image gate`() {
+        val envelope = YeonsikOcrV3Json.decode(textOnlyRetailJson(), "v3-text-only-gate")
+        val artifacts = setOf(
+            IngestionArtifactKeys.productCandidate("product-brandx-chicken-20260910"),
+            IngestionArtifactKeys.priceObservation("price-brandx-chicken-20260910"),
+        )
+
+        val sourceEvidence = IngestionEvidenceGate.evaluate(
+            envelope = envelope,
+            evidence = emptyList(),
+            artifactKeys = artifacts,
+            verificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+        )
+        assertFalse(sourceEvidence.isAllowed)
+        assertTrue(sourceEvidence.blockingIssues.isNotEmpty())
+
+        val manual = IngestionEvidenceGate.evaluate(
+            envelope = envelope,
+            evidence = emptyList(),
+            artifactKeys = artifacts,
+            verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+            explicitUserConfirmation = true,
+        )
+        assertTrue(manual.isAllowed)
     }
 
     @Test
@@ -224,6 +352,56 @@ class YeonsikOcrV3Test {
             it.projection == IngestionProjection.CASHOS_RECEIPT && it.status == ProjectionStatus.UPLOADED
         })
         assertEquals(1, product.requests.size)
+    }
+
+    @Test
+    fun `text-only manual review submits product candidate before standalone retail price`() = runBlocking {
+        val store = InMemoryIngestionSessionStore()
+        val order = mutableListOf<IngestionProjection>()
+        val product = RecordingSubmitter(onSubmit = { order += it.projection })
+        val price = RecordingSubmitter(onSubmit = { order += it.projection })
+        val useCase = CanonicalIngestionUseCase(
+            store = store,
+            submitters = mapOf(
+                IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE to product,
+                IngestionProjection.PRICETRACE_PRICE_OBSERVATION to price,
+            ),
+        )
+        val imported = useCase.importJson(
+            textOnlyRetailJson(),
+            localDocumentId = "v3-text-only-submit",
+            ingestionId = "v3-text-only-submit-ingestion",
+        ) as CanonicalImportResult.Success
+        assertEquals(IngestionReviewStatus.NEEDS_REVIEW, imported.envelope.review.status)
+
+        val confirmation = useCase.confirm(
+            imported.session.ingestionId,
+            imported.envelope,
+            verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+        )
+        assertTrue(confirmation.result is IngestionStartResult.Success)
+        assertEquals(IngestionReviewStatus.READY, confirmation.envelope.review.status)
+
+        val states = useCase.submitSelected(
+            imported.session.ingestionId,
+            confirmation.envelope,
+            setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION),
+        )
+        assertEquals(
+            listOf(
+                IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE,
+                IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+            ),
+            order,
+        )
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            states.single { it.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE }.status,
+        )
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            states.single { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }.status,
+        )
     }
 
     @Test
@@ -387,6 +565,13 @@ class YeonsikOcrV3Test {
         put("projection_targets", JsonArray(listOf(JsonPrimitive("cashos_receipt"))))
         put("review", reviewJson())
     })
+
+    private fun textOnlyRetailJson(): String =
+        sequenceOf(
+            java.io.File("examples", "yeonsik-ocr.v3.text-only-retail.example.json"),
+            java.io.File("../examples", "yeonsik-ocr.v3.text-only-retail.example.json"),
+        ).firstOrNull(java.io.File::isFile)?.readText()
+            ?: error("text-only retail example not found")
 
     private fun restaurantJson(withCompleteConsumption: Boolean = false): String = encode(buildJsonObject {
         put("schema_version", JsonPrimitive(YEONSIK_OCR_V3_SCHEMA))

@@ -147,6 +147,39 @@ class DesktopIngestionRegressionTest {
         assertEquals(confirmed.session?.canonicalFingerprint, confirmed.session?.verifiedCanonicalFingerprint)
     }
 
+    @Test
+    fun `desktop text-only retail JSON keeps source gate and allows manual canonical confirmation`() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-console-text-only"))
+        val controller = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env"))),
+        )
+
+        controller.importJson(readExample("yeonsik-ocr.v3.text-only-retail.example.json"))
+        val imported = controller.state.value
+        assertTrue(imported.evidence.isEmpty())
+        assertTrue(imported.session!!.projections.any {
+            it.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE
+        })
+        assertTrue(imported.session!!.projections.any {
+            it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION
+        })
+
+        controller.verify(VerificationBasis.SOURCE_EVIDENCE)
+        val blocked = controller.state.value
+        assertTrue(blocked.error.orEmpty().contains("required"))
+        assertTrue(
+            blocked.session!!.verifiedCanonicalFingerprint != blocked.session!!.canonicalFingerprint,
+        )
+
+        controller.verify(VerificationBasis.MANUAL_CANONICAL_REVIEW)
+        val confirmed = controller.state.value
+        assertEquals(IngestionReviewStatus.READY, confirmed.session?.reviewStatus)
+        assertEquals(confirmed.session?.canonicalFingerprint, confirmed.session?.verifiedCanonicalFingerprint)
+        assertTrue(confirmed.artifacts.isNotEmpty())
+        assertTrue(confirmed.artifacts.all { it.evidenceReady })
+    }
+
     private fun readExample(name: String): String {
         val file = sequenceOf(File("examples", name), File("../examples", name))
             .firstOrNull(File::isFile) ?: error("example not found: $name")

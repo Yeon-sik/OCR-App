@@ -1,0 +1,90 @@
+{
+  "schema_version": "yeonsik-ocr.v3",
+  "mode": "packaged_product",
+  "source": {
+    "producer": "chatgpt",
+    "source_files": [],
+    "user_text": "2026-09-10 이마트에서 브랜드X 닭가슴살 1개를 2,900원에 샀어."
+  },
+  "merchant_candidate": {
+    "name": "이마트",
+    "business_kind": "retail",
+    "branch_name": null,
+    "address": null,
+    "phone": null,
+    "business_registration_number": null,
+    "source_attachment_ids": [],
+    "source_namespace": null,
+    "source_location_code": null
+  },
+  "receipt": null,
+  "product_candidates": [
+    {
+      "client_key": "product-brandx-chicken-20260910",
+      "product_name": "브랜드X 닭가슴살",
+      "merchant_sku": null,
+      "brand_name": "브랜드X",
+      "sub_brand_name": null,
+      "manufacturer_name": null,
+      "variant_name": null,
+      "specification_text": null,
+      "content_amount": null,
+      "content_unit": null,
+      "package_count": null,
+      "barcodes": [],
+      "source_attachment_ids": [],
+      "evidence": [
+        {
+          "source_type": "user_statement",
+          "source_ref": "user-statement:purchase-20260910-1",
+          "field": "product_name",
+          "observed_value": "브랜드X 닭가슴살",
+          "content_hash": null
+        },
+        {
+          "source_type": "user_statement",
+          "source_ref": "user-statement:purchase-20260910-1",
+          "field": "brand_name",
+          "observed_value": "브랜드X",
+          "content_hash": null
+        }
+      ],
+      "confidence": 1.0
+    }
+  ],
+  "price_observations": [
+    {
+      "client_key": "price-brandx-chicken-20260910",
+      "kind": "retail_purchase",
+      "product_client_key": "product-brandx-chicken-20260910",
+      "item_name": null,
+      "observed_on": "2026-09-10",
+      "observed_at": null,
+      "quantity": 1.0,
+      "unit_price": null,
+      "gross": null,
+      "discount": null,
+      "net": 2900,
+      "evidence": [
+        "user-statement:purchase-20260910-1"
+      ],
+      "confidence": 1.0
+    }
+  ],
+  "nutrition": [],
+  "consumption": [],
+  "classification_hints": {
+    "cashos": {}
+  },
+  "links": [],
+  "projection_targets": [
+    "pricetrace_price_observation"
+  ],
+  "review": {
+    "status": "ready",
+    "blocking_issues": [],
+    "warnings": [],
+    "verification_basis": "MANUAL_CANONICAL_REVIEW",
+    "user_verified": true
+  }
+}

@@ -394,16 +394,18 @@ class PriceTraceCanonicalGateway(
         put("package_count", candidate.packageCount?.let(::JsonPrimitive) ?: JsonNull)
         put("variant", candidate.variant?.let(::JsonPrimitive) ?: JsonNull)
         put("identifiers", JsonArray(candidateIdentifiers(candidate)))
-        put("evidence", JsonArray(candidate.evidence.flatMap { evidence ->
-            evidence.sourceAttachmentIds.map { attachmentId -> buildJsonObject {
+        put("evidence", JsonArray(candidate.evidence.map { evidence ->
+            val sourceRef = evidence.sourceRef?.takeIf(String::isNotBlank)
+                ?: evidence.source?.takeIf(String::isNotBlank)
+                ?: evidence.sourceAttachmentIds.firstOrNull()
+                ?: error("product candidate evidence source_ref is required")
+            buildJsonObject {
                 put("source_type", JsonPrimitive(evidence.sourceType))
-                put("source_ref", JsonPrimitive(evidence.sourceRef ?: evidence.source ?: attachmentId))
+                put("source_ref", JsonPrimitive(sourceRef))
                 put("field", JsonPrimitive(evidence.field))
-                put("observed_value", evidence.observedValue?.let(::JsonPrimitive)
-                    ?: JsonPrimitive(candidate.productName))
-                evidence.contentHash?.takeIf { it.matches(Regex("^sha256:[a-f0-9]{64}$")) }
-                    ?.let { put("content_hash", JsonPrimitive(it)) }
-            }}
+                put("observed_value", evidence.observedValue?.let(::JsonPrimitive) ?: JsonNull)
+                put("content_hash", evidence.contentHash?.let(::JsonPrimitive) ?: JsonNull)
+            }
         }))
         put("provenance", buildJsonObject {
             candidate.evidence.firstOrNull()?.sourceAttachmentIds?.firstOrNull()
