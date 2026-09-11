@@ -49,7 +49,27 @@ class YeonsikOcrV3Test {
             "v3-retail-round-trip",
         )
         assertEquals("Brand Sub", roundTripped.productCandidates.single().subBrand)
-        assertEquals(envelope.priceObservations.single().net, roundTripped.priceObservations.single().net)
+        assertEquals(
+            envelope.priceObservations.single().netAmountMinor,
+            roundTripped.priceObservations.single().netAmountMinor,
+        )
+        val priceWire = parse(YeonsikOcrV3Json.encode(envelope))
+            .getValue("price_observations").jsonArray.single().jsonObject
+        assertEquals(
+            setOf(
+                "client_key", "kind", "product_client_key", "item_name", "observed_on", "observed_at",
+                "currency", "quantity", "unit_price_amount_minor", "gross_amount_minor",
+                "discount_amount_minor", "net_amount_minor", "source_attachment_ids", "evidence", "confidence",
+            ),
+            priceWire.keys,
+        )
+        assertEquals("KRW", priceWire.getValue("currency").jsonPrimitive.content)
+        assertEquals("each", priceWire.getValue("quantity").jsonObject.getValue("unit").jsonPrimitive.content)
+        assertFalse(priceWire.containsKey("unit_price"))
+        assertFalse(priceWire.containsKey("gross"))
+        assertFalse(priceWire.containsKey("discount"))
+        assertFalse(priceWire.containsKey("net"))
+        assertTrue(priceWire.getValue("evidence").jsonArray.single().jsonObject.containsKey("source_type"))
         assertEquals(null, roundTripped.productCandidates.single().merchantSku)
         val encodedReview = parse(YeonsikOcrV3Json.encode(envelope))["review"]!!.jsonObject
         assertEquals(setOf("status", "blocking_issues", "warnings"), encodedReview.keys)
@@ -66,7 +86,18 @@ class YeonsikOcrV3Test {
         assertEquals("user_statement", evidence.first().sourceType)
         assertEquals("user-statement:purchase-20260910-1", evidence.first().sourceRef)
         assertTrue(evidence.all { it.sourceAttachmentIds.isEmpty() })
-        assertEquals(2900L, envelope.priceObservations.single().net)
+        val price = envelope.priceObservations.single()
+        assertEquals("KRW", price.currency)
+        assertEquals(1.0, price.quantity?.value)
+        assertEquals("each", price.quantity?.unit)
+        assertEquals(null, price.unitPriceAmountMinor)
+        assertEquals(null, price.grossAmountMinor)
+        assertEquals(null, price.discountAmountMinor)
+        assertEquals(2900L, price.netAmountMinor)
+        assertTrue(price.sourceAttachmentIds.isEmpty())
+        assertEquals("user_statement", price.evidence.single().sourceType)
+        assertEquals("net_amount_minor", price.evidence.single().field)
+        assertEquals("2900", price.evidence.single().observedValue)
 
         val candidateWire = parse(YeonsikOcrV3Json.encode(envelope))
             .getValue("product_candidates").jsonArray.single().jsonObject
@@ -83,7 +114,40 @@ class YeonsikOcrV3Test {
             "v3-text-only-persisted",
             preservePersistedVerification = true,
         )
-        assertEquals(IngestionReviewStatus.READY, persisted.review.status)
+        assertEquals(IngestionReviewStatus.NEEDS_REVIEW, persisted.review.status)
+        val producerReview = parse(textOnlyRetailJson()).getValue("review").jsonObject
+        assertEquals(setOf("status", "blocking_issues", "warnings"), producerReview.keys)
+    }
+
+    @Test
+    fun `v3 amount validation remains nullable and checks only complete equations`() {
+        val textOnly = YeonsikOcrV3Json.decode(textOnlyRetailJson(), "v3-nullable-amounts")
+        assertEquals(null, textOnly.priceObservations.single().unitPriceAmountMinor)
+        assertEquals(null, textOnly.priceObservations.single().grossAmountMinor)
+        assertEquals(null, textOnly.priceObservations.single().discountAmountMinor)
+        assertEquals(2900L, textOnly.priceObservations.single().netAmountMinor)
+
+        val root = parse(retailJson())
+        val price = root.getValue("price_observations").jsonArray.single().jsonObject
+        val mismatched = JsonObject(price.toMutableMap().apply {
+            put("unit_price_amount_minor", JsonPrimitive(1200))
+        })
+        val invalid = JsonObject(root.toMutableMap().apply {
+            put("price_observations", JsonArray(listOf(mismatched)))
+        })
+        assertThrows(IllegalArgumentException::class.java) {
+            YeonsikOcrV3Json.decode(encode(invalid), "v3-amount-mismatch")
+        }
+
+        val discountMismatch = JsonObject(price.toMutableMap().apply {
+            put("discount_amount_minor", JsonPrimitive(100))
+        })
+        val invalidDiscount = JsonObject(root.toMutableMap().apply {
+            put("price_observations", JsonArray(listOf(discountMismatch)))
+        })
+        assertThrows(IllegalArgumentException::class.java) {
+            YeonsikOcrV3Json.decode(encode(invalidDiscount), "v3-discount-mismatch")
+        }
     }
 
     @Test
@@ -172,6 +236,18 @@ class YeonsikOcrV3Test {
         assertEquals("Noodles", price.itemName)
         assertEquals("price-1", menu.priceObservationClientKey)
         assertEquals(null, envelope.receipt)
+        val roundTripped = YeonsikOcrV3Json.decode(
+            YeonsikOcrV3Json.encode(envelope),
+            "v3-restaurant-round-trip",
+        )
+        assertEquals(
+            envelope.priceObservations.single().netAmountMinor,
+            roundTripped.priceObservations.single().netAmountMinor,
+        )
+        assertEquals(
+            envelope.priceObservations.single().evidence,
+            roundTripped.priceObservations.single().evidence,
+        )
         assertTrue(IngestionProjection.PRICETRACE_PRICE_OBSERVATION in CanonicalProjectionPlanner.plan(envelope).eligible)
         assertTrue(IngestionProjection.FITNESS_NUTRITION in CanonicalProjectionPlanner.plan(envelope).eligible)
         assertEquals(
@@ -179,6 +255,26 @@ class YeonsikOcrV3Test {
             CanonicalProjectionPlanner.plan(envelope).dependencies[IngestionProjection.FITNESS_NUTRITION],
         )
         assertFalse(IngestionProjection.CASHOS_RECEIPT in CanonicalProjectionPlanner.plan(envelope).eligible)
+    }
+
+    @Test
+    fun `v3 restaurant example uses the SPEC price observation shape`() {
+        val envelope = YeonsikOcrV3Json.decode(
+            exampleJson("yeonsik-ocr.v3.restaurant.example.json"),
+            "v3-restaurant-example",
+        )
+        val price = envelope.priceObservations.single()
+        assertEquals(StandalonePriceObservationKind.RESTAURANT_PURCHASE, price.kind)
+        assertEquals("KRW", price.currency)
+        assertEquals(StandalonePriceObservationQuantity(1.0, "each"), price.quantity)
+        assertEquals(10_000L, price.netAmountMinor)
+        assertEquals(listOf("menu-photo-1"), price.sourceAttachmentIds)
+
+        val roundTripped = YeonsikOcrV3Json.decode(
+            YeonsikOcrV3Json.encode(envelope),
+            "v3-restaurant-example-round-trip",
+        )
+        assertEquals(price, roundTripped.priceObservations.single())
     }
 
     @Test
@@ -275,8 +371,11 @@ class YeonsikOcrV3Test {
         assertEquals(VerificationBasis.SOURCE_EVIDENCE, envelope.review.verificationBasis)
         assertTrue(envelope.review.blockingIssues.isNotEmpty())
 
+        val persistedInput = JsonObject(parse(retailJson()).toMutableMap().apply {
+            put("review", reviewJson(includeAuthorityFields = true))
+        })
         val persisted = YeonsikOcrV3Json.decode(
-            retailJson(),
+            encode(persistedInput),
             "v3-persisted-review",
             preservePersistedVerification = true,
         )
@@ -567,11 +666,13 @@ class YeonsikOcrV3Test {
     })
 
     private fun textOnlyRetailJson(): String =
-        sequenceOf(
-            java.io.File("examples", "yeonsik-ocr.v3.text-only-retail.example.json"),
-            java.io.File("../examples", "yeonsik-ocr.v3.text-only-retail.example.json"),
-        ).firstOrNull(java.io.File::isFile)?.readText()
-            ?: error("text-only retail example not found")
+        exampleJson("yeonsik-ocr.v3.text-only-retail.example.json")
+
+    private fun exampleJson(name: String): String = sequenceOf(
+        java.io.File("examples", name),
+        java.io.File("../examples", name),
+    ).firstOrNull(java.io.File::isFile)?.readText()
+        ?: error("example not found: $name")
 
     private fun restaurantJson(withCompleteConsumption: Boolean = false): String = encode(buildJsonObject {
         put("schema_version", JsonPrimitive(YEONSIK_OCR_V3_SCHEMA))
@@ -621,12 +722,23 @@ class YeonsikOcrV3Test {
         put("item_name", JsonNull)
         put("observed_on", JsonPrimitive("2026-09-07"))
         put("observed_at", JsonNull)
-        put("quantity", JsonPrimitive(1.0))
-        put("unit_price", JsonPrimitive(1300))
-        put("gross", JsonPrimitive(1300))
-        put("discount", JsonPrimitive(0))
-        put("net", JsonPrimitive(1300))
-        put("evidence", JsonArray(listOf(JsonPrimitive("product-photo-1"))))
+        put("currency", JsonPrimitive("KRW"))
+        put("quantity", buildJsonObject {
+            put("value", JsonPrimitive(1.0))
+            put("unit", JsonPrimitive("each"))
+        })
+        put("unit_price_amount_minor", JsonPrimitive(1300))
+        put("gross_amount_minor", JsonPrimitive(1300))
+        put("discount_amount_minor", JsonPrimitive(0))
+        put("net_amount_minor", JsonPrimitive(1300))
+        put("source_attachment_ids", JsonArray(listOf(JsonPrimitive("product-photo-1"))))
+        put("evidence", JsonArray(listOf(buildJsonObject {
+            put("source_type", JsonPrimitive("product_photo"))
+            put("source_ref", JsonPrimitive("product-photo-1"))
+            put("field", JsonPrimitive("net_amount_minor"))
+            put("observed_value", JsonPrimitive("1300"))
+            put("content_hash", JsonNull)
+        })))
         put("confidence", JsonPrimitive(0.9))
     }
 
@@ -637,12 +749,23 @@ class YeonsikOcrV3Test {
         put("item_name", JsonPrimitive("Noodles"))
         put("observed_on", JsonPrimitive("2026-09-07"))
         put("observed_at", JsonNull)
-        put("quantity", JsonPrimitive(1.0))
-        put("unit_price", JsonPrimitive(10000))
-        put("gross", JsonPrimitive(10000))
-        put("discount", JsonPrimitive(0))
-        put("net", JsonPrimitive(10000))
-        put("evidence", JsonArray(listOf(JsonPrimitive("menu-photo-1"))))
+        put("currency", JsonPrimitive("KRW"))
+        put("quantity", buildJsonObject {
+            put("value", JsonPrimitive(1.0))
+            put("unit", JsonPrimitive("each"))
+        })
+        put("unit_price_amount_minor", JsonPrimitive(10000))
+        put("gross_amount_minor", JsonPrimitive(10000))
+        put("discount_amount_minor", JsonPrimitive(0))
+        put("net_amount_minor", JsonPrimitive(10000))
+        put("source_attachment_ids", JsonArray(listOf(JsonPrimitive("menu-photo-1"))))
+        put("evidence", JsonArray(listOf(buildJsonObject {
+            put("source_type", JsonPrimitive("ocr"))
+            put("source_ref", JsonPrimitive("menu-photo-1"))
+            put("field", JsonPrimitive("net_amount_minor"))
+            put("observed_value", JsonPrimitive("10000"))
+            put("content_hash", JsonNull)
+        })))
         put("confidence", JsonPrimitive(0.9))
     }
 
@@ -692,12 +815,14 @@ class YeonsikOcrV3Test {
         })
     }
 
-    private fun reviewJson() = buildJsonObject {
-        put("status", JsonPrimitive("ready"))
+    private fun reviewJson(includeAuthorityFields: Boolean = false) = buildJsonObject {
+        put("status", JsonPrimitive(if (includeAuthorityFields) "ready" else "needs_review"))
         put("blocking_issues", JsonArray(emptyList<JsonElement>()))
         put("warnings", JsonArray(emptyList<JsonElement>()))
-        put("verification_basis", JsonPrimitive("MANUAL_CANONICAL_REVIEW"))
-        put("user_verified", JsonPrimitive(true))
+        if (includeAuthorityFields) {
+            put("verification_basis", JsonPrimitive("MANUAL_CANONICAL_REVIEW"))
+            put("user_verified", JsonPrimitive(true))
+        }
     }
 
     private fun parse(value: String): JsonObject = json.parseToJsonElement(value).jsonObject

@@ -49,7 +49,9 @@ object YeonsikOcrV3Json {
         val productCandidates = root.arrayValue("product_candidates").map {
             decodeProductCandidate(it, source.userText)
         }
-        val priceObservations = root.arrayValue("price_observations").map(::decodePriceObservation)
+        val priceObservations = root.arrayValue("price_observations").map {
+            decodePriceObservation(it, source.userText)
+        }
         val nutrition = root.arrayValue("nutrition").map {
             decodeNutrition(it, localDocumentId, preservePersistedVerification)
         }
@@ -217,12 +219,27 @@ object YeonsikOcrV3Json {
         put("item_name", value.itemName?.let(::JsonPrimitive) ?: JsonNull)
         put("observed_on", value.observedOn?.let(::JsonPrimitive) ?: JsonNull)
         put("observed_at", value.observedAt?.let(::JsonPrimitive) ?: JsonNull)
-        put("quantity", value.quantity?.let(::JsonPrimitive) ?: JsonNull)
-        put("unit_price", value.unitPrice?.let(::JsonPrimitive) ?: JsonNull)
-        put("gross", value.gross?.let(::JsonPrimitive) ?: JsonNull)
-        put("discount", value.discount?.let(::JsonPrimitive) ?: JsonNull)
-        put("net", value.net?.let(::JsonPrimitive) ?: JsonNull)
-        put("evidence", JsonArray(value.evidence.map(::JsonPrimitive)))
+        put("currency", JsonPrimitive(value.currency))
+        put("quantity", value.quantity?.let { quantity ->
+            buildJsonObject {
+                put("value", JsonPrimitive(quantity.value))
+                put("unit", JsonPrimitive(quantity.unit))
+            }
+        } ?: JsonNull)
+        put("unit_price_amount_minor", value.unitPriceAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
+        put("gross_amount_minor", value.grossAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
+        put("discount_amount_minor", value.discountAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
+        put("net_amount_minor", value.netAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
+        put("source_attachment_ids", JsonArray(value.sourceAttachmentIds.map(::JsonPrimitive)))
+        put("evidence", JsonArray(value.evidence.map { evidence ->
+            buildJsonObject {
+                put("source_type", JsonPrimitive(evidence.sourceType))
+                put("source_ref", JsonPrimitive(evidence.sourceRef))
+                put("field", JsonPrimitive(evidence.field))
+                put("observed_value", evidence.observedValue?.let(::JsonPrimitive) ?: JsonNull)
+                put("content_hash", evidence.contentHash?.let(::JsonPrimitive) ?: JsonNull)
+            }
+        }))
         put("confidence", JsonPrimitive(value.confidence))
     }
 
@@ -442,19 +459,68 @@ object YeonsikOcrV3Json {
             "user-statement:sha256:" + StableIds.sha256(it)
         }
 
-    private fun decodePriceObservation(element: JsonElement): StandalonePriceObservation {
+    private fun decodePriceObservation(
+        element: JsonElement,
+        sourceUserText: String?,
+    ): StandalonePriceObservation {
         val root = element.jsonObject
         requireKeys(root, PRICE_OBSERVATION_KEYS)
+        val quantity = root["quantity"]?.takeUnless { it == JsonNull }?.let { quantityElement ->
+            val quantityRoot = quantityElement.jsonObject
+            requireKeys(quantityRoot, PRICE_QUANTITY_KEYS)
+            StandalonePriceObservationQuantity(
+                value = quantityRoot.number("value"),
+                unit = quantityRoot.string("unit"),
+            )
+        }
+        val sourceAttachmentIds = root.arrayValue("source_attachment_ids").strings()
         return StandalonePriceObservation(
             clientKey = root.string("client_key"),
             kind = StandalonePriceObservationKind.fromWireValue(root.string("kind")),
             productClientKey = root.nullableString("product_client_key"), itemName = root.nullableString("item_name"),
             observedOn = root.nullableString("observed_on"), observedAt = root.nullableString("observed_at"),
-            quantity = root.nullableNumber("quantity"), unitPrice = root.nullableLong("unit_price"),
-            gross = root.nullableLong("gross"), discount = root.nullableLong("discount"),
-            net = root.nullableLong("net"),
-            evidence = root.arrayValue("evidence").strings(), confidence = root.number("confidence"),
+            currency = root.string("currency"),
+            quantity = quantity,
+            unitPriceAmountMinor = root.nullableLong("unit_price_amount_minor"),
+            grossAmountMinor = root.nullableLong("gross_amount_minor"),
+            discountAmountMinor = root.nullableLong("discount_amount_minor"),
+            netAmountMinor = root.nullableLong("net_amount_minor"),
+            sourceAttachmentIds = sourceAttachmentIds,
+            evidence = root.arrayValue("evidence").map { evidenceElement ->
+                decodePriceObservationEvidence(evidenceElement, sourceAttachmentIds, sourceUserText)
+            },
+            confidence = root.number("confidence"),
         )
+    }
+
+    private fun decodePriceObservationEvidence(
+        element: JsonElement,
+        sourceAttachmentIds: List<String>,
+        sourceUserText: String?,
+    ): StandalonePriceObservationEvidence {
+        val root = element.jsonObject
+        requireKeys(root, PRICE_OBSERVATION_EVIDENCE_KEYS)
+        val sourceType = root.string("source_type")
+        val sourceRef = root.nullableString("source_ref")
+            ?: resolvePriceObservationEvidenceSourceRef(sourceType, sourceAttachmentIds, sourceUserText)
+            ?: error("price observation evidence source_ref or source.user_text is required")
+        return StandalonePriceObservationEvidence(
+            sourceType = sourceType,
+            sourceRef = sourceRef,
+            field = root.string("field"),
+            observedValue = root.nullableString("observed_value"),
+            contentHash = root.nullableString("content_hash"),
+        )
+    }
+
+    private fun resolvePriceObservationEvidenceSourceRef(
+        sourceType: String,
+        sourceAttachmentIds: List<String>,
+        sourceUserText: String?,
+    ): String? = when {
+        sourceType == "user_statement" -> userStatementSourceRef(sourceUserText)
+        sourceAttachmentIds.isNotEmpty() -> sourceAttachmentIds.first()
+        else -> null
     }
 
     private fun decodeNutrition(
@@ -916,7 +982,12 @@ object YeonsikOcrV3Json {
     private val BARCODE_KEYS = setOf("scheme", "value")
     private val PRICE_OBSERVATION_KEYS = setOf(
         "client_key", "kind", "product_client_key", "item_name", "observed_on", "observed_at", "quantity",
-        "unit_price", "gross", "discount", "net", "evidence", "confidence",
+        "currency", "unit_price_amount_minor", "gross_amount_minor", "discount_amount_minor",
+        "net_amount_minor", "source_attachment_ids", "evidence", "confidence",
+    )
+    private val PRICE_QUANTITY_KEYS = setOf("value", "unit")
+    private val PRICE_OBSERVATION_EVIDENCE_KEYS = setOf(
+        "source_type", "source_ref", "field", "observed_value", "content_hash",
     )
     private val NUTRITION_KEYS = setOf(
         "client_key", "kind", "line_id", "menu_name", "component_role", "payload", "estimate",

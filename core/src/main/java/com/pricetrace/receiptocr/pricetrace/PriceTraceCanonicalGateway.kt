@@ -317,12 +317,17 @@ class PriceTraceCanonicalGateway(
         put("transcription_status", JsonPrimitive("user_verified"))
         observation.observedOn?.let { put("observed_on", JsonPrimitive(it)) }
         observation.observedAt?.let { put("observed_at", JsonPrimitive(it)) }
-        put("currency", JsonPrimitive("KRW"))
-        put("gross_price", observation.gross?.let(::JsonPrimitive) ?: JsonNull)
-        put("discount", observation.discount?.let(::JsonPrimitive) ?: JsonNull)
-        put("net_price", observation.net?.let(::JsonPrimitive) ?: JsonNull)
-        put("quantity", observation.quantity?.toLong()?.let(::JsonPrimitive) ?: JsonNull)
-        put("unit_price", observation.unitPrice?.let(::JsonPrimitive) ?: JsonNull)
+        put("currency", JsonPrimitive(observation.currency))
+        put("gross_price", observation.grossAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
+        put("discount", observation.discountAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
+        put("net_price", observation.netAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
+        put("quantity", observation.quantity?.let { quantity ->
+            require(quantity.unit == "each") {
+                "PriceTrace standalone contract supports only each quantity units"
+            }
+            JsonPrimitive(quantity.value.toLong())
+        } ?: JsonNull)
+        put("unit_price", observation.unitPriceAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
         put("merchant", merchantObservationJson(envelope, observation.kind))
         when (observation.kind) {
             StandalonePriceObservationKind.RETAIL_PURCHASE -> {

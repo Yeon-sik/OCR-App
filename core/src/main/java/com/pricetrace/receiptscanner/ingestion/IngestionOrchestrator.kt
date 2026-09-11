@@ -914,12 +914,26 @@ class IngestionOrchestrator(
         observation.itemName,
         observation.observedOn,
         observation.observedAt,
-        observation.quantity,
-        observation.unitPrice,
-        observation.gross,
-        observation.discount,
-        observation.net,
-        observation.evidence.sorted().joinToString(","),
+        observation.currency,
+        observation.quantity?.let { quantity -> "${quantity.value}/${quantity.unit}" },
+        observation.unitPriceAmountMinor,
+        observation.grossAmountMinor,
+        observation.discountAmountMinor,
+        observation.netAmountMinor,
+        observation.sourceAttachmentIds.sorted().joinToString(","),
+        observation.evidence.sortedWith(compareBy(
+            { it.sourceType },
+            { it.sourceRef },
+            { it.field },
+        )).joinToString(",") { evidence ->
+            listOf(
+                evidence.sourceType,
+                evidence.sourceRef,
+                evidence.field,
+                evidence.observedValue,
+                evidence.contentHash,
+            ).joinToString("/") { it ?: "<null>" }
+        },
         observation.confidence,
     ).joinToString("|") { it?.toString() ?: "<null>" }
 

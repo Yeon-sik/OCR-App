@@ -9,6 +9,22 @@ import java.time.OffsetDateTime
 const val YEONSIK_OCR_SCHEMA = "yeonsik-ocr.v1"
 const val YEONSIK_OCR_V2_SCHEMA = "yeonsik-ocr.v2"
 const val YEONSIK_OCR_V3_SCHEMA = "yeonsik-ocr.v3"
+
+private val CANONICAL_EVIDENCE_SOURCE_TYPES = setOf(
+    "product_photo",
+    "package_label",
+    "receipt",
+    "official_listing",
+    "manufacturer",
+    "user_statement",
+    "ocr",
+)
+private val ATTACHMENT_BACKED_EVIDENCE_SOURCE_TYPES = setOf(
+    "product_photo",
+    "package_label",
+    "receipt",
+    "ocr",
+)
 object IngestionArtifactKeys {
     const val RECEIPT = "receipt"
     const val MERCHANT_CANDIDATE = "merchant_candidate"
@@ -161,10 +177,10 @@ data class ProductCandidate(
             require(item.sourceAttachmentIds.all(String::isNotBlank)) {
                 "product candidate evidence source IDs must be non-empty"
             }
-            require(item.sourceType in PRODUCT_EVIDENCE_SOURCE_TYPES && item.field.isNotBlank()) {
+            require(item.sourceType in CANONICAL_EVIDENCE_SOURCE_TYPES && item.field.isNotBlank()) {
                 "product candidate evidence source type and field are required"
             }
-            if (item.sourceType in ATTACHMENT_BACKED_SOURCE_TYPES) {
+            if (item.sourceType in ATTACHMENT_BACKED_EVIDENCE_SOURCE_TYPES) {
                 require(item.sourceAttachmentIds.isNotEmpty()) {
                     "attachment-backed product candidate evidence requires source attachment IDs"
                 }
@@ -202,24 +218,6 @@ data class ProductCandidate(
         get() = manufacturer
     val variantName: String?
         get() = variant
-
-    private companion object {
-        val PRODUCT_EVIDENCE_SOURCE_TYPES = setOf(
-            "product_photo",
-            "package_label",
-            "receipt",
-            "official_listing",
-            "manufacturer",
-            "user_statement",
-            "ocr",
-        )
-        val ATTACHMENT_BACKED_SOURCE_TYPES = setOf(
-            "product_photo",
-            "package_label",
-            "receipt",
-            "ocr",
-        )
-    }
 }
 
 data class NutritionNutrientProvenance(
@@ -270,6 +268,47 @@ enum class StandalonePriceObservationKind(val wireValue: String) {
     }
 }
 
+data class StandalonePriceObservationQuantity(
+    val value: Double,
+    val unit: String,
+) {
+    init {
+        require(value.isFinite() && value > 0.0) {
+            "price observation quantity value must be positive"
+        }
+        require(value % 1.0 == 0.0) {
+            "price observation quantity value must be an integer"
+        }
+        require(unit.isNotBlank()) { "price observation quantity unit is required" }
+    }
+}
+
+data class StandalonePriceObservationEvidence(
+    val sourceType: String,
+    val sourceRef: String,
+    val field: String,
+    val observedValue: String? = null,
+    val contentHash: String? = null,
+) {
+    init {
+        require(sourceType in CANONICAL_EVIDENCE_SOURCE_TYPES) {
+            "unsupported price observation evidence source type"
+        }
+        require(sourceRef.isNotBlank()) {
+            "price observation evidence source_ref is required"
+        }
+        require(field.isNotBlank()) {
+            "price observation evidence field is required"
+        }
+        require(observedValue == null || observedValue.isNotBlank()) {
+            "price observation evidence observed_value must be non-empty when present"
+        }
+        require(contentHash == null || contentHash.matches(Regex("^sha256:[a-f0-9]{64}$"))) {
+            "price observation evidence content hash must be sha256"
+        }
+    }
+}
+
 /** A price fact independent of receipt.v2 and never routed to CashOS. */
 data class StandalonePriceObservation(
     val clientKey: String,
@@ -278,16 +317,19 @@ data class StandalonePriceObservation(
     val itemName: String? = null,
     val observedOn: String? = null,
     val observedAt: String? = null,
-    val quantity: Double?,
-    val unitPrice: Long?,
-    val gross: Long?,
-    val discount: Long?,
-    val net: Long?,
-    val evidence: List<String>,
+    val currency: String = "KRW",
+    val quantity: StandalonePriceObservationQuantity? = null,
+    val unitPriceAmountMinor: Long? = null,
+    val grossAmountMinor: Long? = null,
+    val discountAmountMinor: Long? = null,
+    val netAmountMinor: Long? = null,
+    val sourceAttachmentIds: List<String> = emptyList(),
+    val evidence: List<StandalonePriceObservationEvidence>,
     val confidence: Double,
 ) {
     init {
         require(clientKey.isNotBlank()) { "price observation client_key is required" }
+        require(currency == "KRW") { "price observation currency must be KRW" }
         require((observedOn != null) || (observedAt != null)) {
             "price observation observed_on or observed_at is required"
         }
@@ -300,37 +342,55 @@ data class StandalonePriceObservation(
                 "price observation observed_on and observed_at must refer to the same calendar date"
             }
         }
-        quantity?.let {
-            require(it.isFinite() && it > 0.0) { "price observation quantity must be positive" }
-            require(it % 1.0 == 0.0) { "price observation quantity must be an integer" }
+        require(sourceAttachmentIds.distinct().size == sourceAttachmentIds.size) {
+            "price observation source attachment IDs must be unique"
         }
-        listOf(unitPrice, gross, discount, net).forEach { value ->
+        require(sourceAttachmentIds.all(String::isNotBlank)) {
+            "price observation source attachment IDs must be non-empty"
+        }
+        listOf(unitPriceAmountMinor, grossAmountMinor, discountAmountMinor, netAmountMinor).forEach { value ->
             require(value == null || value >= 0) { "price observation amounts must be non-negative" }
         }
-        require(unitPrice != null || gross != null || discount != null || net != null) {
+        require(
+            unitPriceAmountMinor != null ||
+                grossAmountMinor != null ||
+                discountAmountMinor != null ||
+                netAmountMinor != null,
+        ) {
             "price observation requires at least one observed price fact"
         }
-        if (gross != null && discount != null) {
-            require(discount <= gross) { "price observation discount cannot exceed gross" }
+        if (grossAmountMinor != null && discountAmountMinor != null) {
+            require(discountAmountMinor <= grossAmountMinor) {
+                "price observation discount cannot exceed gross"
+            }
         }
-        if (gross != null && net != null) {
-            require(gross >= net) { "price observation gross cannot be below net" }
+        if (grossAmountMinor != null && netAmountMinor != null) {
+            require(grossAmountMinor >= netAmountMinor) {
+                "price observation gross cannot be below net"
+            }
         }
-        if (quantity != null && unitPrice != null && net != null) {
+        if (quantity != null && unitPriceAmountMinor != null && netAmountMinor != null) {
             require(
-                java.math.BigDecimal(quantity.toString()).multiply(java.math.BigDecimal.valueOf(unitPrice))
-                    .compareTo(java.math.BigDecimal.valueOf(net)) == 0,
+                java.math.BigDecimal(quantity.value.toString()).multiply(java.math.BigDecimal.valueOf(unitPriceAmountMinor))
+                    .compareTo(java.math.BigDecimal.valueOf(netAmountMinor)) == 0,
             ) {
-                "quantity times unit_price must equal net when all are known"
+                "quantity.value times unit_price_amount_minor must equal net_amount_minor when all are known"
             }
         }
-        if (gross != null && discount != null && net != null) {
-            require(gross - discount == net) {
-                "gross minus discount must equal net when all are known"
+        if (grossAmountMinor != null && discountAmountMinor != null && netAmountMinor != null) {
+            require(grossAmountMinor - discountAmountMinor == netAmountMinor) {
+                "gross_amount_minor minus discount_amount_minor must equal net_amount_minor when all are known"
             }
         }
-        require(evidence.isNotEmpty() && evidence.all(String::isNotBlank)) {
+        require(evidence.isNotEmpty()) {
             "price observation evidence is required"
+        }
+        evidence.forEach { item ->
+            if (item.sourceType in ATTACHMENT_BACKED_EVIDENCE_SOURCE_TYPES) {
+                require(sourceAttachmentIds.isNotEmpty()) {
+                    "attachment-backed price observation evidence requires source attachment IDs"
+                }
+            }
         }
         require(confidence.isFinite() && confidence in 0.0..1.0) {
             "price observation confidence must be between 0 and 1"
@@ -346,11 +406,6 @@ data class StandalonePriceObservation(
             }
         }
     }
-
-    /** Compatibility aliases for callers that use the wire spelling. */
-    val unit_price: Long? get() = unitPrice
-    val observed_on: String? get() = observedOn
-    val observed_at: String? get() = observedAt
 }
 
 typealias CanonicalPriceObservation = StandalonePriceObservation
