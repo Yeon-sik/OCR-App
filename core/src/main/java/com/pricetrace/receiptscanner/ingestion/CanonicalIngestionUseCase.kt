@@ -162,6 +162,14 @@ class CanonicalIngestionUseCase(
                     )
                 }
             }
+            if (promoted.purchaseRecords.isNotEmpty()) {
+                add {
+                    orchestrator.markPurchaseRecordsVerified(
+                        ingestionId, promoted, evidence, inputOrigin = inputOrigin,
+                        verificationBasis = verificationBasis, explicitUserConfirmation = true,
+                    )
+                }
+            }
             if (promoted.priceObservations.isNotEmpty()) {
                 add {
                     orchestrator.markPriceObservationsVerified(

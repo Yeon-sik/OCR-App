@@ -201,6 +201,14 @@ class IngestionOrchestrator(
         explicitUserConfirmation: Boolean = false,
     ): IngestionStartResult = when {
         envelope.receipt != null -> markReceiptVerified(ingestionId, envelope, evidence, inputOrigin, verificationBasis, explicitUserConfirmation)
+        envelope.purchaseRecords.isNotEmpty() -> markPurchaseRecordsVerified(
+            ingestionId = ingestionId,
+            envelope = envelope,
+            evidence = evidence,
+            inputOrigin = inputOrigin,
+            verificationBasis = verificationBasis,
+            explicitUserConfirmation = explicitUserConfirmation,
+        )
         envelope.nutrition.isNotEmpty() -> markNutritionVerified(ingestionId, envelope, evidence, inputOrigin = inputOrigin, verificationBasis = verificationBasis, explicitUserConfirmation = explicitUserConfirmation)
         envelope.priceObservations.isNotEmpty() -> markPriceObservationsVerified(
             ingestionId = ingestionId,
@@ -275,6 +283,28 @@ class IngestionOrchestrator(
     ): IngestionStartResult {
         val requestedKeys = priceObservationClientKeys.map(IngestionArtifactKeys::priceObservation).toSet()
         if (requestedKeys.isEmpty()) return IngestionStartResult.Failure(listOf("price_observation_artifact_missing"))
+        return markArtifactsVerified(
+            ingestionId = ingestionId,
+            envelope = envelope,
+            evidence = evidence,
+            artifactKeys = requestedKeys,
+            inputOrigin = inputOrigin,
+            verificationBasis = verificationBasis,
+            explicitUserConfirmation = explicitUserConfirmation,
+        )
+    }
+
+    suspend fun markPurchaseRecordsVerified(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+        evidence: List<LocalEvidence>,
+        purchaseRecordClientKeys: Set<String> = envelope.purchaseRecords.map { it.clientKey }.toSet(),
+        inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+        verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+        explicitUserConfirmation: Boolean = false,
+    ): IngestionStartResult {
+        val requestedKeys = purchaseRecordClientKeys.map(IngestionArtifactKeys::purchaseRecord).toSet()
+        if (requestedKeys.isEmpty()) return IngestionStartResult.Failure(listOf("purchase_record_artifact_missing"))
         return markArtifactsVerified(
             ingestionId = ingestionId,
             envelope = envelope,
@@ -653,6 +683,14 @@ class IngestionOrchestrator(
                 ),
             )
         }
+        envelope.purchaseRecords.forEach { record ->
+            put(
+                IngestionArtifactKeys.purchaseRecord(record.clientKey),
+                StableIds.sha256(
+                    "ingestion-artifact|purchase-record|" + purchaseRecordPayloadDependency(record),
+                ),
+            )
+        }
         envelope.nutrition.forEach { item ->
             put(
                 IngestionArtifactKeys.nutrition(item.clientKey),
@@ -775,7 +813,11 @@ class IngestionOrchestrator(
             IngestionProjection.PRICETRACE_RECEIPT ->
                 "pricetrace-receipt|" + priceTraceReceiptPayload(envelope.receipt)
             IngestionProjection.PRICETRACE_PRICE_OBSERVATION ->
-                if (envelope.priceObservations.isNotEmpty()) {
+                if (envelope.purchaseRecords.isNotEmpty()) {
+                    "pricetrace-purchase-price-v4|" + envelope.purchaseRecords
+                        .sortedBy(PurchaseRecord::clientKey)
+                        .joinToString("|") { purchaseRecordPayloadDependency(it) }
+                } else if (envelope.priceObservations.isNotEmpty()) {
                     "pricetrace-standalone-price|merchant=" + merchantPayloadDependency(envelope.merchantCandidate) +
                         "|products=" + envelope.priceObservations
                         .filter { it.kind == StandalonePriceObservationKind.RETAIL_PURCHASE }
@@ -792,6 +834,11 @@ class IngestionOrchestrator(
                 } else {
                     "pricetrace-receipt-price|" + priceTraceReceiptPayload(envelope.receipt)
                 }
+            IngestionProjection.CASHOS_TRANSACTION ->
+                "cashos-transaction-v4|" + envelope.purchaseRecords
+                    .sortedBy(PurchaseRecord::clientKey)
+                    .joinToString("|") { purchaseRecordPayloadDependency(it) } +
+                    "|hints=" + cashosHintsInput(envelope)
             IngestionProjection.CASHOS_RECEIPT ->
                 "cashos-receipt|" +
                     (envelope.receipt?.let { ReceiptV2Json.encodeCanonical(it) } ?: "<none>") +
@@ -978,6 +1025,9 @@ class IngestionOrchestrator(
         },
     ).joinToString("|") { it?.toString() ?: "<null>" }
 
+    private fun purchaseRecordPayloadDependency(record: PurchaseRecord): String =
+        YeonsikOcrV4Json.encodePurchaseRecord(record).toString()
+
     private fun requiredArtifactKeys(
         projection: IngestionProjection,
         envelope: YeonsikOcrEnvelope,
@@ -985,7 +1035,9 @@ class IngestionOrchestrator(
         IngestionProjection.PRICETRACE_RECEIPT -> if (envelope.receipt != null) {
             setOf(IngestionArtifactKeys.RECEIPT)
         } else emptySet()
-        IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> if (envelope.priceObservations.isNotEmpty()) buildSet {
+        IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> if (envelope.purchaseRecords.isNotEmpty()) {
+            envelope.purchaseRecords.map { IngestionArtifactKeys.purchaseRecord(it.clientKey) }.toSet()
+        } else if (envelope.priceObservations.isNotEmpty()) buildSet {
             addAll(envelope.priceObservations.map { IngestionArtifactKeys.priceObservation(it.clientKey) })
             if (envelope.merchantCandidate != null) add(IngestionArtifactKeys.MERCHANT_CANDIDATE)
             envelope.priceObservations.filter {
@@ -998,6 +1050,8 @@ class IngestionOrchestrator(
         IngestionProjection.CASHOS_RECEIPT -> if (envelope.receipt != null) {
             setOf(IngestionArtifactKeys.RECEIPT, IngestionArtifactKeys.CASHOS_HINTS)
         } else emptySet()
+        IngestionProjection.CASHOS_TRANSACTION ->
+            envelope.purchaseRecords.map { IngestionArtifactKeys.purchaseRecord(it.clientKey) }.toSet()
         IngestionProjection.FITNESS_NUTRITION -> buildSet {
             addAll(envelope.nutrition.map { IngestionArtifactKeys.nutrition(it.clientKey) })
             envelope.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>()
@@ -1031,9 +1085,13 @@ class IngestionOrchestrator(
                 IngestionArtifactKeys.MERCHANT_CANDIDATE in artifactKeys ||
                 artifactKeys.any {
                     it.startsWith("${IngestionArtifactKeys.PRICE_OBSERVATION}:") ||
-                        it.startsWith("${IngestionArtifactKeys.PRODUCT_CANDIDATE}:")
+                        it.startsWith("${IngestionArtifactKeys.PRODUCT_CANDIDATE}:") ||
+                        it.startsWith("${IngestionArtifactKeys.PURCHASE_RECORD}:")
                 }
         IngestionProjection.CASHOS_RECEIPT -> IngestionArtifactKeys.RECEIPT in artifactKeys || IngestionArtifactKeys.CASHOS_HINTS in artifactKeys
+        IngestionProjection.CASHOS_TRANSACTION -> artifactKeys.any {
+            it.startsWith("${IngestionArtifactKeys.PURCHASE_RECORD}:")
+        }
         IngestionProjection.FITNESS_NUTRITION -> artifactKeys.any {
             it.startsWith("nutrition:") ||
                 it.startsWith("${IngestionArtifactKeys.PRODUCT_CANDIDATE}:") ||
@@ -1262,6 +1320,7 @@ class IngestionOrchestrator(
         IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE,
         IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE -> 0
         IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> 1
+        IngestionProjection.CASHOS_TRANSACTION -> 1
         IngestionProjection.CASHOS_RECEIPT,
         IngestionProjection.FITNESS_NUTRITION -> 2
         IngestionProjection.FITNESS_MEAL -> 3

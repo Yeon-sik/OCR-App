@@ -70,6 +70,7 @@ import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA
 import com.pricetrace.receiptscanner.input.InputOrigin
 import com.pricetrace.receiptscanner.domain.StableIds
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
@@ -2845,7 +2846,11 @@ class ReceiptAppViewModel(
     }
     private suspend fun localIngestionEvidence(documentId: String, envelope: YeonsikOcrEnvelope): List<LocalEvidence> =
         repository.getPages(documentId).mapIndexed { index, page ->
-            val type = envelope.source.sourceFiles.getOrNull(index)?.type ?: fallbackEvidenceType(envelope, index)
+            val sourceAttachment = envelope.source.sourceFiles.getOrNull(index)
+            val type = sourceAttachment?.type ?: fallbackEvidenceType(envelope, index)
+            val logicalAttachmentId = sourceAttachment?.id.takeIf {
+                envelope.schemaVersion == YEONSIK_OCR_V4_SCHEMA
+            }
             val readable = try {
                 fileStore.readBytes(page.storageKey).isNotEmpty()
             } catch (cancelled: CancellationException) {
@@ -2853,7 +2858,12 @@ class ReceiptAppViewModel(
             } catch (_: Exception) {
                 false
             }
-            LocalEvidence(attachmentId = page.id, type = type, fileReadable = readable, pageId = page.id)
+            LocalEvidence(
+                attachmentId = logicalAttachmentId ?: page.id,
+                type = type,
+                fileReadable = readable,
+                pageId = page.id,
+            )
         }
 
     private suspend fun syncIngestionEvidence(documentId: String): List<LocalEvidence>? {
@@ -3003,6 +3013,9 @@ class ReceiptAppViewModel(
             IngestionProjection.PRICETRACE_RECEIPT,
             IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> setOf(IngestionArtifactKeys.RECEIPT)
             IngestionProjection.CASHOS_RECEIPT -> setOf(IngestionArtifactKeys.RECEIPT, IngestionArtifactKeys.CASHOS_HINTS)
+            IngestionProjection.CASHOS_TRANSACTION -> envelope.purchaseRecords
+                .map { IngestionArtifactKeys.purchaseRecord(it.clientKey) }
+                .toSet()
             IngestionProjection.FITNESS_NUTRITION -> envelope.nutrition
                 .map { IngestionArtifactKeys.nutrition(it.clientKey) }
                 .toSet()

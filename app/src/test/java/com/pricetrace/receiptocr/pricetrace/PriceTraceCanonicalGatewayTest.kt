@@ -20,6 +20,9 @@ import com.pricetrace.receiptscanner.domain.RetailChannel
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
 import com.pricetrace.receiptscanner.ingestion.*
 import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
+import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Contract
+import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Json
+import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Payload
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -213,6 +216,94 @@ class PriceTraceCanonicalGatewayTest {
         assertEquals("Test Foods", product["manufacturer"]?.jsonPrimitive?.content)
         assertFalse(observation.containsKey("cashos"))
         assertFalse(observation.containsKey("user_verified"))
+    }
+
+    @Test
+    fun purchasePriceObservationUsesTheConfirmedV4RpcAndDoesNotSendRawEvidence() = runTest {
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(
+                200,
+                """[{"purchaseSourceId":"purchase-source-1","observationIds":["observation-1"],"replayed":false,"deduplicated":false}]""",
+            ),
+        )
+        val record = PurchaseRecord(
+            clientKey = "purchase-1",
+            platform = "쿠팡",
+            platformCode = "coupang",
+            seller = "공식 판매자",
+            sellerBusinessKind = "retail",
+            orderedOn = "2026-09-11",
+            paidOn = "2026-09-11",
+            status = PurchaseRecordStatus.PAID,
+            totals = PurchaseRecordTotals(
+                subtotalAmountKrw = 1100,
+                discountAmountKrw = 0,
+                shippingAmountKrw = 0,
+                taxAmountKrw = 0,
+                grandTotalAmountKrw = 1100,
+                paidAmountKrw = 1100,
+            ),
+            payment = PurchaseRecordPayment(method = "card", status = "paid"),
+            lineItems = listOf(
+                PurchaseRecordLine(
+                    productClientKey = "product-client-1",
+                    description = "생수",
+                    quantity = 2.0,
+                    unitPriceAmountKrw = 550,
+                    grossAmountKrw = 1100,
+                    discountAmountKrw = 0,
+                    netAmountKrw = 1100,
+                ),
+            ),
+            evidence = listOf(
+                PurchaseRecordEvidence(
+                    sourceType = "order_history",
+                    sourceAttachmentIds = listOf("private-order-image"),
+                    field = "seller",
+                    observedValue = "공식 판매자",
+                ),
+            ),
+            confidence = 0.98,
+        )
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.PURCHASE,
+            source = IngestionSource(
+                producer = "chatgpt",
+                sourceFiles = listOf(SourceAttachment("private-order-image", SourceAttachmentType.ORDER_HISTORY)),
+                userText = "private statement",
+            ),
+            targets = setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION),
+            review = IngestionReview(
+                status = IngestionReviewStatus.READY,
+                verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+            ),
+            schemaVersion = YEONSIK_OCR_V4_SCHEMA,
+            purchaseRecords = listOf(record),
+        )
+
+        val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .submitPurchasePriceObservationsV4("purchase-request-key", envelope)
+        val success = result as PriceTraceCanonicalOutcome.Success
+        assertEquals("purchase-source-1", success.response["sources"]!!.jsonArray.single()
+            .jsonObject["purchaseSourceId"]?.jsonPrimitive?.content)
+
+        val request = transport.requests.single()
+        assertEquals(
+            "https://pricetrace.example.com/rest/v1/rpc/ingest_verified_purchase_price_observation_v1",
+            request.url,
+        )
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        assertEquals(setOf("p_idempotency_key", "p_purchase"), body.keys)
+        assertTrue(body["p_idempotency_key"]!!.jsonPrimitive.content != "purchase-request-key")
+        val purchase = body["p_purchase"]!!.jsonObject
+        assertEquals("purchase-price-observation.v4", purchase["schema_version"]?.jsonPrimitive?.content)
+        assertEquals("purchase-price.v4", purchase["contract_version"]?.jsonPrimitive?.content)
+        assertEquals("retail_purchase", purchase["kind"]?.jsonPrimitive?.content)
+        assertEquals("공식 판매자", purchase["seller"]!!.jsonObject["seller_name"]?.jsonPrimitive?.content)
+        assertEquals("line-1", purchase["items"]!!.jsonArray.single().jsonObject["line_key"]?.jsonPrimitive?.content)
+        assertFalse(purchase.containsKey("evidence"))
+        assertFalse(purchase.toString().contains("private-order-image"))
+        assertFalse(purchase.toString().contains("private statement"))
     }
 
     @Test

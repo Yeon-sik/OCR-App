@@ -3,12 +3,14 @@ package com.pricetrace.receiptscanner.ingestion
 import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
+import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
 
 const val YEONSIK_OCR_SCHEMA = "yeonsik-ocr.v1"
 const val YEONSIK_OCR_V2_SCHEMA = "yeonsik-ocr.v2"
 const val YEONSIK_OCR_V3_SCHEMA = "yeonsik-ocr.v3"
+const val YEONSIK_OCR_V4_SCHEMA = "yeonsik-ocr.v4"
 
 private val CANONICAL_EVIDENCE_SOURCE_TYPES = setOf(
     "product_photo",
@@ -36,6 +38,34 @@ private val PRICE_OBSERVATION_ATTACHMENT_BACKED_EVIDENCE_SOURCE_TYPES = setOf(
     "menu_photo",
     "food_photo",
 )
+private val PURCHASE_RECORD_EVIDENCE_SOURCE_TYPES = setOf(
+    "order_history",
+    "payment_history",
+    "user_statement",
+)
+private val PURCHASE_PAYMENT_STATUS_VALUES = setOf("pending", "paid", "refunded", "unknown")
+private val PURCHASE_PAYMENT_METHOD_VALUES = setOf(
+    "card",
+    "bank_transfer",
+    "mobile_payment",
+    "points",
+    "mixed",
+    "unknown",
+)
+private val PURCHASE_SELLER_BUSINESS_KINDS = setOf(
+    "retail",
+    "food_service",
+    "transport",
+    "accommodation",
+    "healthcare",
+    "professional_service",
+    "utility",
+    "government",
+    "financial",
+    "marketplace",
+    "other",
+    "unknown",
+)
 object IngestionArtifactKeys {
     const val RECEIPT = "receipt"
     const val MERCHANT_CANDIDATE = "merchant_candidate"
@@ -43,17 +73,20 @@ object IngestionArtifactKeys {
     const val CONSUMPTION = "consumption"
     const val PRODUCT_CANDIDATE = "product_candidate"
     const val PRICE_OBSERVATION = "price_observation"
+    const val PURCHASE_RECORD = "purchase_record"
 
     fun nutrition(clientKey: String): String = "nutrition:$clientKey"
     fun consumption(clientKey: String): String = "$CONSUMPTION:$clientKey"
     fun productCandidate(clientKey: String): String = "$PRODUCT_CANDIDATE:$clientKey"
     fun priceObservation(clientKey: String): String = "$PRICE_OBSERVATION:$clientKey"
+    fun purchaseRecord(clientKey: String): String = "$PURCHASE_RECORD:$clientKey"
 }
 
 enum class IngestionMode(val wireValue: String) {
     MERCHANT("merchant"),
     RESTAURANT("restaurant"),
     PACKAGED_PRODUCT("packaged_product"),
+    PURCHASE("purchase"),
     ;
 
     companion object {
@@ -68,6 +101,8 @@ enum class SourceAttachmentType(val wireValue: String) {
     FOOD_PHOTO("food_photo"),
     MENU_PHOTO("menu_photo"),
     PRODUCT_PHOTO("product_photo"),
+    ORDER_HISTORY("order_history"),
+    PAYMENT_HISTORY("payment_history"),
     ;
 
     companion object {
@@ -433,6 +468,314 @@ data class StandalonePriceObservation(
 
 typealias CanonicalPriceObservation = StandalonePriceObservation
 
+enum class PurchaseRecordStatus(val wireValue: String) {
+    UNKNOWN("unknown"),
+    ORDERED("ordered"),
+    PAID("paid"),
+    SHIPPED("shipped"),
+    DELIVERED("delivered"),
+    CANCELLED("cancelled"),
+    REFUNDED("refunded"),
+    ;
+
+    companion object {
+        fun fromWireValue(value: String): PurchaseRecordStatus = entries.firstOrNull {
+            it.wireValue == value
+        } ?: error("Unsupported purchase record status: $value")
+    }
+}
+
+data class PurchaseRecordPayment(
+    val method: String? = null,
+    val provider: String? = null,
+    val status: String? = null,
+) {
+    init {
+        require(method != null || provider != null || status != null) {
+            "purchase payment must contain at least one fact"
+        }
+        listOf(method, provider, status).forEach { value ->
+            require(value == null || value.isNotBlank()) {
+                "purchase payment facts must not be blank"
+            }
+            require(value == null || value.length <= 200) {
+                "purchase payment facts are too long"
+            }
+        }
+        require(status == null || status in PURCHASE_PAYMENT_STATUS_VALUES) {
+            "purchase payment status is not supported by CashOS/PriceTrace V4"
+        }
+        require(method == null || method in PURCHASE_PAYMENT_METHOD_VALUES) {
+            "purchase payment method is not supported by CashOS/PriceTrace V4"
+        }
+    }
+}
+
+data class PurchaseRecordTotals(
+    val subtotalAmountKrw: Long? = null,
+    val discountAmountKrw: Long? = null,
+    val shippingAmountKrw: Long? = null,
+    val taxAmountKrw: Long? = null,
+    val grandTotalAmountKrw: Long? = null,
+    val paidAmountKrw: Long? = null,
+) {
+    init {
+        require(listOf(
+            subtotalAmountKrw,
+            discountAmountKrw,
+            shippingAmountKrw,
+            taxAmountKrw,
+            grandTotalAmountKrw,
+            paidAmountKrw,
+        ).any { it != null }) { "purchase totals require at least one KRW fact" }
+        listOf(
+            subtotalAmountKrw,
+            discountAmountKrw,
+            shippingAmountKrw,
+            taxAmountKrw,
+            grandTotalAmountKrw,
+            paidAmountKrw,
+        ).forEach { value ->
+            require(value == null || value >= 0) {
+                "purchase totals must be non-negative KRW values"
+            }
+        }
+        if (grandTotalAmountKrw != null && paidAmountKrw != null) {
+            require(grandTotalAmountKrw == paidAmountKrw) {
+                "grand_total_amount_krw and paid_amount_krw conflict"
+            }
+        }
+        if (subtotalAmountKrw != null && discountAmountKrw != null &&
+            shippingAmountKrw != null && taxAmountKrw != null && grandTotalAmountKrw != null
+        ) {
+            require(subtotalAmountKrw - discountAmountKrw + shippingAmountKrw + taxAmountKrw == grandTotalAmountKrw) {
+                "purchase totals do not reconcile"
+            }
+        }
+    }
+
+    /** CashOS requires one authoritative transaction amount; no amount is invented here. */
+    val cashOsAmountKrw: Long?
+        get() = paidAmountKrw ?: grandTotalAmountKrw
+}
+
+data class PurchaseRecordLine(
+    val lineKey: String? = null,
+    val productClientKey: String? = null,
+    val description: String? = null,
+    val sellerOverride: String? = null,
+    val optionText: String? = null,
+    val priceStatus: String = "itemized",
+    val merchantSku: String? = null,
+    val quantity: Double? = null,
+    val unitPriceAmountKrw: Long? = null,
+    val grossAmountKrw: Long? = null,
+    val discountAmountKrw: Long? = null,
+    val netAmountKrw: Long? = null,
+) {
+    init {
+        require(lineKey == null || lineKey.isNotBlank())
+        require(lineKey == null || lineKey.length <= 200)
+        require(!description.isNullOrBlank()) {
+            "purchase line description is required for downstream evidence contracts"
+        }
+        require(description.length <= 500)
+        require(productClientKey == null || productClientKey.isNotBlank())
+        require(productClientKey == null || productClientKey.length <= 200)
+        require(sellerOverride == null || sellerOverride.isNotBlank())
+        require(sellerOverride == null || sellerOverride.length <= 500)
+        require(optionText == null || optionText.isNotBlank())
+        require(optionText == null || optionText.length <= 500)
+        require(priceStatus in setOf("itemized", "ambiguous", "unknown")) {
+            "purchase line price_status is invalid"
+        }
+        require(merchantSku == null || merchantSku.isNotBlank())
+        require(merchantSku == null || merchantSku.length <= 300)
+        require(merchantSku == null || merchantSku != productClientKey) {
+            "merchant_sku cannot reuse product_client_key"
+        }
+        require(quantity == null || quantity.isFinite() && quantity > 0.0) {
+            "purchase line quantity must be positive when present"
+        }
+        listOf(unitPriceAmountKrw, grossAmountKrw, discountAmountKrw, netAmountKrw).forEach { value ->
+            require(value == null || value >= 0) {
+                "purchase line price facts must be non-negative KRW values"
+            }
+        }
+        if (grossAmountKrw != null && discountAmountKrw != null) {
+            require(discountAmountKrw <= grossAmountKrw) {
+                "purchase line discount cannot exceed gross"
+            }
+        }
+        if (grossAmountKrw != null && netAmountKrw != null) {
+            require(grossAmountKrw >= netAmountKrw) {
+                "purchase line gross cannot be below net"
+            }
+        }
+        if (quantity != null && unitPriceAmountKrw != null && netAmountKrw != null) {
+            require(
+                BigDecimal(quantity.toString())
+                    .multiply(BigDecimal.valueOf(unitPriceAmountKrw))
+                    .compareTo(BigDecimal.valueOf(netAmountKrw)) == 0,
+            ) { "purchase line quantity times unit price must equal net" }
+        }
+        if (grossAmountKrw != null && discountAmountKrw != null && netAmountKrw != null) {
+            require(grossAmountKrw - discountAmountKrw == netAmountKrw) {
+                "purchase line gross minus discount must equal net"
+            }
+        }
+    }
+}
+
+data class PurchaseRecordEvidence(
+    val sourceType: String,
+    val sourceAttachmentIds: List<String> = emptyList(),
+    val sourceRef: String? = null,
+    val field: String,
+    val observedValue: String? = null,
+) {
+    init {
+        require(sourceType in PURCHASE_RECORD_EVIDENCE_SOURCE_TYPES) {
+            "unsupported purchase record evidence source type"
+        }
+        require(sourceAttachmentIds.distinct().size == sourceAttachmentIds.size) {
+            "purchase record evidence attachment IDs must be unique"
+        }
+        require(sourceAttachmentIds.all(String::isNotBlank)) {
+            "purchase record evidence attachment IDs must be non-empty"
+        }
+        if (sourceType in setOf("order_history", "payment_history")) {
+            require(sourceAttachmentIds.isNotEmpty()) {
+                "history evidence requires source attachment IDs"
+            }
+        }
+        require(sourceRef == null || sourceRef.isNotBlank()) {
+            "purchase record evidence source_ref must not be blank"
+        }
+        require(field.isNotBlank()) { "purchase record evidence field is required" }
+        require(observedValue == null || observedValue.isNotBlank()) {
+            "purchase record evidence observed_value must not be blank"
+        }
+    }
+}
+
+enum class PurchaseRecordKind {
+    RETAIL,
+    RESTAURANT,
+    PAYMENT_ONLY,
+}
+
+data class PurchaseRecord(
+    val clientKey: String,
+    val platform: String,
+    val platformCode: String? = null,
+    val seller: String? = null,
+    val sellerBranchName: String? = null,
+    val sellerSourceNamespace: String? = null,
+    val sellerSourceCode: String? = null,
+    val sellerBusinessKind: String? = null,
+    val sourceVersion: String? = null,
+    val orderReference: String? = null,
+    val orderedOn: String? = null,
+    val orderedAt: String? = null,
+    val paidOn: String? = null,
+    val paidAt: String? = null,
+    val status: PurchaseRecordStatus = PurchaseRecordStatus.UNKNOWN,
+    val currency: String = "KRW",
+    val totals: PurchaseRecordTotals,
+    val payment: PurchaseRecordPayment? = null,
+    val lineItems: List<PurchaseRecordLine> = emptyList(),
+    val evidence: List<PurchaseRecordEvidence>,
+    val confidence: Double,
+) {
+    init {
+        require(clientKey.isNotBlank()) { "purchase record client_key is required" }
+        require(platform.isNotBlank()) { "purchase record platform is required" }
+        require(platform.length <= 100)
+        require(platformCode == null || platformCode.isNotBlank())
+        require(platformCode == null || platformCode.length <= 100)
+        require(seller == null || seller.isNotBlank())
+        require(seller == null || seller.length <= 500)
+        require(sellerBranchName == null || sellerBranchName.isNotBlank())
+        require(sellerBranchName == null || sellerBranchName.length <= 300)
+        require(sellerSourceNamespace == null || sellerSourceNamespace.isNotBlank())
+        require(sellerSourceNamespace == null || sellerSourceNamespace.length <= 200)
+        require(sellerSourceCode == null || sellerSourceCode.isNotBlank())
+        require(sellerSourceCode == null || sellerSourceCode.length <= 300)
+        require(sellerBusinessKind == null || sellerBusinessKind in PURCHASE_SELLER_BUSINESS_KINDS)
+        require(sourceVersion == null || sourceVersion.isNotBlank())
+        require(sourceVersion == null || sourceVersion.length <= 100)
+        require(orderReference == null || orderReference.isNotBlank())
+        require(orderReference == null || orderReference.length <= 200)
+        require(seller == null || !platform.trim().equals(seller.trim(), ignoreCase = true)) {
+            "purchase record platform and seller must be distinct"
+        }
+        require(seller == null || (sellerSourceNamespace == null) == (sellerSourceCode == null)) {
+            "seller source namespace and code must be provided together"
+        }
+        require(seller != null || sellerBranchName == null)
+        require(seller != null || sellerSourceNamespace == null)
+        require(seller != null || sellerSourceCode == null)
+        require(seller != null || sellerBusinessKind == null)
+        require(currency == "KRW") { "purchase record currency must be KRW" }
+        validateDate(orderedOn, "ordered_on")
+        validateDate(orderedAt, "ordered_at", timestamp = true)
+        validateDate(paidOn, "paid_on")
+        validateDate(paidAt, "paid_at", timestamp = true)
+        if (orderedOn != null && orderedAt != null) {
+            require(LocalDate.parse(orderedOn) == OffsetDateTime.parse(orderedAt).toLocalDate()) {
+                "ordered_on and ordered_at must refer to the same date"
+            }
+        }
+        if (paidOn != null && paidAt != null) {
+            require(LocalDate.parse(paidOn) == OffsetDateTime.parse(paidAt).toLocalDate()) {
+                "paid_on and paid_at must refer to the same date"
+            }
+        }
+        require(lineItems.size <= 500) { "purchase record has too many lines" }
+        require(evidence.isNotEmpty()) { "purchase record evidence is required" }
+        require(confidence.isFinite() && confidence in 0.0..1.0) {
+            "purchase record confidence must be between 0 and 1"
+        }
+        lineItems.forEach { line ->
+            require(line.sellerOverride == null ||
+                !platform.trim().equals(line.sellerOverride.trim(), ignoreCase = true)) {
+                "purchase line seller override must differ from platform"
+            }
+        }
+    }
+
+    val kind: PurchaseRecordKind
+        get() = when {
+            lineItems.isEmpty() -> PurchaseRecordKind.PAYMENT_ONLY
+            lineItems.any { it.productClientKey != null } -> PurchaseRecordKind.RETAIL
+            else -> PurchaseRecordKind.RESTAURANT
+        }
+
+    val priceObservationEligible: Boolean
+        get() = kind != PurchaseRecordKind.PAYMENT_ONLY && (orderedOn != null || paidOn != null)
+
+    val cashOsTransactionEligible: Boolean
+        get() = totals.cashOsAmountKrw != null && (paidOn != null || orderedOn != null)
+
+    private fun validateDate(value: String?, key: String, timestamp: Boolean = false) {
+        value ?: return
+        require(value.isNotBlank()) { "$key must not be blank" }
+        if (timestamp) {
+            require(runCatching { OffsetDateTime.parse(value) }.isSuccess) { "$key must be an ISO timestamp" }
+        } else {
+            require(runCatching { LocalDate.parse(value) }.isSuccess) { "$key must be an ISO date" }
+        }
+    }
+}
+
+fun PurchaseRecord.conflictFields(): Set<String> = evidence
+    .filter { !it.observedValue.isNullOrBlank() }
+    .groupBy { it.field }
+    .mapValues { (_, facts) -> facts.map { it.observedValue!!.trim() }.distinct() }
+    .filterValues { it.size > 1 }
+    .keys
+
 sealed interface IngestionNutrition {
     val clientKey: String
     val lineId: String?
@@ -574,6 +917,7 @@ data class IngestionConsumption(
 enum class IngestionReviewStatus(val wireValue: String) {
     READY("ready"),
     NEEDS_REVIEW("needs_review"),
+    CONFLICT("conflict"),
     BLOCKED("blocked"),
 }
 
@@ -602,6 +946,7 @@ data class YeonsikOcrEnvelope(
     val productCandidates: List<ProductCandidate> = emptyList(),
     val schemaVersion: String = YEONSIK_OCR_SCHEMA,
     val priceObservations: List<StandalonePriceObservation> = emptyList(),
+    val purchaseRecords: List<PurchaseRecord> = emptyList(),
 ) {
     init {
         require(priceObservations.map { it.clientKey }.distinct().size == priceObservations.size) {
@@ -612,6 +957,21 @@ data class YeonsikOcrEnvelope(
         }
         require(receipt == null || priceObservations.isEmpty()) {
             "standalone price observations cannot be combined with receipt"
+        }
+        require(purchaseRecords.map { it.clientKey }.distinct().size == purchaseRecords.size) {
+            "purchase record client_key values must be unique"
+        }
+        require(purchaseRecords.isEmpty() || schemaVersion == YEONSIK_OCR_V4_SCHEMA) {
+            "purchase records require yeonsik-ocr.v4"
+        }
+        require(purchaseRecords.isEmpty() || mode == IngestionMode.PURCHASE) {
+            "purchase records require purchase mode"
+        }
+        require(purchaseRecords.isEmpty() || receipt == null) {
+            "purchase records cannot be combined with receipt"
+        }
+        require(purchaseRecords.isEmpty() || priceObservations.isEmpty()) {
+            "purchase records cannot be combined with legacy price observations"
         }
     }
 }
@@ -626,6 +986,7 @@ enum class IngestionProjection(val wireValue: String) {
     /** Fitness-owned persistence projection; the v2 wire contract names its target by sink. */
     FITNESS_PRODUCT_NUTRITION_LINK("pricetrace_product_nutrition_link"),
     CASHOS_RECEIPT("cashos_receipt"),
+    CASHOS_TRANSACTION("cashos_transaction"),
     ;
 
     companion object {

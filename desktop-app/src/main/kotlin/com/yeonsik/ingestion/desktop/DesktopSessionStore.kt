@@ -107,17 +107,24 @@ class DesktopSessionStore(
         }
     }
 
-    fun copyEvidence(ingestionId: String, source: Path, type: SourceAttachmentType, pageId: String? = null): DesktopEvidenceAttachment {
+    fun copyEvidence(
+        ingestionId: String,
+        source: Path,
+        type: SourceAttachmentType,
+        pageId: String? = null,
+        attachmentId: String? = null,
+    ): DesktopEvidenceAttachment {
         require(source.isRegularFile() && Files.isReadable(source)) { "Evidence file is not readable: $source" }
-        val attachmentId = UUID.randomUUID().toString()
+        val resolvedAttachmentId = attachmentId?.trim()?.takeIf(String::isNotBlank) ?: UUID.randomUUID().toString()
         val sourceExtension = source.extension.lowercase().filter { it.isLetterOrDigit() }.take(12)
         val destinationDirectory = directory.resolve("evidence").resolve(safeId(ingestionId))
         Files.createDirectories(destinationDirectory)
+        val storedFileId = UUID.randomUUID().toString()
         val destination = destinationDirectory.resolve(
-            if (sourceExtension.isBlank()) "$attachmentId.bin" else "$attachmentId.$sourceExtension",
+            if (sourceExtension.isBlank()) "$storedFileId.bin" else "$storedFileId.$sourceExtension",
         )
         Files.copy(source, destination, REPLACE_EXISTING)
-        return DesktopEvidenceAttachment(attachmentId, type, destination, pageId)
+        return DesktopEvidenceAttachment(resolvedAttachmentId, type, destination, pageId)
     }
 
     private fun allRecords(): List<DesktopSessionRecord> = Files.list(directory).use { stream ->

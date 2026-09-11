@@ -117,6 +117,48 @@ class AndroidCanonicalJsonValidatorTest {
         )
     }
 
+    @Test
+    fun `android validator imports purchase v4 and submits CashOS without creating Fitness`() = runBlocking {
+        val order = mutableListOf<IngestionProjection>()
+        val cashOs = RecordingSubmitter(order)
+        val priceTrace = RecordingSubmitter(order)
+        val useCase = CanonicalIngestionUseCase(
+            store = InMemoryIngestionSessionStore(),
+            submitters = mapOf(
+                IngestionProjection.CASHOS_TRANSACTION to cashOs,
+                IngestionProjection.PRICETRACE_PRICE_OBSERVATION to priceTrace,
+            ),
+        )
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = useCase,
+            newLocalDocumentId = { "android-purchase-v4-document" },
+            newIngestionId = { "android-purchase-v4-ingestion" },
+        )
+
+        var state = validator.importJson(
+            readExample("yeonsik-ocr.v4.purchase.text-only.example.json"),
+            AndroidCanonicalJsonValidatorState(),
+        )
+        assertEquals("yeonsik-ocr.v4", state.envelope?.schemaVersion)
+        assertEquals(setOf(IngestionProjection.CASHOS_TRANSACTION), state.plan?.eligible)
+        assertEquals(setOf(IngestionProjection.CASHOS_TRANSACTION), state.selectedProjections)
+
+        state = validator.confirm(state)
+        assertEquals(IngestionReviewStatus.READY, state.envelope?.review?.status)
+        state = validator.submit(state)
+
+        assertEquals(listOf(IngestionProjection.CASHOS_TRANSACTION), order)
+        val session = requireNotNull(state.session)
+        assertEquals(
+            com.pricetrace.receiptscanner.ingestion.ProjectionStatus.UPLOADED,
+            session.projections.single { it.projection == IngestionProjection.CASHOS_TRANSACTION }.status,
+        )
+        assertTrue(session.projections.single { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }
+            .status == com.pricetrace.receiptscanner.ingestion.ProjectionStatus.DISABLED)
+        assertTrue(session.projections.single { it.projection == IngestionProjection.FITNESS_NUTRITION }
+            .status == com.pricetrace.receiptscanner.ingestion.ProjectionStatus.DISABLED)
+    }
+
     private class RecordingSubmitter(
         private val order: MutableList<IngestionProjection>,
     ) : IngestionProjectionSubmitter {

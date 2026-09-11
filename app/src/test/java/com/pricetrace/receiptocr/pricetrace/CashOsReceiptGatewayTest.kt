@@ -8,6 +8,9 @@ import com.pricetrace.receiptscanner.publisher.CashOsReceiptSubmitItem
 import com.pricetrace.receiptscanner.publisher.CashOsReceiptSubmitPayload
 import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
 import com.pricetrace.receiptscanner.publisher.CashOsReceiptSubmitResult
+import com.pricetrace.receiptscanner.publisher.CashOsTransactionV4Contract
+import com.pricetrace.receiptscanner.publisher.CashOsTransactionV4Item
+import com.pricetrace.receiptscanner.publisher.CashOsTransactionV4Payload
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -128,6 +131,77 @@ class CashOsReceiptGatewayTest {
         assertEquals(-30, items[1]["net_amount_krw"]?.jsonPrimitive?.intOrNull)
         assertEquals(-20, items[2]["net_amount_krw"]?.jsonPrimitive?.intOrNull)
         assertEquals(-5, items[3]["net_amount_krw"]?.jsonPrimitive?.intOrNull)
+    }
+
+    @Test
+    fun ingestTransactionV4UsesTheFlatConfirmedRpcContract() = runTest {
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(
+                200,
+                """[{"ledger_entry_id":"ledger-v4-1","transaction_id":"transaction-v4-1","replayed":false,"item_count":1,"category_id":null,"account_id":null,"category_resolution":"unresolved","account_resolution":"unresolved","account_candidate_ids":[]}]""",
+            ),
+        )
+        val payload = CashOsTransactionV4Payload(
+            contract = CashOsTransactionV4Contract(),
+            idempotencyKey = "cashos-v4-key",
+            documentId = "purchase-document-1",
+            transactionRevision = "revision-1",
+            revisionSeq = 2,
+            transactionFingerprint = "b".repeat(64),
+            platform = "쿠팡",
+            seller = null,
+            orderedLocalDate = null,
+            paidLocalDate = "2026-09-11",
+            grandTotalAmountKrw = 1100,
+            grossAmountKrw = null,
+            discountAmountKrw = null,
+            feeAmountKrw = null,
+            paymentMethodHint = "card",
+            accountHint = null,
+            institutionHint = "bank",
+            categoryHint = "shopping",
+            items = listOf(
+                CashOsTransactionV4Item(
+                    transactionItemId = "line-1",
+                    lineOrdinal = 1,
+                    descriptionSnapshot = "생수",
+                    quantity = "2",
+                    unitPriceKrw = 550,
+                    grossAmountKrw = 1100,
+                    netAmountKrw = 1100,
+                ),
+            ),
+        )
+
+        val result = CashOsReceiptGateway(FakeStore(signedIn()), transport).ingestTransactionV4(payload)
+        val success = result as PriceObservationReadOutcome.Success
+        assertEquals("transaction-v4-1", success.value.transactionId)
+        assertEquals("ledger-v4-1", success.value.ledgerEntryId)
+
+        val request = transport.requests.single()
+        assertEquals(
+            "https://cashos.example.com/rest/v1/rpc/finance_ingest_transaction_v4",
+            request.url,
+        )
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        assertEquals(
+            setOf(
+                "p_contract_version", "p_idempotency_key", "p_document_id", "p_transaction_revision",
+                "p_revision_seq", "p_transaction_fingerprint", "p_platform", "p_seller",
+                "p_ordered_local_date", "p_paid_local_date", "p_grand_total_amount_krw",
+                "p_gross_amount_krw", "p_discount_amount_krw", "p_fee_amount_krw",
+                "p_payment_method_hint", "p_account_hint", "p_institution_hint", "p_category_hint",
+                "p_category_id", "p_account_id", "p_price_trace_store_id", "p_items",
+            ),
+            body.keys,
+        )
+        assertEquals("cashos.transaction-ingest.v4", body["p_contract_version"]?.jsonPrimitive?.content)
+        assertEquals("purchase-document-1", body["p_document_id"]?.jsonPrimitive?.content)
+        assertEquals(JsonNull, body["p_seller"])
+        assertEquals(JsonNull, body["p_ordered_local_date"])
+        assertEquals("2026-09-11", body["p_paid_local_date"]?.jsonPrimitive?.content)
+        assertEquals("2", body["p_items"]!!.jsonArray.single().jsonObject["quantity"]?.jsonPrimitive?.content)
+        assertTrue(body["p_items"]!!.jsonArray.single().jsonObject["quantity"]!!.jsonPrimitive.isString)
     }
 
     @Test

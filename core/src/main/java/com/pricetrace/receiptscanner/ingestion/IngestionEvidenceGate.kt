@@ -32,6 +32,18 @@ object IngestionEvidenceGate {
     ): IngestionEvidenceResult {
         val domainIssues = CanonicalEnvelopeValidator.validate(envelope)
         if (domainIssues.isNotEmpty()) return IngestionEvidenceResult(false, domainIssues)
+        val conflictedPurchaseRecords = envelope.purchaseRecords.filter { record ->
+            artifactKeys == null ||
+                IngestionArtifactKeys.purchaseRecord(record.clientKey) in artifactKeys
+        }
+        val purchaseConflictIssues = conflictedPurchaseRecords.flatMap { record ->
+            record.conflictFields().map { field ->
+                "purchase_evidence_conflict:${record.clientKey}:$field"
+            }
+        }.distinct()
+        if (purchaseConflictIssues.isNotEmpty()) {
+            return IngestionEvidenceResult(false, purchaseConflictIssues)
+        }
         if (verificationBasis == VerificationBasis.MANUAL_CANONICAL_REVIEW) {
             return if (explicitUserConfirmation) {
                 IngestionEvidenceResult(isAllowed = true)
@@ -39,6 +51,8 @@ object IngestionEvidenceGate {
                 IngestionEvidenceResult(false, listOf("manual_canonical_confirmation_required"))
             }
         }
+        val purchaseEvidenceResult = evaluatePurchaseEvidence(envelope, evidence, artifactKeys)
+        if (purchaseEvidenceResult != null) return purchaseEvidenceResult
         val requiredTypes = requiredEvidenceTypes(envelope, artifactKeys)
         val scopedEvidence = if (artifactKeys == null) {
             evidence
@@ -56,6 +70,50 @@ object IngestionEvidenceGate {
         val types = scopedEvidence.filter(LocalEvidence::fileReadable).map(LocalEvidence::type).toSet()
         val missing = requiredTypes - types
         return IngestionEvidenceResult(missing.isEmpty(), missing.map { "${it.wireValue}_image_required" })
+    }
+
+    /**
+     * Purchase evidence is not a receipt image: a history screenshot and/or a user statement
+     * can support the same canonical record. Each referenced screenshot still has to be locally
+     * readable; a free-text statement never fabricates a local attachment.
+     */
+    private fun evaluatePurchaseEvidence(
+        envelope: YeonsikOcrEnvelope,
+        evidence: List<LocalEvidence>,
+        artifactKeys: Set<String>?,
+    ): IngestionEvidenceResult? {
+        val selected = envelope.purchaseRecords.filter { record ->
+            artifactKeys == null ||
+                IngestionArtifactKeys.purchaseRecord(record.clientKey) in artifactKeys
+        }
+        if (selected.isEmpty()) return null
+        val localById = evidence.associateBy(LocalEvidence::attachmentId)
+        val referenced = selected.flatMap { record ->
+            record.evidence.flatMap { it.sourceAttachmentIds }
+        }.distinct()
+        val missing = referenced.filter { it !in localById }
+        if (missing.isNotEmpty()) {
+            return IngestionEvidenceResult(
+                false,
+                missing.map { "purchase_evidence_attachment_required:$it" },
+            )
+        }
+        val unreadable = referenced.filter { localById[it]?.fileReadable != true }
+        if (unreadable.isNotEmpty()) {
+            return IngestionEvidenceResult(
+                false,
+                unreadable.map { "purchase_evidence_attachment_unreadable:$it" },
+            )
+        }
+        val hasUserStatement = selected.any { record ->
+            record.evidence.any { item ->
+                item.sourceType == "user_statement" && !envelope.source.userText.isNullOrBlank()
+            }
+        }
+        if (referenced.isEmpty() && !hasUserStatement) {
+            return IngestionEvidenceResult(false, listOf("purchase_evidence_required"))
+        }
+        return IngestionEvidenceResult(true)
     }
 
     private fun requiredEvidenceTypes(

@@ -103,7 +103,33 @@ class DesktopIngestionController(
         try {
             val current = _state.value
             val session = current.session ?: error("Import JSON before attaching evidence.")
-            val added = paths.map { path -> store.copyEvidence(session.ingestionId, path, type, pageId) }
+            val envelope = currentEnvelope()
+            val isV4Purchase = envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA
+            val v4SourceIds = if (isV4Purchase) {
+                envelope.source.sourceFiles.filter { it.type == type }.map { it.id }
+            } else {
+                emptyList()
+            }
+            val usedIds = current.evidence.map { it.attachmentId }.toMutableSet()
+            if (isV4Purchase) {
+                require(v4SourceIds.isNotEmpty()) {
+                    "No V4 source file is declared for evidence type ${type.wireValue}."
+                }
+                require(paths.size <= v4SourceIds.count { it !in usedIds }) {
+                    "Too many evidence files for V4 source type ${type.wireValue}."
+                }
+            }
+            val added = paths.map { path ->
+                val logicalId = if (isV4Purchase) {
+                    v4SourceIds.firstOrNull { it !in usedIds }
+                        ?: error("No unused V4 source file is available for evidence type ${type.wireValue}.")
+                } else {
+                    null
+                }
+                val copied = store.copyEvidence(session.ingestionId, path, type, pageId, logicalId)
+                usedIds += copied.attachmentId
+                copied
+            }
             val evidence = current.evidence + added
             val localEvidence = evidence.map(::toLocalEvidence)
             val savedSession = session.copy(
@@ -389,6 +415,9 @@ class DesktopIngestionController(
         envelope.consumption.forEach { addArtifact(IngestionArtifactKeys.consumption(it.clientKey), "Consumption: ${it.clientKey}") }
         envelope.productCandidates.forEach {
             addArtifact(IngestionArtifactKeys.productCandidate(it.clientKey), "Product: ${it.clientKey}")
+        }
+        envelope.purchaseRecords.forEach {
+            addArtifact(IngestionArtifactKeys.purchaseRecord(it.clientKey), "Purchase: ${it.platform}")
         }
     }
 

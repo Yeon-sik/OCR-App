@@ -21,7 +21,8 @@
 | 실제 영수증 정확도 측정 | 정량 미측정 | 사용자 수동 표본에서 결함을 확인했지만 개인정보 원문을 저장소 테스트 fixture로 사용하지 않음 |
 | Gemini 교정 계약·정책 | 단위 테스트 통과 | 전송 최소화, 허용 필드, OCR 근거, stale 값, 산술 보존식, 개별 승인 규칙을 합성 입력으로 검증 |
 | Gemini Developer API 직접 연결 | 구현·가짜 HTTP 단위 테스트 통과, 실호출 미검증 | 키 없는 로컬 테스트만 실행했으며 실제 키·네트워크·할당량은 사용하지 않음 |
-| PriceTrace 서버 연결 | 미구현 | `receipt.v2` 로컬 저장·공유까지만 제공하며 `LocalOnlyReceiptPublisher` 유지 |
+| PriceTrace 서버 연결 | receipt.v2는 로컬 전용, purchase V4 adapter 구현 | `receipt.v2` publisher는 기존 `LocalOnlyReceiptPublisher`를 유지하며, `purchase` mode는 별도 PriceTrace V4 RPC gateway를 사용한다. live RPC/RLS는 미검증 |
+| CashOS transaction V4 연결 | adapter 구현, live 미검증 | payment/order purchase를 별도 CashOS transaction RPC로 보내는 flat contract mapper와 fake HTTP 테스트를 포함하며, 실제 Auth/RLS/원격 migration은 미검증 |
 | Fitness Nutrition DB 직접 저장 | 구현·가짜 HTTP 단위 테스트 통과, 실연결 미검증 | 비밀번호 로그인, 암호화 토큰, 401 refresh 1회, owner/private 행, revision 충돌 방지를 합성 응답으로 검증 |
 
 ## 두 워크플로
@@ -187,6 +188,7 @@ Gemini 교정은 `.env`의 키가 빌드된 개인용 APK에서 자동 활성화
 - [Gemini 교정 제안 설정](docs/GEMINI_CORRECTION_SETUP.md)
 - [Fitness 영양성분 검수·DB 저장](docs/FITNESS_NUTRITION_WORKFLOW.md)
 - [PriceTrace Capacitor 연결 설계](docs/PRICETRACE_CAPACITOR_INTEGRATION.md)
+- [yeonsik-ocr.v4 구매 evidence 및 PriceTrace/CashOS routing](docs/YEONSIK_OCR_V4_PURCHASE_EVIDENCE.md)
 - [알려진 제한사항](docs/KNOWN_LIMITATIONS.md)
 - [합성 receipt.v2 예제](examples/receipt.v2.example.json)
 

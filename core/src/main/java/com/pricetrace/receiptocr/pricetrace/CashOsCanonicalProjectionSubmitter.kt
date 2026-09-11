@@ -2,6 +2,7 @@ package com.pricetrace.receiptocr.pricetrace
 
 import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.domain.ReceiptV2LineItem
+import com.pricetrace.receiptscanner.domain.StableIds
 import com.pricetrace.receiptscanner.domain.purchaseLocalTime
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
@@ -10,9 +11,15 @@ import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentity
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
+import com.pricetrace.receiptscanner.ingestion.PurchaseRecord
+import com.pricetrace.receiptscanner.ingestion.PurchaseRecordLine
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV4Json
 import com.pricetrace.receiptscanner.publisher.CashOsReceiptIngestV3Item
 import com.pricetrace.receiptscanner.publisher.CashOsReceiptIngestV3Payload
 import com.pricetrace.receiptscanner.publisher.CashOsReceiptIngestV3Response
+import com.pricetrace.receiptscanner.publisher.CashOsTransactionV4Item
+import com.pricetrace.receiptscanner.publisher.CashOsTransactionV4Payload
+import com.pricetrace.receiptscanner.publisher.CashOsTransactionV4Response
 import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonArray
@@ -20,12 +27,16 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import java.time.OffsetDateTime
+import java.math.BigDecimal
 
 /** Maps a verified OCR receipt to CashOS's authenticated v3 RPC only. */
 class CashOsCanonicalProjectionSubmitter(
     private val gateway: CashOsReceiptGateway,
 ) : IngestionProjectionSubmitter {
     override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+        if (request.projection == IngestionProjection.CASHOS_TRANSACTION) {
+            return submitTransactionV4(request)
+        }
         if (request.projection != IngestionProjection.CASHOS_RECEIPT) {
             return ProjectionSubmission.Failure("unsupported_cashos_projection", retryable = false)
         }
@@ -60,6 +71,135 @@ class CashOsCanonicalProjectionSubmitter(
         } catch (error: Exception) {
             ProjectionSubmission.Failure(error.message ?: "cashos_projection_failed", retryable = true)
         }
+    }
+
+    private suspend fun submitTransactionV4(request: ProjectionRequest): ProjectionSubmission {
+        val envelope = request.envelope
+            ?: return ProjectionSubmission.Failure("canonical_envelope_missing", retryable = false)
+        val localDocumentId = request.localDocumentId
+            ?: return ProjectionSubmission.Failure("local_document_id_missing", retryable = false)
+        val records = envelope.purchaseRecords.filter { it.cashOsTransactionEligible }
+        if (records.isEmpty()) {
+            return ProjectionSubmission.Failure("cashos_transaction_artifact_missing", retryable = false)
+        }
+        return try {
+            val responses = records.map { record ->
+                val recordJson = YeonsikOcrV4Json.encodePurchaseRecord(record).toString()
+                val recordIdempotencyKey = StableIds.sha256(
+                    request.idempotencyKey + "|purchase_record=" + record.clientKey,
+                )
+                val recordFingerprint = StableIds.sha256("cashos-transaction-source|" + recordJson)
+                val recordRevision = StableIds.sha256("cashos-transaction-revision|" + recordJson)
+                val recordDocumentId = if (records.size == 1) {
+                    localDocumentId
+                } else {
+                    StableIds.sha256(
+                        "cashos-transaction-document|" + localDocumentId + "|" + record.clientKey,
+                    )
+                }
+                val payload = toTransactionPayload(
+                    request = request,
+                    record = record,
+                    idempotencyKey = recordIdempotencyKey,
+                    documentId = recordDocumentId,
+                    transactionRevision = recordRevision,
+                    transactionFingerprint = recordFingerprint,
+                    categoryHint = envelope.classificationHints["cashos.category_hint"],
+                    paymentMethodHint = record.payment?.method
+                        ?: envelope.classificationHints["cashos.payment_method_hint"],
+                    institutionHint = envelope.classificationHints["cashos.institution_hint"],
+                )
+                when (val result = gateway.ingestTransactionV4(payload)) {
+                    is PriceObservationReadOutcome.Success -> result.value
+                    is PriceObservationReadOutcome.Failure -> return ProjectionSubmission.Failure(
+                        message = result.message ?: result.kind.name,
+                        retryable = result.kind.retryable,
+                    )
+                }
+            }
+            val metadata = buildJsonObject {
+                put("schemaVersion", JsonPrimitive("cashos.transaction-ingest.v4"))
+                put("transactions", JsonArray(responses.map(CashOsTransactionV4Response::raw)))
+            }.toString()
+            ProjectionSubmission.Success(
+                remoteId = responses.first().transactionId,
+                metadataJson = metadata,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: IllegalArgumentException) {
+            ProjectionSubmission.Failure(error.message ?: "cashos_transaction_contract_invalid", retryable = false)
+        } catch (error: Exception) {
+            ProjectionSubmission.Failure(error.message ?: "cashos_transaction_failed", retryable = true)
+        }
+    }
+
+    private fun toTransactionPayload(
+        request: ProjectionRequest,
+        record: PurchaseRecord,
+        idempotencyKey: String,
+        documentId: String,
+        transactionRevision: String,
+        transactionFingerprint: String,
+        categoryHint: String?,
+        paymentMethodHint: String?,
+        institutionHint: String?,
+    ): CashOsTransactionV4Payload {
+        val grandTotal = record.totals.cashOsAmountKrw
+            ?: error("cashos_transaction_grand_total_missing")
+        val gross = record.totals.subtotalAmountKrw
+        val discount = record.totals.discountAmountKrw
+        val shipping = record.totals.shippingAmountKrw
+        val fee = shipping?.takeIf {
+            gross != null && discount != null && gross - discount + it == grandTotal
+        }
+        val sellerOverrides = record.lineItems.mapNotNull(PurchaseRecordLine::sellerOverride).distinct()
+        val seller = record.seller ?: sellerOverrides.singleOrNull()
+        require(sellerOverrides.isEmpty() || sellerOverrides.all {
+            seller?.equals(it, ignoreCase = true) == true
+        }) { "CashOS V4 cannot represent conflicting line seller overrides" }
+        return CashOsTransactionV4Payload(
+            contract = com.pricetrace.receiptscanner.publisher.CashOsTransactionV4Contract(),
+            idempotencyKey = idempotencyKey,
+            documentId = documentId,
+            transactionRevision = transactionRevision,
+            revisionSeq = request.revisionSeq,
+            transactionFingerprint = transactionFingerprint,
+            platform = record.platform,
+            seller = seller,
+            orderedLocalDate = record.orderedOn,
+            paidLocalDate = record.paidOn,
+            grandTotalAmountKrw = grandTotal,
+            grossAmountKrw = gross,
+            discountAmountKrw = discount,
+            feeAmountKrw = fee,
+            paymentMethodHint = paymentMethodHint,
+            accountHint = null,
+            institutionHint = institutionHint,
+            categoryHint = categoryHint,
+            items = record.lineItems.mapIndexed(::toTransactionItem),
+        )
+    }
+
+    private fun toTransactionItem(index: Int, line: PurchaseRecordLine): CashOsTransactionV4Item {
+        val description = line.description?.takeIf(String::isNotBlank)
+            ?: error("cashos_transaction_line_description_missing")
+        val quantity = line.quantity?.let {
+            BigDecimal.valueOf(it).stripTrailingZeros().toPlainString()
+        }
+        return CashOsTransactionV4Item(
+            transactionItemId = line.lineKey ?: "line-" + (index + 1),
+            lineOrdinal = index + 1,
+            descriptionSnapshot = description,
+            quantity = quantity,
+            unit = null,
+            unitPriceKrw = line.unitPriceAmountKrw,
+            grossAmountKrw = line.grossAmountKrw,
+            discountAmountKrw = line.discountAmountKrw,
+            feeAmountKrw = null,
+            netAmountKrw = line.netAmountKrw,
+            lineType = "product",
+        )
     }
 
     private fun toPayload(
