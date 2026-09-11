@@ -2,7 +2,8 @@ package com.pricetrace.receiptscanner.publisher
 
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecord
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecordLine
-import com.pricetrace.receiptscanner.ingestion.PurchaseRecordKind
+import com.pricetrace.receiptscanner.ingestion.PurchaseKind
+import com.pricetrace.receiptscanner.ingestion.MAX_PURCHASE_RECORD_LINES
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV4Json
 import kotlinx.serialization.json.Json
@@ -15,6 +16,36 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import java.math.BigDecimal
+import java.time.OffsetDateTime
+
+private val CASHOS_TRANSACTION_SOURCE_TYPES = setOf(
+    "order_history",
+    "payment_history",
+    "user_statement",
+)
+private val CASHOS_TRANSACTION_STATUSES = setOf(
+    "ordered",
+    "pending",
+    "confirmed",
+    "completed",
+    "cancelled",
+    "refunded",
+    "partially_refunded",
+    "not_applicable",
+    "unknown",
+)
+private val CASHOS_PAYMENT_STATUSES = setOf(
+    "unpaid",
+    "authorized",
+    "pending",
+    "paid",
+    "settled",
+    "failed",
+    "cancelled",
+    "refunded",
+    "partially_refunded",
+    "unknown",
+)
 
 /** Exact RPC seams confirmed from the current PriceTrace/CashOS V4 contracts. */
 data class PriceTracePurchaseObservationV4Contract(
@@ -43,8 +74,8 @@ data class PriceTracePurchaseObservationV4Payload(
     val verificationBasis: VerificationBasis,
 ) {
     init {
-        require(purchaseRecord.priceObservationEligible) {
-            "PriceTrace V4 requires a non-payment purchase with an order/payment date"
+        require(purchaseRecord.priceTraceSourceEligible) {
+            "PriceTrace V4 requires a line-item purchase with an order/payment date"
         }
     }
 
@@ -54,6 +85,7 @@ data class PriceTracePurchaseObservationV4Payload(
 data class PriceTracePurchaseObservationV4Response(
     val purchaseSourceId: String,
     val observationIds: List<String>,
+    val observationCreated: Boolean,
     val replayed: Boolean,
     val deduplicated: Boolean,
     val raw: JsonObject,
@@ -73,7 +105,8 @@ object PriceTracePurchaseObservationV4Json {
             put("contract_version", JsonPrimitive("purchase-price.v4"))
             put("source_app", JsonPrimitive("pricetrace_ocr_app"))
             record.sourceVersion?.let { put("source_version", JsonPrimitive(it)) }
-            put("kind", JsonPrimitive(record.kind.toPriceTraceKind()))
+            put("purchase_kind", JsonPrimitive(record.purchaseKind.wireValue))
+            put("kind", JsonPrimitive(record.purchaseKind.toPriceTraceKind()))
             put("verification_basis", JsonPrimitive(payload.verificationBasis.toPriceTraceValue()))
             put("transcription_status", JsonPrimitive("user_verified"))
             put("platform", buildJsonObject {
@@ -93,13 +126,13 @@ object PriceTracePurchaseObservationV4Json {
                 put("order_reference", record.orderReference?.let(::JsonPrimitive) ?: JsonNull)
                 put("status", JsonPrimitive(record.status.wireValue))
                 put("currency", JsonPrimitive(record.currency))
-                put("ordered_on", record.orderedOn?.let(::JsonPrimitive) ?: JsonNull)
+                put("ordered_on", record.effectiveOrderedOn?.let(::JsonPrimitive) ?: JsonNull)
                 put("ordered_at", record.orderedAt?.let(::JsonPrimitive) ?: JsonNull)
             })
             put("payment", buildJsonObject {
                 put("status", JsonPrimitive(record.payment?.status ?: "unknown"))
                 put("method", JsonPrimitive(record.payment?.method ?: "unknown"))
-                put("paid_on", record.paidOn?.let(::JsonPrimitive) ?: JsonNull)
+                put("paid_on", record.effectivePaidOn?.let(::JsonPrimitive) ?: JsonNull)
                 put("paid_at", record.paidAt?.let(::JsonPrimitive) ?: JsonNull)
                 put("total_price", record.totals.cashOsAmountKrw?.let(::JsonPrimitive) ?: JsonNull)
                 put("items_subtotal", record.totals.subtotalAmountKrw?.let(::JsonPrimitive) ?: JsonNull)
@@ -119,11 +152,16 @@ object PriceTracePurchaseObservationV4Json {
             (it as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
                 ?: error("PriceTrace V4 observationIds must contain strings")
         } ?: emptyList()
+        val observationCreated = row.requiredBooleanOrDefault(
+            "observationCreated",
+            observationIds.isNotEmpty(),
+        )
         val replayed = row.requiredBooleanOrDefault("replayed", false)
         val deduplicated = row.requiredBooleanOrDefault("deduplicated", false)
         return PriceTracePurchaseObservationV4Response(
             purchaseSourceId = sourceId,
             observationIds = observationIds,
+            observationCreated = observationCreated,
             replayed = replayed,
             deduplicated = deduplicated,
             raw = row,
@@ -139,12 +177,7 @@ object PriceTracePurchaseObservationV4Json {
         } ?: JsonNull
         val productName = line.description?.takeIf(String::isNotBlank)
             ?: error("PriceTrace V4 line product_name is required")
-        val sellerOverrides = record.lineItems.mapNotNull { it.sellerOverride }.distinct()
-        require(sellerOverrides.isEmpty() || sellerOverrides.all {
-            effectiveSeller(record)?.equals(it, ignoreCase = true) == true
-        }) {
-            "PriceTrace V4 cannot represent conflicting line seller overrides"
-        }
+        val lineSeller = line.sellerOverride?.let(::sellerJson)
         return buildJsonObject {
             put("line_key", JsonPrimitive(line.lineKey ?: "line-${index + 1}"))
             put("product", buildJsonObject {
@@ -159,24 +192,25 @@ object PriceTracePurchaseObservationV4Json {
             put("gross_price", line.grossAmountKrw?.let(::JsonPrimitive) ?: JsonNull)
             put("discount", line.discountAmountKrw?.let(::JsonPrimitive) ?: JsonNull)
             put("net_price", line.netAmountKrw?.let(::JsonPrimitive) ?: JsonNull)
+            put("seller", lineSeller ?: JsonNull)
         }
     }
 
-    private fun effectiveSeller(record: PurchaseRecord): String? {
-        val overrides = record.lineItems.mapNotNull { it.sellerOverride }.distinct()
-        val seller = record.seller ?: overrides.singleOrNull()
-        require(overrides.isEmpty() || overrides.all {
-            seller?.equals(it, ignoreCase = true) == true
-        }) {
-            "PurchaseRecord has multiple seller overrides that PriceTrace V4 cannot represent"
-        }
-        return seller
+    private fun sellerJson(name: String): JsonObject = buildJsonObject {
+        put("seller_name", JsonPrimitive(name))
+        put("branch_name", JsonNull)
+        put("source_namespace", JsonNull)
+        put("source_code", JsonNull)
+        put("business_kind", JsonNull)
     }
 
-    private fun PurchaseRecordKind.toPriceTraceKind(): String = when (this) {
-        PurchaseRecordKind.RETAIL -> "retail_purchase"
-        PurchaseRecordKind.RESTAURANT -> "restaurant_purchase"
-        PurchaseRecordKind.PAYMENT_ONLY -> error("payment-only record cannot create PriceTrace observation")
+    private fun effectiveSeller(record: PurchaseRecord): String? = record.seller
+
+    private fun PurchaseKind.toPriceTraceKind(): String = when (this) {
+        PurchaseKind.RETAIL -> "retail_purchase"
+        PurchaseKind.RESTAURANT -> "restaurant_purchase"
+        PurchaseKind.OTHER -> "other"
+        PurchaseKind.UNKNOWN -> "unknown"
     }
 
     private fun VerificationBasis.toPriceTraceValue(): String = when (this) {
@@ -189,6 +223,9 @@ data class CashOsTransactionV4Item(
     val transactionItemId: String,
     val lineOrdinal: Int,
     val descriptionSnapshot: String,
+    val seller: String? = null,
+    val sellerReference: String? = null,
+    val sourceItemReference: String? = null,
     val quantity: String? = null,
     val unit: String? = null,
     val unitPriceKrw: Long? = null,
@@ -204,6 +241,9 @@ data class CashOsTransactionV4Item(
         require(transactionItemId.isNotBlank() && transactionItemId.length <= 200)
         require(lineOrdinal > 0 && lineOrdinal <= 100_000)
         require(descriptionSnapshot.isNotBlank() && descriptionSnapshot.length <= 500)
+        require(seller == null || seller.isNotBlank() && seller.length <= 500)
+        require(sellerReference == null || sellerReference.isNotBlank() && sellerReference.length <= 200)
+        require(sourceItemReference == null || sourceItemReference.isNotBlank() && sourceItemReference.length <= 200)
         require(quantity == null || quantity.matches(Regex("^(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,6})?$")))
         require(quantity == null || BigDecimal(quantity).signum() > 0)
         require(unit == null || unit.isNotBlank() && unit.length <= 50)
@@ -220,6 +260,14 @@ data class CashOsTransactionV4Payload(
     val transactionRevision: String,
     val revisionSeq: Long,
     val transactionFingerprint: String,
+    val sourceType: String,
+    val transactionStatus: String,
+    val paymentStatus: String,
+    val orderReference: String?,
+    val paymentReference: String?,
+    val orderedAt: String?,
+    val paidAt: String?,
+    val timestampProvenance: String?,
     val platform: String,
     val seller: String?,
     val orderedLocalDate: String?,
@@ -243,21 +291,33 @@ data class CashOsTransactionV4Payload(
         require(transactionRevision.isNotBlank() && transactionRevision.length <= 100)
         require(revisionSeq > 0)
         require(transactionFingerprint.matches(Regex("^[0-9a-fA-F]{64}$")))
+        require(sourceType in CASHOS_TRANSACTION_SOURCE_TYPES)
+        require(transactionStatus in CASHOS_TRANSACTION_STATUSES)
+        require(paymentStatus in CASHOS_PAYMENT_STATUSES)
+        require(orderReference == null || orderReference.isNotBlank() && orderReference.length <= 200)
+        require(paymentReference == null || paymentReference.isNotBlank() && paymentReference.length <= 200)
+        orderedAt?.let { require(runCatching { OffsetDateTime.parse(it) }.isSuccess) }
+        paidAt?.let { require(runCatching { OffsetDateTime.parse(it) }.isSuccess) }
+        require((orderedAt == null && paidAt == null) || timestampProvenance != null)
+        require(timestampProvenance == null || timestampProvenance.isNotBlank() && timestampProvenance.length <= 200)
         require(platform.isNotBlank() && platform.length <= 200)
         require(seller == null || seller.isNotBlank() && seller.length <= 500)
-        require(orderedLocalDate != null || paidLocalDate != null)
+        require(
+            orderedLocalDate != null || paidLocalDate != null ||
+                orderedAt != null || paidAt != null,
+        )
         require(grandTotalAmountKrw >= 0)
         listOf(grossAmountKrw, discountAmountKrw, feeAmountKrw).forEach {
             require(it == null || it >= 0)
         }
-        require(items.size <= 200)
+        require(items.size <= MAX_PURCHASE_RECORD_LINES)
     }
 
     fun toRpcJson(): String = CashOsTransactionV4Json.encode(this)
 }
 
 data class CashOsTransactionV4Response(
-    val ledgerEntryId: String,
+    val ledgerEntryId: String?,
     val transactionId: String,
     val replayed: Boolean,
     val itemCount: Int,
@@ -266,6 +326,8 @@ data class CashOsTransactionV4Response(
     val categoryResolution: String,
     val accountResolution: String,
     val accountCandidateIds: List<String>,
+    val postingState: String,
+    val postingDateSource: String?,
     val raw: JsonObject,
 )
 
@@ -281,6 +343,14 @@ object CashOsTransactionV4Json {
             put("p_transaction_revision", JsonPrimitive(payload.transactionRevision))
             put("p_revision_seq", JsonPrimitive(payload.revisionSeq))
             put("p_transaction_fingerprint", JsonPrimitive(payload.transactionFingerprint.lowercase()))
+            put("p_source_type", JsonPrimitive(payload.sourceType))
+            put("p_transaction_status", JsonPrimitive(payload.transactionStatus))
+            put("p_payment_status", JsonPrimitive(payload.paymentStatus))
+            put("p_order_reference", payload.orderReference?.let(::JsonPrimitive) ?: JsonNull)
+            put("p_payment_reference", payload.paymentReference?.let(::JsonPrimitive) ?: JsonNull)
+            put("p_ordered_at", payload.orderedAt?.let(::JsonPrimitive) ?: JsonNull)
+            put("p_paid_at", payload.paidAt?.let(::JsonPrimitive) ?: JsonNull)
+            put("p_timestamp_provenance", payload.timestampProvenance?.let(::JsonPrimitive) ?: JsonNull)
             put("p_platform", JsonPrimitive(payload.platform))
             put("p_seller", payload.seller?.let(::JsonPrimitive) ?: JsonNull)
             put("p_ordered_local_date", payload.orderedLocalDate?.let(::JsonPrimitive) ?: JsonNull)
@@ -301,6 +371,9 @@ object CashOsTransactionV4Json {
                     put("transaction_item_id", JsonPrimitive(item.transactionItemId))
                     put("line_ordinal", JsonPrimitive(item.lineOrdinal))
                     put("description_snapshot", JsonPrimitive(item.descriptionSnapshot))
+                    put("seller", item.seller?.let(::JsonPrimitive) ?: JsonNull)
+                    put("seller_reference", item.sellerReference?.let(::JsonPrimitive) ?: JsonNull)
+                    put("source_item_reference", item.sourceItemReference?.let(::JsonPrimitive) ?: JsonNull)
                     put("quantity", item.quantity?.let(::JsonPrimitive) ?: JsonNull)
                     put("unit", item.unit?.let(::JsonPrimitive) ?: JsonNull)
                     put("unit_price_krw", item.unitPriceKrw?.let(::JsonPrimitive) ?: JsonNull)
@@ -336,7 +409,7 @@ object CashOsTransactionV4Json {
             }
         }
         return CashOsTransactionV4Response(
-            ledgerEntryId = requiredString("ledger_entry_id"),
+            ledgerEntryId = nullableString("ledger_entry_id"),
             transactionId = requiredString("transaction_id"),
             replayed = requiredBoolean("replayed"),
             itemCount = requiredInt("item_count"),
@@ -345,6 +418,8 @@ object CashOsTransactionV4Json {
             categoryResolution = requiredString("category_resolution"),
             accountResolution = requiredString("account_resolution"),
             accountCandidateIds = candidates,
+            postingState = requiredString("posting_state"),
+            postingDateSource = nullableString("posting_date_source"),
             raw = row,
         )
     }

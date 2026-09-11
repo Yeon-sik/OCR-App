@@ -138,7 +138,7 @@ class CashOsReceiptGatewayTest {
         val transport = QueueTransport(
             PriceObservationHttpResponse(
                 200,
-                """[{"ledger_entry_id":"ledger-v4-1","transaction_id":"transaction-v4-1","replayed":false,"item_count":1,"category_id":null,"account_id":null,"category_resolution":"unresolved","account_resolution":"unresolved","account_candidate_ids":[]}]""",
+                """[{"ledger_entry_id":"ledger-v4-1","transaction_id":"transaction-v4-1","replayed":false,"item_count":1,"category_id":null,"account_id":null,"category_resolution":"unresolved","account_resolution":"unresolved","account_candidate_ids":[],"posting_state":"CONFIRMED_EXPENSE","posting_date_source":"paid_local_date"}]""",
             ),
         )
         val payload = CashOsTransactionV4Payload(
@@ -148,6 +148,14 @@ class CashOsReceiptGatewayTest {
             transactionRevision = "revision-1",
             revisionSeq = 2,
             transactionFingerprint = "b".repeat(64),
+            sourceType = "payment_history",
+            transactionStatus = "not_applicable",
+            paymentStatus = "paid",
+            orderReference = null,
+            paymentReference = "payment-only-1",
+            orderedAt = null,
+            paidAt = null,
+            timestampProvenance = null,
             platform = "쿠팡",
             seller = null,
             orderedLocalDate = null,
@@ -188,6 +196,9 @@ class CashOsReceiptGatewayTest {
             setOf(
                 "p_contract_version", "p_idempotency_key", "p_document_id", "p_transaction_revision",
                 "p_revision_seq", "p_transaction_fingerprint", "p_platform", "p_seller",
+                "p_source_type", "p_transaction_status", "p_payment_status",
+                "p_order_reference", "p_payment_reference", "p_ordered_at", "p_paid_at",
+                "p_timestamp_provenance",
                 "p_ordered_local_date", "p_paid_local_date", "p_grand_total_amount_krw",
                 "p_gross_amount_krw", "p_discount_amount_krw", "p_fee_amount_krw",
                 "p_payment_method_hint", "p_account_hint", "p_institution_hint", "p_category_hint",
@@ -198,10 +209,94 @@ class CashOsReceiptGatewayTest {
         assertEquals("cashos.transaction-ingest.v4", body["p_contract_version"]?.jsonPrimitive?.content)
         assertEquals("purchase-document-1", body["p_document_id"]?.jsonPrimitive?.content)
         assertEquals(JsonNull, body["p_seller"])
+        assertEquals("payment_history", body["p_source_type"]?.jsonPrimitive?.content)
+        assertEquals("not_applicable", body["p_transaction_status"]?.jsonPrimitive?.content)
+        assertEquals("paid", body["p_payment_status"]?.jsonPrimitive?.content)
+        assertEquals("payment-only-1", body["p_payment_reference"]?.jsonPrimitive?.content)
         assertEquals(JsonNull, body["p_ordered_local_date"])
         assertEquals("2026-09-11", body["p_paid_local_date"]?.jsonPrimitive?.content)
         assertEquals("2", body["p_items"]!!.jsonArray.single().jsonObject["quantity"]?.jsonPrimitive?.content)
         assertTrue(body["p_items"]!!.jsonArray.single().jsonObject["quantity"]!!.jsonPrimitive.isString)
+    }
+
+    @Test
+    fun purchaseTransactionKeepsMultiSellerLinesInOneCashOsExpenseAndPreservesKnownFee() = runTest {
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(
+                200,
+                """[{"ledger_entry_id":"ledger-multi-seller","transaction_id":"transaction-multi-seller","replayed":false,"item_count":2,"category_id":null,"account_id":null,"category_resolution":"unresolved","account_resolution":"unresolved","account_candidate_ids":[],"posting_state":"CONFIRMED_EXPENSE","posting_date_source":"paid_local_date"}]""",
+            ),
+        )
+        val record = PurchaseRecord(
+            clientKey = "purchase-multi-seller",
+            platform = "쿠팡",
+            seller = null,
+            purchaseKind = PurchaseKind.RETAIL,
+            paidOn = "2026-09-11",
+            status = PurchaseRecordStatus.ORDERED,
+            totals = PurchaseRecordTotals(
+                subtotalAmountKrw = null,
+                discountAmountKrw = null,
+                shippingAmountKrw = 250,
+                taxAmountKrw = null,
+                grandTotalAmountKrw = 1250,
+                paidAmountKrw = 1250,
+            ),
+            payment = PurchaseRecordPayment(method = "card", status = "paid"),
+            lineItems = listOf(
+                PurchaseRecordLine(
+                    description = "상품 A",
+                    sellerOverride = "판매자 A",
+                ),
+                PurchaseRecordLine(
+                    description = "상품 B",
+                    sellerOverride = "판매자 B",
+                ),
+            ),
+            evidence = listOf(
+                PurchaseRecordEvidence(
+                    sourceType = "payment_history",
+                    sourceAttachmentIds = listOf("payment-history-1"),
+                    field = "total_price",
+                    observedValue = "1250",
+                ),
+            ),
+            confidence = 0.9,
+        )
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.PURCHASE,
+            source = IngestionSource("chatgpt", emptyList()),
+            targets = setOf(IngestionProjection.CASHOS_TRANSACTION),
+            schemaVersion = YEONSIK_OCR_V4_SCHEMA,
+            purchaseRecords = listOf(record),
+        )
+        val request = ProjectionRequest(
+            ingestionId = "multi-seller-ingestion",
+            projection = IngestionProjection.CASHOS_TRANSACTION,
+            canonicalPayload = "",
+            idempotencyKey = "multi-seller-key",
+            envelope = envelope,
+            localDocumentId = "multi-seller-document",
+            revisionSeq = 1,
+        )
+
+        val result = CashOsCanonicalProjectionSubmitter(
+            CashOsReceiptGateway(FakeStore(signedIn()), transport),
+        ).submit(request) as ProjectionSubmission.Success
+
+        assertEquals("transaction-multi-seller", result.remoteId)
+        assertEquals(1, transport.requests.size)
+        val body = Json.parseToJsonElement(requireNotNull(transport.requests.single().body)).jsonObject
+        assertEquals(JsonNull, body["p_seller"])
+        assertEquals("confirmed", body["p_transaction_status"]?.jsonPrimitive?.content)
+        assertEquals(JsonNull, body["p_gross_amount_krw"])
+        assertEquals(JsonNull, body["p_discount_amount_krw"])
+        assertEquals(250, body["p_fee_amount_krw"]?.jsonPrimitive?.intOrNull)
+        assertEquals(2, body["p_items"]?.jsonArray?.size)
+        assertEquals("상품 A", body["p_items"]!!.jsonArray[0].jsonObject["description_snapshot"]?.jsonPrimitive?.content)
+        assertEquals("상품 B", body["p_items"]!!.jsonArray[1].jsonObject["description_snapshot"]?.jsonPrimitive?.content)
+        assertEquals("판매자 A", body["p_items"]!!.jsonArray[0].jsonObject["seller"]?.jsonPrimitive?.content)
+        assertEquals("판매자 B", body["p_items"]!!.jsonArray[1].jsonObject["seller"]?.jsonPrimitive?.content)
     }
 
     @Test

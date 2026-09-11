@@ -27,6 +27,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
@@ -232,6 +233,7 @@ class PriceTraceCanonicalGatewayTest {
             platformCode = "coupang",
             seller = "공식 판매자",
             sellerBusinessKind = "retail",
+            purchaseKind = PurchaseKind.RETAIL,
             orderedOn = "2026-09-11",
             paidOn = "2026-09-11",
             status = PurchaseRecordStatus.PAID,
@@ -286,6 +288,9 @@ class PriceTraceCanonicalGatewayTest {
         val success = result as PriceTraceCanonicalOutcome.Success
         assertEquals("purchase-source-1", success.response["sources"]!!.jsonArray.single()
             .jsonObject["purchaseSourceId"]?.jsonPrimitive?.content)
+        assertEquals(true, success.response["sourceSaved"]?.jsonPrimitive?.content?.toBoolean())
+        assertEquals(true, success.response["observationCreated"]?.jsonPrimitive?.content?.toBoolean())
+        assertEquals(1, success.response["observationCount"]?.jsonPrimitive?.intOrNull)
 
         val request = transport.requests.single()
         assertEquals(
@@ -304,6 +309,91 @@ class PriceTraceCanonicalGatewayTest {
         assertFalse(purchase.containsKey("evidence"))
         assertFalse(purchase.toString().contains("private-order-image"))
         assertFalse(purchase.toString().contains("private statement"))
+    }
+
+    @Test
+    fun purchaseSourceCanBeSavedWithoutClaimingPriceObservationWhenSellerIsUnknown() = runTest {
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(
+                200,
+                """[{"purchaseSourceId":"purchase-source-only","observationIds":[],"observationCreated":false,"replayed":false,"deduplicated":false}]""",
+            ),
+        )
+        val record = PurchaseRecord(
+            clientKey = "purchase-source-only",
+            platform = "쿠팡",
+            purchaseKind = PurchaseKind.RETAIL,
+            orderedOn = "2026-09-11",
+            paidOn = "2026-09-11",
+            status = PurchaseRecordStatus.PAID,
+            totals = PurchaseRecordTotals(
+                subtotalAmountKrw = 1100,
+                discountAmountKrw = 0,
+                shippingAmountKrw = 0,
+                taxAmountKrw = 0,
+                grandTotalAmountKrw = 1100,
+                paidAmountKrw = 1100,
+            ),
+            payment = PurchaseRecordPayment(method = "card", status = "paid"),
+            lineItems = listOf(
+                PurchaseRecordLine(
+                    productClientKey = null,
+                    description = "판매자 미상 상품",
+                    quantity = 1.0,
+                    unitPriceAmountKrw = 1100,
+                    grossAmountKrw = 1100,
+                    netAmountKrw = 1100,
+                ),
+            ),
+            evidence = listOf(
+                PurchaseRecordEvidence(
+                    sourceType = "order_history",
+                    sourceAttachmentIds = listOf("order-history-source-only"),
+                    field = "platform",
+                    observedValue = "쿠팡",
+                ),
+            ),
+            confidence = 0.9,
+        )
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.PURCHASE,
+            source = IngestionSource(
+                producer = "chatgpt",
+                sourceFiles = listOf(
+                    SourceAttachment("order-history-source-only", SourceAttachmentType.ORDER_HISTORY),
+                ),
+            ),
+            targets = setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION),
+            review = IngestionReview(
+                status = IngestionReviewStatus.READY,
+                verificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+            ),
+            schemaVersion = YEONSIK_OCR_V4_SCHEMA,
+            purchaseRecords = listOf(record),
+        )
+        val request = ProjectionRequest(
+            ingestionId = "source-only-ingestion",
+            projection = IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+            canonicalPayload = YeonsikOcrV4Json.encode(envelope),
+            idempotencyKey = "source-only-key",
+            envelope = envelope,
+            localDocumentId = "source-only-document",
+        )
+
+        val result = PriceTraceCanonicalProjectionSubmitter(
+            PriceTraceCanonicalGateway(FakeStore(signedIn()), transport),
+        ).submit(request) as ProjectionSubmission.Success
+
+        assertFalse(result.primaryUploaded)
+        assertEquals("price_observation_not_created", result.primaryPendingReason)
+        val metadata = Json.parseToJsonElement(requireNotNull(result.metadataJson)).jsonObject
+        assertEquals(true, metadata["sourceSaved"]?.jsonPrimitive?.content?.toBoolean())
+        assertEquals(false, metadata["observationCreated"]?.jsonPrimitive?.content?.toBoolean())
+        assertEquals(0, metadata["observationCount"]?.jsonPrimitive?.intOrNull)
+        val purchase = Json.parseToJsonElement(requireNotNull(transport.requests.single().body))
+            .jsonObject["p_purchase"]!!.jsonObject
+        assertEquals(JsonNull, purchase["seller"])
+        assertEquals("retail", purchase["purchase_kind"]?.jsonPrimitive?.content)
     }
 
     @Test

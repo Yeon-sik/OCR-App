@@ -18,6 +18,10 @@ import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.OffsetDateTime
@@ -432,7 +436,21 @@ class DesktopIngestionController(
 
     private fun projectionSummary(projections: List<ProjectionState>): String = projections
         .filterNot { it.status == ProjectionStatus.DISABLED }
-        .joinToString(", ") { "${it.projection.wireValue}=${it.status.wireValue}" }
+        .joinToString(", ") { state ->
+            val base = "${state.projection.wireValue}=${state.status.wireValue}"
+            if (state.projection != IngestionProjection.PRICETRACE_PRICE_OBSERVATION) {
+                base
+            } else {
+                val metadata = state.metadataJson?.let {
+                    runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull()
+                }
+                val sourceSaved = (metadata?.get("sourceSaved") as? JsonPrimitive)
+                    ?.contentOrNull ?: "unknown"
+                val observationCreated = (metadata?.get("observationCreated") as? JsonPrimitive)
+                    ?.contentOrNull ?: "unknown"
+                "$base(source_saved=$sourceSaved,observation_created=$observationCreated)"
+            }
+        }
 
     private fun failWithSession(message: String) {
         _state.value = _state.value.copy(error = message, notice = null)

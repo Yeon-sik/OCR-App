@@ -16,6 +16,7 @@ private val CANONICAL_EVIDENCE_SOURCE_TYPES = setOf(
     "product_photo",
     "package_label",
     "receipt",
+    "order_history",
     "official_listing",
     "manufacturer",
     "user_statement",
@@ -25,6 +26,7 @@ private val ATTACHMENT_BACKED_EVIDENCE_SOURCE_TYPES = setOf(
     "product_photo",
     "package_label",
     "receipt",
+    "order_history",
     "ocr",
 )
 private val PRICE_OBSERVATION_EVIDENCE_SOURCE_TYPES = setOf(
@@ -43,7 +45,7 @@ private val PURCHASE_RECORD_EVIDENCE_SOURCE_TYPES = setOf(
     "payment_history",
     "user_statement",
 )
-private val PURCHASE_PAYMENT_STATUS_VALUES = setOf("pending", "paid", "refunded", "unknown")
+private val PURCHASE_PAYMENT_STATUS_VALUES = setOf("pending", "paid", "cancelled", "refunded", "unknown")
 private val PURCHASE_PAYMENT_METHOD_VALUES = setOf(
     "card",
     "bank_transfer",
@@ -471,6 +473,7 @@ typealias CanonicalPriceObservation = StandalonePriceObservation
 enum class PurchaseRecordStatus(val wireValue: String) {
     UNKNOWN("unknown"),
     ORDERED("ordered"),
+    PENDING("pending"),
     PAID("paid"),
     SHIPPED("shipped"),
     DELIVERED("delivered"),
@@ -662,7 +665,24 @@ data class PurchaseRecordEvidence(
 enum class PurchaseRecordKind {
     RETAIL,
     RESTAURANT,
+    OTHER,
+    UNKNOWN,
     PAYMENT_ONLY,
+}
+
+/** Explicit source fact. This is never inferred from line shape or product_client_key. */
+enum class PurchaseKind(val wireValue: String) {
+    RETAIL("retail"),
+    RESTAURANT("restaurant"),
+    OTHER("other"),
+    UNKNOWN("unknown"),
+    ;
+
+    companion object {
+        fun fromWireValue(value: String): PurchaseKind = entries.firstOrNull {
+            it.wireValue == value
+        } ?: error("Unsupported purchase_kind: $value")
+    }
 }
 
 data class PurchaseRecord(
@@ -676,6 +696,7 @@ data class PurchaseRecord(
     val sellerBusinessKind: String? = null,
     val sourceVersion: String? = null,
     val orderReference: String? = null,
+    val purchaseKind: PurchaseKind = PurchaseKind.UNKNOWN,
     val orderedOn: String? = null,
     val orderedAt: String? = null,
     val paidOn: String? = null,
@@ -732,7 +753,9 @@ data class PurchaseRecord(
                 "paid_on and paid_at must refer to the same date"
             }
         }
-        require(lineItems.size <= 500) { "purchase record has too many lines" }
+        require(lineItems.size <= MAX_PURCHASE_RECORD_LINES) {
+            "purchase record has too many lines; maximum is $MAX_PURCHASE_RECORD_LINES"
+        }
         require(evidence.isNotEmpty()) { "purchase record evidence is required" }
         require(confidence.isFinite() && confidence in 0.0..1.0) {
             "purchase record confidence must be between 0 and 1"
@@ -748,15 +771,57 @@ data class PurchaseRecord(
     val kind: PurchaseRecordKind
         get() = when {
             lineItems.isEmpty() -> PurchaseRecordKind.PAYMENT_ONLY
-            lineItems.any { it.productClientKey != null } -> PurchaseRecordKind.RETAIL
-            else -> PurchaseRecordKind.RESTAURANT
+            purchaseKind == PurchaseKind.RETAIL -> PurchaseRecordKind.RETAIL
+            purchaseKind == PurchaseKind.RESTAURANT -> PurchaseRecordKind.RESTAURANT
+            purchaseKind == PurchaseKind.OTHER -> PurchaseRecordKind.OTHER
+            else -> PurchaseRecordKind.UNKNOWN
         }
 
-    val priceObservationEligible: Boolean
-        get() = kind != PurchaseRecordKind.PAYMENT_ONLY && (orderedOn != null || paidOn != null)
+    /** Source storage can retain an unresolved or non-settled purchase without making an observation. */
+    val priceTraceSourceEligible: Boolean
+        get() = lineItems.isNotEmpty() && (effectiveOrderedOn != null || effectivePaidOn != null)
 
+    /** Only a settled, explicitly classified retail/restaurant purchase may create a normal observation. */
+    val priceObservationEligible: Boolean
+        get() = priceTraceSourceEligible &&
+            purchaseKind in setOf(PurchaseKind.RETAIL, PurchaseKind.RESTAURANT) &&
+            isSettled && !hasBlockedState
+
+    /** CashOS V4 currently creates only confirmed EXPENSE rows, so require payment settlement. */
     val cashOsTransactionEligible: Boolean
-        get() = totals.cashOsAmountKrw != null && (paidOn != null || orderedOn != null)
+        get() = totals.cashOsAmountKrw != null &&
+            (effectivePaidOn != null || effectiveOrderedOn != null) &&
+            isPaymentConfirmed && !hasBlockedState
+
+    /** Derived only for routing; ordered_at/paid_at remain unchanged on the wire. */
+    val effectiveOrderedOn: String?
+        get() = orderedOn ?: orderedAt?.let {
+            runCatching { OffsetDateTime.parse(it).toLocalDate().toString() }.getOrNull()
+        }
+
+    /** Derived only for routing; ordered_at/paid_at remain unchanged on the wire. */
+    val effectivePaidOn: String?
+        get() = paidOn ?: paidAt?.let {
+            runCatching { OffsetDateTime.parse(it).toLocalDate().toString() }.getOrNull()
+        }
+
+    private val isSettled: Boolean
+        get() = status in setOf(
+            PurchaseRecordStatus.PAID,
+            PurchaseRecordStatus.SHIPPED,
+            PurchaseRecordStatus.DELIVERED,
+        ) || payment?.status == "paid"
+
+    private val isPaymentConfirmed: Boolean
+        get() = status == PurchaseRecordStatus.PAID || payment?.status == "paid"
+
+    private val hasBlockedState: Boolean
+        get() = status in setOf(
+            PurchaseRecordStatus.PENDING,
+            PurchaseRecordStatus.CANCELLED,
+            PurchaseRecordStatus.REFUNDED,
+            PurchaseRecordStatus.UNKNOWN,
+        ) || payment?.status in setOf("pending", "cancelled", "refunded", "unknown")
 
     private fun validateDate(value: String?, key: String, timestamp: Boolean = false) {
         value ?: return
@@ -769,7 +834,16 @@ data class PurchaseRecord(
     }
 }
 
+const val MAX_PURCHASE_RECORD_LINES = 100
+
 fun PurchaseRecord.conflictFields(): Set<String> = evidence
+    .filter { !it.observedValue.isNullOrBlank() }
+    .groupBy { it.field }
+    .mapValues { (_, facts) -> facts.map { it.observedValue!!.trim() }.distinct() }
+    .filterValues { it.size > 1 }
+    .keys
+
+fun ProductCandidate.conflictFields(): Set<String> = evidence
     .filter { !it.observedValue.isNullOrBlank() }
     .groupBy { it.field }
     .mapValues { (_, facts) -> facts.map { it.observedValue!!.trim() }.distinct() }

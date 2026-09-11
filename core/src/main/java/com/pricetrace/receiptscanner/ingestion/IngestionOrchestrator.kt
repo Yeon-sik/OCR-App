@@ -816,7 +816,8 @@ class IngestionOrchestrator(
                 if (envelope.purchaseRecords.isNotEmpty()) {
                     "pricetrace-purchase-price-v4|" + envelope.purchaseRecords
                         .sortedBy(PurchaseRecord::clientKey)
-                        .joinToString("|") { purchaseRecordPayloadDependency(it) }
+                        .joinToString("|") { purchaseRecordPayloadDependency(it) } +
+                        "|product-candidates=" + purchaseProductCandidateDependencies(envelope)
                 } else if (envelope.priceObservations.isNotEmpty()) {
                     "pricetrace-standalone-price|merchant=" + merchantPayloadDependency(envelope.merchantCandidate) +
                         "|products=" + envelope.priceObservations
@@ -1028,6 +1029,20 @@ class IngestionOrchestrator(
     private fun purchaseRecordPayloadDependency(record: PurchaseRecord): String =
         YeonsikOcrV4Json.encodePurchaseRecord(record).toString()
 
+    private fun purchaseProductCandidateDependencies(envelope: YeonsikOcrEnvelope): String =
+        envelope.purchaseRecords
+            .filter { it.purchaseKind == PurchaseKind.RETAIL }
+            .flatMap { record ->
+                record.lineItems.mapNotNull { line ->
+                    line.productClientKey?.let { key ->
+                        envelope.productCandidates.singleOrNull { it.clientKey == key }
+                    }
+                }
+            }
+            .distinctBy(ProductCandidate::clientKey)
+            .sortedBy(ProductCandidate::clientKey)
+            .joinToString("|", transform = ::productCandidatePayloadDependency)
+
     private fun requiredArtifactKeys(
         projection: IngestionProjection,
         envelope: YeonsikOcrEnvelope,
@@ -1036,7 +1051,20 @@ class IngestionOrchestrator(
             setOf(IngestionArtifactKeys.RECEIPT)
         } else emptySet()
         IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> if (envelope.purchaseRecords.isNotEmpty()) {
-            envelope.purchaseRecords.map { IngestionArtifactKeys.purchaseRecord(it.clientKey) }.toSet()
+            buildSet {
+                addAll(envelope.purchaseRecords.map { IngestionArtifactKeys.purchaseRecord(it.clientKey) })
+                addAll(
+                    envelope.purchaseRecords
+                        .filter { it.purchaseKind == PurchaseKind.RETAIL }
+                        .flatMap { record ->
+                            record.lineItems.mapNotNull { line ->
+                                line.productClientKey
+                                    ?.takeIf { key -> envelope.productCandidates.any { it.clientKey == key } }
+                                    ?.let(IngestionArtifactKeys::productCandidate)
+                            }
+                        },
+                )
+            }
         } else if (envelope.priceObservations.isNotEmpty()) buildSet {
             addAll(envelope.priceObservations.map { IngestionArtifactKeys.priceObservation(it.clientKey) })
             if (envelope.merchantCandidate != null) add(IngestionArtifactKeys.MERCHANT_CANDIDATE)

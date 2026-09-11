@@ -44,6 +44,20 @@ object IngestionEvidenceGate {
         if (purchaseConflictIssues.isNotEmpty()) {
             return IngestionEvidenceResult(false, purchaseConflictIssues)
         }
+        val selectedProductCandidates = envelope.productCandidates.filter { candidate ->
+            artifactKeys == null ||
+                IngestionArtifactKeys.productCandidate(candidate.clientKey) in artifactKeys
+        }
+        if (envelope.schemaVersion == YEONSIK_OCR_V4_SCHEMA) {
+            val candidateConflictIssues = selectedProductCandidates.flatMap { candidate ->
+                candidate.conflictFields().map { field ->
+                    "product_candidate_conflict:${candidate.clientKey}:$field"
+                }
+            }.distinct()
+            if (candidateConflictIssues.isNotEmpty()) {
+                return IngestionEvidenceResult(false, candidateConflictIssues)
+            }
+        }
         if (verificationBasis == VerificationBasis.MANUAL_CANONICAL_REVIEW) {
             return if (explicitUserConfirmation) {
                 IngestionEvidenceResult(isAllowed = true)
@@ -51,8 +65,16 @@ object IngestionEvidenceGate {
                 IngestionEvidenceResult(false, listOf("manual_canonical_confirmation_required"))
             }
         }
-        val purchaseEvidenceResult = evaluatePurchaseEvidence(envelope, evidence, artifactKeys)
-        if (purchaseEvidenceResult != null) return purchaseEvidenceResult
+        val evidenceResults = listOfNotNull(
+            evaluatePurchaseEvidence(envelope, evidence, artifactKeys),
+            if (envelope.schemaVersion == YEONSIK_OCR_V4_SCHEMA) {
+                evaluateProductCandidateEvidence(envelope, evidence, artifactKeys)
+            } else {
+                null
+            },
+        )
+        evidenceResults.firstOrNull { !it.isAllowed }?.let { return it }
+        evidenceResults.firstOrNull()?.let { return it }
         val requiredTypes = requiredEvidenceTypes(envelope, artifactKeys)
         val scopedEvidence = if (artifactKeys == null) {
             evidence
@@ -116,6 +138,47 @@ object IngestionEvidenceGate {
         return IngestionEvidenceResult(true)
     }
 
+    /**
+     * V4 candidates may be identified by an order-history screenshot. The candidate's own
+     * source facts, not a generic product-photo requirement, determine the local evidence gate.
+     */
+    private fun evaluateProductCandidateEvidence(
+        envelope: YeonsikOcrEnvelope,
+        evidence: List<LocalEvidence>,
+        artifactKeys: Set<String>?,
+    ): IngestionEvidenceResult? {
+        val selected = envelope.productCandidates.filter { candidate ->
+            artifactKeys == null ||
+                IngestionArtifactKeys.productCandidate(candidate.clientKey) in artifactKeys
+        }
+        if (selected.isEmpty()) return null
+        val localById = evidence.associateBy(LocalEvidence::attachmentId)
+        val referenced = selected.flatMap(ProductCandidate::effectiveSourceAttachmentIds).distinct()
+        val missing = referenced.filter { it !in localById }
+        if (missing.isNotEmpty()) {
+            return IngestionEvidenceResult(
+                false,
+                missing.map { "product_candidate_evidence_attachment_required:$it" },
+            )
+        }
+        val unreadable = referenced.filter { localById[it]?.fileReadable != true }
+        if (unreadable.isNotEmpty()) {
+            return IngestionEvidenceResult(
+                false,
+                unreadable.map { "product_candidate_evidence_attachment_unreadable:$it" },
+            )
+        }
+        val hasUserStatement = selected.any { candidate ->
+            candidate.evidence.any { item ->
+                item.sourceType == "user_statement" && !envelope.source.userText.isNullOrBlank()
+            }
+        }
+        if (referenced.isEmpty() && !hasUserStatement) {
+            return IngestionEvidenceResult(false, listOf("product_candidate_evidence_required"))
+        }
+        return IngestionEvidenceResult(true)
+    }
+
     private fun requiredEvidenceTypes(
         envelope: YeonsikOcrEnvelope,
         artifactKeys: Set<String>?,
@@ -136,7 +199,9 @@ object IngestionEvidenceGate {
         if (artifactKeys == null || artifactKeys.any { it.startsWith("${IngestionArtifactKeys.CONSUMPTION}:") }) {
             if (envelope.consumption.isNotEmpty()) add(SourceAttachmentType.FOOD_PHOTO)
         }
-        if (artifactKeys == null || artifactKeys.any { it.startsWith("${IngestionArtifactKeys.PRODUCT_CANDIDATE}:") }) {
+        if (envelope.schemaVersion != YEONSIK_OCR_V4_SCHEMA &&
+            (artifactKeys == null || artifactKeys.any { it.startsWith("${IngestionArtifactKeys.PRODUCT_CANDIDATE}:") })
+        ) {
             if (envelope.productCandidates.isNotEmpty()) add(SourceAttachmentType.PRODUCT_PHOTO)
         }
         envelope.priceObservations

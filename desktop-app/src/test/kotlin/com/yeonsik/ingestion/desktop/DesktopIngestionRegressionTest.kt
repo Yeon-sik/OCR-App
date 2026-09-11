@@ -214,7 +214,8 @@ class DesktopIngestionRegressionTest {
         val verified = controller.state.value
         assertEquals(IngestionReviewStatus.READY, verified.session?.reviewStatus)
         assertEquals(verified.session?.canonicalFingerprint, verified.session?.verifiedCanonicalFingerprint)
-        assertTrue(verified.artifacts.single().evidenceReady)
+        assertTrue(verified.artifacts.isNotEmpty())
+        assertTrue(verified.artifacts.all { it.evidenceReady })
         assertTrue(bundle.submitters.containsKey(IngestionProjection.CASHOS_TRANSACTION))
     }
 

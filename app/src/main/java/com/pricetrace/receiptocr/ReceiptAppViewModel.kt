@@ -55,6 +55,7 @@ import com.pricetrace.receiptscanner.ingestion.CONSUMPTION_AMOUNT_STATUSES
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.ingestion.ProductCandidate
+import com.pricetrace.receiptscanner.ingestion.PurchaseKind
 import com.pricetrace.receiptscanner.ingestion.IngestionOrchestrator
 import com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus
 import com.pricetrace.receiptscanner.ingestion.IngestionArtifactKeys
@@ -1788,8 +1789,10 @@ class ReceiptAppViewModel(
             }
             mutableUiState.value = mutableUiState.value.copy(
                 isSubmittingCanonicalAllReady = true,
-                isSubmittingCanonicalPriceTrace = envelope.receipt != null,
-                isSubmittingCashOsReceipt = envelope.receipt != null,
+                isSubmittingCanonicalPriceTrace = envelope.receipt != null ||
+                    envelope.purchaseRecords.any { it.priceTraceSourceEligible },
+                isSubmittingCashOsReceipt = envelope.receipt != null ||
+                    envelope.purchaseRecords.any { it.cashOsTransactionEligible },
                 isNutritionPublishing = envelope.nutrition.isNotEmpty(),
                 isSubmittingProductCandidates = envelope.productCandidates.isNotEmpty(),
                 message = null,
@@ -1811,13 +1814,21 @@ class ReceiptAppViewModel(
                 val uploaded = projections.count { it.status == ProjectionStatus.UPLOADED }
                 val blocked = projections.count { it.status == ProjectionStatus.BLOCKED }
                 val failed = projections.count { it.status == ProjectionStatus.FAILED }
+                val priceTraceSummary = projections
+                    .firstOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }
+                    ?.metadataObject()
+                    ?.takeIf { it.booleanValue("sourceSaved") == true }
+                    ?.let { metadata ->
+                        " PriceTrace source_saved=true, observation_created=" +
+                            (metadata.booleanValue("observationCreated")?.toString() ?: "unknown") + "."
+                    }
                 mutableUiState.value = mutableUiState.value.copy(
                     isSubmittingCanonicalAllReady = false,
                     isSubmittingCanonicalPriceTrace = false,
                     isSubmittingCashOsReceipt = false,
                     isNutritionPublishing = false,
                     isSubmittingProductCandidates = false,
-                    message = "Ready canonical projections processed: $uploaded uploaded, $blocked blocked, $failed failed.",
+                    message = "Ready canonical projections processed: $uploaded uploaded, $blocked blocked, $failed failed.$priceTraceSummary",
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -2714,8 +2725,8 @@ class ReceiptAppViewModel(
         val metadata = state.metadataObject()
         val current = mutableUiState.value
         val message = when (state.status) {
-            ProjectionStatus.UPLOADED -> "${projection.wireValue} canonical projection을 완료했습니다.${state.remoteId?.let { " ($it)" }.orEmpty()}"
-            ProjectionStatus.BLOCKED -> "${projection.wireValue} projection이 차단되었습니다: ${state.lastError.orEmpty()}"
+            ProjectionStatus.UPLOADED,
+            ProjectionStatus.BLOCKED -> canonicalProjectionMessage(projection, state)
             ProjectionStatus.FAILED -> "${projection.wireValue} projection에 실패했습니다. 같은 idempotency key로 재시도할 수 있습니다."
             else -> state.lastError
         }
@@ -2809,8 +2820,26 @@ class ReceiptAppViewModel(
         projection: IngestionProjection,
         state: ProjectionState,
     ): String? = when (state.status) {
-        ProjectionStatus.UPLOADED -> "${projection.wireValue} canonical projection completed.${state.remoteId?.let { " ($it)" }.orEmpty()}"
-        ProjectionStatus.BLOCKED -> "${projection.wireValue} projection is blocked: ${state.lastError.orEmpty()}"
+        ProjectionStatus.UPLOADED -> if (projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
+            state.metadataObject()?.booleanValue("sourceSaved") == true
+        ) {
+            if (state.metadataObject()?.booleanValue("observationCreated") == true) {
+                "PriceTrace purchase source와 price observation 생성을 완료했습니다.${state.remoteId?.let { " ($it)" }.orEmpty()}"
+            } else {
+                "PriceTrace purchase source는 저장했지만 price observation은 생성되지 않았습니다. seller/date/status/price evidence를 확인하세요."
+            }
+        } else {
+            "${projection.wireValue} canonical projection completed.${state.remoteId?.let { " ($it)" }.orEmpty()}"
+        }
+        ProjectionStatus.BLOCKED -> if (
+            projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
+            state.metadataObject()?.booleanValue("sourceSaved") == true &&
+            state.metadataObject()?.booleanValue("observationCreated") != true
+        ) {
+            "PriceTrace purchase source는 저장했지만 price observation은 생성되지 않았습니다. seller/date/status/price evidence를 확인하세요."
+        } else {
+            "${projection.wireValue} projection is blocked: ${state.lastError.orEmpty()}"
+        }
         ProjectionStatus.FAILED -> "${projection.wireValue} projection failed. Retry with the same idempotency key."
         else -> state.lastError
     }
@@ -2821,6 +2850,9 @@ class ReceiptAppViewModel(
 
     private fun kotlinx.serialization.json.JsonObject.stringValue(key: String): String? =
         (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+
+    private fun kotlinx.serialization.json.JsonObject.booleanValue(key: String): Boolean? =
+        (this[key] as? JsonPrimitive)?.contentOrNull?.toBooleanStrictOrNull()
 
     private fun kotlinx.serialization.json.JsonObject.stringValues(key: String): List<String> =
         this[key]?.let { element ->
@@ -3010,8 +3042,25 @@ class ReceiptAppViewModel(
         val session = repository.getSession(documentId)
             ?: return VerifiedDraftGateResult(false, VerifiedDraftGateFailure.SOURCE_IMAGE_REQUIRED)
         val artifactKeys = when (projection) {
-            IngestionProjection.PRICETRACE_RECEIPT,
-            IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> setOf(IngestionArtifactKeys.RECEIPT)
+            IngestionProjection.PRICETRACE_RECEIPT -> setOf(IngestionArtifactKeys.RECEIPT)
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> if (envelope.schemaVersion == YEONSIK_OCR_V4_SCHEMA) {
+                buildSet {
+                    addAll(envelope.purchaseRecords.map { IngestionArtifactKeys.purchaseRecord(it.clientKey) })
+                    addAll(
+                        envelope.purchaseRecords
+                            .filter { it.purchaseKind == PurchaseKind.RETAIL }
+                            .flatMap { record ->
+                                record.lineItems.mapNotNull { line ->
+                                    line.productClientKey
+                                        ?.takeIf { key -> envelope.productCandidates.any { it.clientKey == key } }
+                                        ?.let(IngestionArtifactKeys::productCandidate)
+                                }
+                            },
+                    )
+                }
+            } else {
+                setOf(IngestionArtifactKeys.RECEIPT)
+            }
             IngestionProjection.CASHOS_RECEIPT -> setOf(IngestionArtifactKeys.RECEIPT, IngestionArtifactKeys.CASHOS_HINTS)
             IngestionProjection.CASHOS_TRANSACTION -> envelope.purchaseRecords
                 .map { IngestionArtifactKeys.purchaseRecord(it.clientKey) }

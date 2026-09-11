@@ -19,7 +19,33 @@
   },
   "merchant_candidate": null,
   "receipt": null,
-  "product_candidates": [],
+  "product_candidates": [
+    {
+      "client_key": "product-client-1",
+      "product_name": "생수",
+      "merchant_sku": null,
+      "brand_name": null,
+      "sub_brand_name": null,
+      "manufacturer_name": null,
+      "variant_name": null,
+      "specification_text": null,
+      "content_amount": null,
+      "content_unit": null,
+      "package_count": null,
+      "barcodes": [],
+      "source_attachment_ids": ["order-history-1"],
+      "evidence": [
+        {
+          "source_type": "order_history",
+          "source_ref": "order-line-1",
+          "field": "product_name",
+          "observed_value": "생수",
+          "content_hash": null
+        }
+      ],
+      "confidence": 0.98
+    }
+  ],
   "price_observations": [],
   "purchase_records": [
     {
@@ -33,6 +59,7 @@
       "seller_business_kind": "retail",
       "source_version": "chatgpt-purchase-v4-example",
       "order_reference": "order-example-1",
+      "purchase_kind": "retail",
       "ordered_on": "2026-09-11",
       "ordered_at": null,
       "paid_on": "2026-09-11",

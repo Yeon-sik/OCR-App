@@ -13,6 +13,7 @@ import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentity
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecord
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecordLine
+import com.pricetrace.receiptscanner.ingestion.PurchaseRecordStatus
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV4Json
 import com.pricetrace.receiptscanner.publisher.CashOsReceiptIngestV3Item
 import com.pricetrace.receiptscanner.publisher.CashOsReceiptIngestV3Payload
@@ -120,6 +121,9 @@ class CashOsCanonicalProjectionSubmitter(
             val metadata = buildJsonObject {
                 put("schemaVersion", JsonPrimitive("cashos.transaction-ingest.v4"))
                 put("transactions", JsonArray(responses.map(CashOsTransactionV4Response::raw)))
+                put("postingStates", JsonArray(responses.map {
+                    JsonPrimitive(it.postingState)
+                }))
             }.toString()
             ProjectionSubmission.Success(
                 remoteId = responses.first().transactionId,
@@ -151,13 +155,10 @@ class CashOsCanonicalProjectionSubmitter(
         val discount = record.totals.discountAmountKrw
         val shipping = record.totals.shippingAmountKrw
         val fee = shipping?.takeIf {
-            gross != null && discount != null && gross - discount + it == grandTotal
+            gross == null || discount == null || gross - discount + it == grandTotal
         }
         val sellerOverrides = record.lineItems.mapNotNull(PurchaseRecordLine::sellerOverride).distinct()
         val seller = record.seller ?: sellerOverrides.singleOrNull()
-        require(sellerOverrides.isEmpty() || sellerOverrides.all {
-            seller?.equals(it, ignoreCase = true) == true
-        }) { "CashOS V4 cannot represent conflicting line seller overrides" }
         return CashOsTransactionV4Payload(
             contract = com.pricetrace.receiptscanner.publisher.CashOsTransactionV4Contract(),
             idempotencyKey = idempotencyKey,
@@ -165,10 +166,18 @@ class CashOsCanonicalProjectionSubmitter(
             transactionRevision = transactionRevision,
             revisionSeq = request.revisionSeq,
             transactionFingerprint = transactionFingerprint,
+            sourceType = record.cashOsSourceType(),
+            transactionStatus = record.cashOsTransactionStatus(),
+            paymentStatus = record.cashOsPaymentStatus(),
+            orderReference = record.orderReference,
+            paymentReference = null,
+            orderedAt = record.orderedAt,
+            paidAt = record.paidAt,
+            timestampProvenance = record.cashOsTimestampProvenance(),
             platform = record.platform,
             seller = seller,
-            orderedLocalDate = record.orderedOn,
-            paidLocalDate = record.paidOn,
+            orderedLocalDate = record.effectiveOrderedOn,
+            paidLocalDate = record.effectivePaidOn,
             grandTotalAmountKrw = grandTotal,
             grossAmountKrw = gross,
             discountAmountKrw = discount,
@@ -191,6 +200,8 @@ class CashOsCanonicalProjectionSubmitter(
             transactionItemId = line.lineKey ?: "line-" + (index + 1),
             lineOrdinal = index + 1,
             descriptionSnapshot = description,
+            seller = line.sellerOverride,
+            sourceItemReference = line.lineKey,
             quantity = quantity,
             unit = null,
             unitPriceKrw = line.unitPriceAmountKrw,
@@ -201,6 +212,40 @@ class CashOsCanonicalProjectionSubmitter(
             lineType = "product",
         )
     }
+
+    private fun PurchaseRecord.cashOsSourceType(): String = when {
+        evidence.any { it.sourceType == "payment_history" } -> "payment_history"
+        evidence.any { it.sourceType == "order_history" } -> "order_history"
+        evidence.any { it.sourceType == "user_statement" } -> "user_statement"
+        else -> error("cashos_transaction_source_type_missing")
+    }
+
+    private fun PurchaseRecord.cashOsTransactionStatus(): String = when {
+        lineItems.isEmpty() -> "not_applicable"
+        payment?.status == "paid" -> "confirmed"
+        status == PurchaseRecordStatus.ORDERED -> "ordered"
+        status == PurchaseRecordStatus.PENDING -> "pending"
+        status == PurchaseRecordStatus.PAID -> "confirmed"
+        status == PurchaseRecordStatus.SHIPPED ||
+            status == PurchaseRecordStatus.DELIVERED -> "completed"
+        status == PurchaseRecordStatus.CANCELLED -> "cancelled"
+        status == PurchaseRecordStatus.REFUNDED -> "refunded"
+        else -> "unknown"
+    }
+
+    private fun PurchaseRecord.cashOsPaymentStatus(): String = payment?.status ?: when (status) {
+        PurchaseRecordStatus.ORDERED -> "unpaid"
+        PurchaseRecordStatus.PENDING -> "pending"
+        PurchaseRecordStatus.PAID -> "paid"
+        PurchaseRecordStatus.CANCELLED -> "cancelled"
+        PurchaseRecordStatus.REFUNDED -> "refunded"
+        PurchaseRecordStatus.SHIPPED,
+        PurchaseRecordStatus.DELIVERED,
+        PurchaseRecordStatus.UNKNOWN -> "unknown"
+    }
+
+    private fun PurchaseRecord.cashOsTimestampProvenance(): String? =
+        if (orderedAt != null || paidAt != null) "source_timestamp_offset" else null
 
     private fun toPayload(
         request: ProjectionRequest,

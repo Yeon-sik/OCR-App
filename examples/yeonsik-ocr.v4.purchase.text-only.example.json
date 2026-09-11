@@ -22,6 +22,7 @@
       "seller_business_kind": null,
       "source_version": null,
       "order_reference": null,
+      "purchase_kind": "unknown",
       "ordered_on": null,
       "ordered_at": null,
       "paid_on": "2026-09-11",

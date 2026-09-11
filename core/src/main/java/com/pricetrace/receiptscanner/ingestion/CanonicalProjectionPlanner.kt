@@ -22,7 +22,7 @@ object CanonicalProjectionPlanner {
             ) {
                 add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
             }
-            if (envelope.purchaseRecords.any(PurchaseRecord::priceObservationEligible)) {
+            if (envelope.purchaseRecords.any(PurchaseRecord::priceTraceSourceEligible)) {
                 add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
             }
             if (envelope.purchaseRecords.any(PurchaseRecord::cashOsTransactionEligible)) {
@@ -90,6 +90,17 @@ object CanonicalProjectionPlanner {
             add(IngestionProjection.PRICETRACE_RECEIPT)
         }
         if (requested.contains(IngestionProjection.PRICETRACE_PRICE_OBSERVATION) &&
+            envelope.purchaseRecords.any { record ->
+                record.priceTraceSourceEligible &&
+                    record.purchaseKind == PurchaseKind.RETAIL &&
+                    record.lineItems.any { line ->
+                        line.productClientKey in envelope.productCandidates.map(ProductCandidate::clientKey).toSet()
+                    }
+            }
+        ) {
+            add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
+        }
+        if (requested.contains(IngestionProjection.PRICETRACE_PRICE_OBSERVATION) &&
             envelope.priceObservations.isNotEmpty() &&
             envelope.priceObservations.all { it.netAmountMinor != null } &&
             envelope.priceObservations.any { it.kind == StandalonePriceObservationKind.RETAIL_PURCHASE } &&
@@ -126,6 +137,16 @@ object CanonicalProjectionPlanner {
                 if (envelope.priceObservations.any {
                         it.kind == StandalonePriceObservationKind.RETAIL_PURCHASE
                     }) {
+                    add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
+                }
+                if (envelope.purchaseRecords.any { record ->
+                        record.priceTraceSourceEligible &&
+                            record.purchaseKind == PurchaseKind.RETAIL &&
+                            record.lineItems.any { line ->
+                                line.productClientKey in envelope.productCandidates.map(ProductCandidate::clientKey).toSet()
+                            }
+                    }
+                ) {
                     add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
                 }
             }

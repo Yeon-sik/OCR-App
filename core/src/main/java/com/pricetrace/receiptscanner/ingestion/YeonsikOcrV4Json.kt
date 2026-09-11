@@ -1,5 +1,6 @@
 package com.pricetrace.receiptscanner.ingestion
 
+import com.pricetrace.receiptscanner.domain.StableIds
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -44,7 +45,9 @@ object YeonsikOcrV4Json {
         val source = decodeSource(root.objectValue("source"))
         require(root["merchant_candidate"] == JsonNull)
         require(root["receipt"] == JsonNull)
-        require(root.arrayValue("product_candidates").isEmpty())
+        val productCandidates = root.arrayValue("product_candidates").map {
+            decodeProductCandidate(it, source)
+        }
         require(root.arrayValue("price_observations").isEmpty())
         require(root.arrayValue("nutrition").isEmpty())
         require(root.arrayValue("consumption").isEmpty())
@@ -56,7 +59,7 @@ object YeonsikOcrV4Json {
         require(purchaseRecords.isNotEmpty()) {
             "yeonsik-ocr.v4 requires at least one purchase_record"
         }
-        validatePurchaseEvidence(source, purchaseRecords)
+        validatePurchaseEvidence(source, productCandidates, purchaseRecords)
 
         val targets = root.arrayValue("projection_targets").map {
             IngestionProjection.fromWireValue(it.jsonPrimitive.content)
@@ -64,6 +67,7 @@ object YeonsikOcrV4Json {
         val hints = decodeHints(root.objectValue("classification_hints"))
         val review = decodeReview(
             root.objectValue("review"),
+            productCandidates,
             purchaseRecords,
             preservePersistedVerification,
         )
@@ -79,7 +83,7 @@ object YeonsikOcrV4Json {
             links = emptyList(),
             targets = targets,
             review = review,
-            productCandidates = emptyList(),
+            productCandidates = productCandidates,
             schemaVersion = YEONSIK_OCR_V4_SCHEMA,
             priceObservations = emptyList(),
             purchaseRecords = purchaseRecords,
@@ -116,12 +120,14 @@ object YeonsikOcrV4Json {
         }
         require(envelope.mode == IngestionMode.PURCHASE)
         require(envelope.merchantCandidate == null && envelope.receipt == null)
-        require(envelope.productCandidates.isEmpty())
+        require(envelope.productCandidates.map { it.clientKey }.distinct().size == envelope.productCandidates.size) {
+            "v4 product candidate client_key values must be unique"
+        }
         require(envelope.priceObservations.isEmpty())
         require(envelope.nutrition.isEmpty() && envelope.consumption.isEmpty())
         require(envelope.links.isEmpty())
         require(envelope.purchaseRecords.isNotEmpty())
-        validatePurchaseEvidence(envelope.source, envelope.purchaseRecords)
+        validatePurchaseEvidence(envelope.source, envelope.productCandidates, envelope.purchaseRecords)
     }
 
     /** Shared by the PriceTrace and CashOS V4 adapters. */
@@ -141,7 +147,9 @@ object YeonsikOcrV4Json {
         put("source", sourceJson(envelope.source))
         put("merchant_candidate", JsonNull)
         put("receipt", JsonNull)
-        put("product_candidates", JsonArray(emptyList()))
+        put("product_candidates", JsonArray(envelope.productCandidates.map {
+            productCandidateJson(it, envelope.source.userText)
+        }))
         put("price_observations", JsonArray(emptyList()))
         put("purchase_records", JsonArray(envelope.purchaseRecords.map(::purchaseRecordJson)))
         put("nutrition", JsonArray(emptyList()))
@@ -177,6 +185,7 @@ object YeonsikOcrV4Json {
         put("seller_business_kind", value.sellerBusinessKind?.let(::JsonPrimitive) ?: JsonNull)
         put("source_version", value.sourceVersion?.let(::JsonPrimitive) ?: JsonNull)
         put("order_reference", value.orderReference?.let(::JsonPrimitive) ?: JsonNull)
+        put("purchase_kind", JsonPrimitive(value.purchaseKind.wireValue))
         put("ordered_on", value.orderedOn?.let(::JsonPrimitive) ?: JsonNull)
         put("ordered_at", value.orderedAt?.let(::JsonPrimitive) ?: JsonNull)
         put("paid_on", value.paidOn?.let(::JsonPrimitive) ?: JsonNull)
@@ -231,6 +240,218 @@ object YeonsikOcrV4Json {
         }))
         put("confidence", JsonPrimitive(value.confidence))
     }
+
+    private fun productCandidateJson(
+        value: ProductCandidate,
+        sourceUserText: String?,
+    ): JsonObject = buildJsonObject {
+        put("client_key", JsonPrimitive(value.clientKey))
+        put("product_name", JsonPrimitive(value.productName))
+        put("merchant_sku", value.merchantSku?.let(::JsonPrimitive) ?: JsonNull)
+        put("brand_name", value.brandName?.let(::JsonPrimitive) ?: JsonNull)
+        put("sub_brand_name", value.subBrandName?.let(::JsonPrimitive) ?: JsonNull)
+        put("manufacturer_name", value.manufacturerName?.let(::JsonPrimitive) ?: JsonNull)
+        put("variant_name", value.variantName?.let(::JsonPrimitive) ?: JsonNull)
+        put("specification_text", value.specification?.let(::JsonPrimitive) ?: JsonNull)
+        put("content_amount", value.contentAmount?.let(::JsonPrimitive) ?: JsonNull)
+        put("content_unit", value.contentUnit?.let(::JsonPrimitive) ?: JsonNull)
+        put("package_count", value.packageCount?.let(::JsonPrimitive) ?: JsonNull)
+        put("barcodes", JsonArray(value.barcodes.map { barcode ->
+            buildJsonObject {
+                put("scheme", JsonPrimitive(barcode.scheme))
+                put("value", JsonPrimitive(barcode.value))
+            }
+        }))
+        put("source_attachment_ids", JsonArray(value.effectiveSourceAttachmentIds.map(::JsonPrimitive)))
+        put("evidence", JsonArray(value.evidence.map { evidence ->
+            productEvidenceJson(evidence, value.effectiveSourceAttachmentIds, sourceUserText)
+        }))
+        put("confidence", JsonPrimitive(value.confidence))
+    }
+
+    private fun productEvidenceJson(
+        value: ProductCandidateEvidence,
+        candidateSourceAttachmentIds: List<String>,
+        sourceUserText: String?,
+    ): JsonObject {
+        val sourceRef = productEvidenceSourceRef(
+            value = value,
+            candidateSourceAttachmentIds = candidateSourceAttachmentIds,
+            sourceUserText = sourceUserText,
+        )
+            ?: error("product candidate evidence source_ref is required")
+        return buildJsonObject {
+            put("source_type", JsonPrimitive(value.sourceType))
+            put("source_ref", JsonPrimitive(sourceRef))
+            put("field", JsonPrimitive(value.field))
+            put("observed_value", value.observedValue?.let(::JsonPrimitive) ?: JsonNull)
+            put("content_hash", value.contentHash?.let(::JsonPrimitive) ?: JsonNull)
+        }
+    }
+
+    private fun decodeProductCandidate(
+        element: JsonElement,
+        source: IngestionSource,
+    ): ProductCandidate {
+        val root = element.jsonObject
+        requireKeysAllowingOptional(
+            root,
+            PRODUCT_CANDIDATE_KEYS - setOf("merchant_sku", "evidence"),
+            setOf("merchant_sku", "evidence"),
+            "product_candidate",
+        )
+        val sourceAttachmentIds = root.arrayValue("source_attachment_ids").strings()
+        val barcodes = root.arrayValue("barcodes").map { barcodeElement ->
+            val barcode = barcodeElement.jsonObject
+            requireKeys(barcode, BARCODE_KEYS, "product_candidate.barcode")
+            ProductCandidateBarcode(type = barcode.string("scheme"), value = barcode.string("value"))
+        }
+        val productName = root.string("product_name")
+        val merchantSku = root.nullableString("merchant_sku")
+        val brand = root.nullableString("brand_name")
+        val subBrand = root.nullableString("sub_brand_name")
+        val manufacturer = root.nullableString("manufacturer_name")
+        val variant = root.nullableString("variant_name")
+        val specification = root.nullableString("specification_text")
+        val evidence = root["evidence"]?.let {
+            decodeProductEvidence(it, sourceAttachmentIds, source.userText)
+        } ?: if (sourceAttachmentIds.isNotEmpty()) {
+            val sourceType = source.sourceFiles
+                .firstOrNull { it.id == sourceAttachmentIds.first() }
+                ?.type?.wireValue
+                ?: error("product candidate references an unknown source file")
+            productFacts(
+                sourceAttachmentIds = sourceAttachmentIds,
+                sourceType = sourceType,
+                sourceRef = sourceAttachmentIds.first(),
+                productName = productName,
+                merchantSku = merchantSku,
+                brand = brand,
+                subBrand = subBrand,
+                manufacturer = manufacturer,
+                variant = variant,
+                specification = specification,
+                barcodes = barcodes,
+            )
+        } else {
+            productFacts(
+                sourceAttachmentIds = emptyList(),
+                sourceType = "user_statement",
+                sourceRef = userStatementSourceRef(source.userText)
+                    ?: error("product candidate evidence requires source_attachment_ids or source.user_text"),
+                productName = productName,
+                merchantSku = merchantSku,
+                brand = brand,
+                subBrand = subBrand,
+                manufacturer = manufacturer,
+                variant = variant,
+                specification = specification,
+                barcodes = barcodes,
+            )
+        }
+        return ProductCandidate(
+            clientKey = root.string("client_key"),
+            productName = productName,
+            brand = brand,
+            subBrand = subBrand,
+            manufacturer = manufacturer,
+            specification = specification,
+            merchantSku = merchantSku,
+            contentAmount = root.nullableNumber("content_amount"),
+            contentUnit = root.nullableString("content_unit"),
+            packageCount = root.nullableNumber("package_count")?.toPositiveInt("package_count"),
+            variant = variant,
+            barcodes = barcodes,
+            evidence = evidence,
+            sourceAttachmentIds = sourceAttachmentIds,
+            confidence = root.number("confidence"),
+        )
+    }
+
+    private fun decodeProductEvidence(
+        element: JsonElement,
+        sourceAttachmentIds: List<String>,
+        sourceUserText: String?,
+    ): List<ProductCandidateEvidence> = element.jsonArray.map { evidenceElement ->
+        val root = evidenceElement.jsonObject
+        requireKeysAllowingOptional(
+            root,
+            PRODUCT_EVIDENCE_KEYS - setOf("source_ref", "content_hash"),
+            setOf("source_ref", "content_hash"),
+            "product_candidate.evidence",
+        )
+        val sourceType = root.string("source_type")
+        val sourceRef = root.nullableString("source_ref")
+            ?: when (sourceType) {
+                "user_statement" -> userStatementSourceRef(sourceUserText)
+                "order_history" -> sourceAttachmentIds.firstOrNull()
+                else -> null
+            }
+            ?: error("product candidate evidence source_ref or source.user_text is required")
+        ProductCandidateEvidence(
+            sourceAttachmentIds = sourceAttachmentIds,
+            sourceType = sourceType,
+            sourceRef = sourceRef,
+            field = root.string("field"),
+            observedValue = root.nullableString("observed_value"),
+            contentHash = root.nullableString("content_hash"),
+        )
+    }
+
+    private fun productFacts(
+        sourceAttachmentIds: List<String>,
+        sourceType: String,
+        sourceRef: String,
+        productName: String,
+        merchantSku: String?,
+        brand: String?,
+        subBrand: String?,
+        manufacturer: String?,
+        variant: String?,
+        specification: String?,
+        barcodes: List<ProductCandidateBarcode>,
+    ): List<ProductCandidateEvidence> = buildList {
+        add("product_name" to productName)
+        merchantSku?.let { add("merchant_sku" to it) }
+        brand?.let { add("brand_name" to it) }
+        subBrand?.let { add("sub_brand_name" to it) }
+        manufacturer?.let { add("manufacturer_name" to it) }
+        variant?.let { add("variant_name" to it) }
+        specification?.let { add("specification_text" to it) }
+        if (barcodes.isNotEmpty()) {
+            add("barcodes" to barcodes.joinToString(",") { "${it.scheme}:${it.value}" })
+        }
+    }.map { (field, observedValue) ->
+        ProductCandidateEvidence(
+            sourceAttachmentIds = sourceAttachmentIds,
+            sourceType = sourceType,
+            sourceRef = sourceRef,
+            field = field,
+            observedValue = observedValue,
+        )
+    }
+
+    private fun productEvidenceSourceRef(
+        value: ProductCandidateEvidence,
+        candidateSourceAttachmentIds: List<String>,
+        sourceUserText: String?,
+    ): String? {
+        val explicit = value.sourceRef?.takeIf(String::isNotBlank)
+            ?: value.source?.takeIf(String::isNotBlank)
+        if (explicit != null) return explicit
+        return when (value.sourceType) {
+            "user_statement" -> userStatementSourceRef(sourceUserText)
+            "order_history" -> value.sourceAttachmentIds.firstOrNull()
+                ?: candidateSourceAttachmentIds.firstOrNull()
+            else -> value.sourceAttachmentIds.firstOrNull()
+                ?: candidateSourceAttachmentIds.firstOrNull()
+        }
+    }
+
+    private fun userStatementSourceRef(sourceUserText: String?): String? =
+        sourceUserText?.trim()?.takeIf(String::isNotBlank)?.let {
+            "user-statement:sha256:" + StableIds.sha256(it)
+        }
 
     private fun decodePurchaseRecord(root: JsonObject): PurchaseRecord {
         requireKeysAllowingOptional(
@@ -291,6 +512,7 @@ object YeonsikOcrV4Json {
         return PurchaseRecord(
             clientKey = root.string("client_key"),
             platform = root.string("platform"),
+            purchaseKind = PurchaseKind.fromWireValue(root.string("purchase_kind")),
             platformCode = root.nullableString("platform_code"),
             seller = root.nullableString("seller"),
             sellerBranchName = root.nullableString("seller_branch_name"),
@@ -351,8 +573,10 @@ object YeonsikOcrV4Json {
 
     private fun validatePurchaseEvidence(
         source: IngestionSource,
+        productCandidates: List<ProductCandidate>,
         records: List<PurchaseRecord>,
     ) {
+        validateProductCandidateEvidence(source, productCandidates)
         val filesById = source.sourceFiles.associateBy { it.id }
         records.forEach { record ->
             record.evidence.forEach { evidence ->
@@ -378,6 +602,43 @@ object YeonsikOcrV4Json {
         }
     }
 
+    private fun validateProductCandidateEvidence(
+        source: IngestionSource,
+        candidates: List<ProductCandidate>,
+    ) {
+        val filesById = source.sourceFiles.associateBy { it.id }
+        candidates.forEach { candidate ->
+            val sourceAttachmentIds = candidate.effectiveSourceAttachmentIds
+            sourceAttachmentIds.forEach { id ->
+                require(id in filesById) {
+                    "product candidate references unknown source file"
+                }
+            }
+            candidate.evidence.forEach { evidence ->
+                when (evidence.sourceType) {
+                    "user_statement" -> {
+                        require(!source.userText.isNullOrBlank()) {
+                            "product candidate user_statement evidence requires source.user_text"
+                        }
+                        // source_attachment_ids belongs to the candidate as a whole in the
+                        // V4 wire shape. It may coexist with a distinct user_statement fact.
+                    }
+                    "order_history" -> {
+                        require(sourceAttachmentIds.isNotEmpty()) {
+                            "product candidate order_history evidence requires source attachments"
+                        }
+                        require(sourceAttachmentIds.all {
+                            filesById.getValue(it).type == SourceAttachmentType.ORDER_HISTORY
+                        }) {
+                            "product candidate evidence source type does not match source file"
+                        }
+                    }
+                    else -> error("v4 product candidate evidence must be order_history or user_statement")
+                }
+            }
+        }
+    }
+
     private fun decodeHints(root: JsonObject): Map<String, String?> {
         require(root.keys subtract setOf("cashos") == emptySet<String>())
         val cashos = root.objectValue("cashos")
@@ -388,6 +649,7 @@ object YeonsikOcrV4Json {
 
     private fun decodeReview(
         root: JsonObject,
+        productCandidates: List<ProductCandidate>,
         records: List<PurchaseRecord>,
         preservePersistedVerification: Boolean,
     ): IngestionReview {
@@ -399,7 +661,7 @@ object YeonsikOcrV4Json {
             require(it is JsonPrimitive && it.isString)
             VerificationBasis.fromWireValue(it.content)
         }
-        val conflicts = conflictIssues(records)
+        val conflicts = conflictIssues(productCandidates, records)
         val status = when {
             conflicts.isNotEmpty() -> IngestionReviewStatus.CONFLICT
             preservePersistedVerification -> declaredStatus
@@ -422,7 +684,7 @@ object YeonsikOcrV4Json {
         includeAuthorityFields: Boolean,
         forFingerprint: Boolean,
     ): JsonObject {
-        val conflicts = conflictIssues(envelope.purchaseRecords)
+        val conflicts = conflictIssues(envelope.productCandidates, envelope.purchaseRecords)
         val status = if (conflicts.isNotEmpty()) IngestionReviewStatus.CONFLICT.wireValue
         else if (includeAuthorityFields) envelope.review.status.wireValue
         else IngestionReviewStatus.NEEDS_REVIEW.wireValue
@@ -449,12 +711,19 @@ object YeonsikOcrV4Json {
         }
     }
 
-    private fun conflictIssues(records: List<PurchaseRecord>): List<String> =
-        records.flatMap { record ->
+    private fun conflictIssues(
+        productCandidates: List<ProductCandidate>,
+        records: List<PurchaseRecord>,
+    ): List<String> =
+        (productCandidates.flatMap { candidate ->
+            candidate.conflictFields().sorted().map { field ->
+                "product_candidate_conflict:" + candidate.clientKey + ":" + field
+            }
+        } + records.flatMap { record ->
             record.conflictFields().sorted().map { field ->
                 "purchase_evidence_conflict:" + record.clientKey + ":" + field
             }
-        }.distinct().sorted()
+        }).distinct().sorted()
 
     private fun sourceJson(source: IngestionSource): JsonObject = buildJsonObject {
         put("producer", JsonPrimitive(source.producer))
@@ -527,6 +796,13 @@ object YeonsikOcrV4Json {
             primitive.content.toLongOrNull() ?: error(key + " must be an integer or null")
         }
 
+    private fun Double.toPositiveInt(key: String): Int {
+        require(isFinite() && this % 1.0 == 0.0 && this > 0 && this <= Int.MAX_VALUE.toDouble()) {
+            "$key must be a positive integer"
+        }
+        return toInt()
+    }
+
     private fun JsonObject.objectValue(key: String): JsonObject =
         this[key]?.jsonObject ?: error(key + " must be an object")
 
@@ -545,9 +821,20 @@ object YeonsikOcrV4Json {
     )
     private val SOURCE_KEYS = setOf("producer", "source_files", "user_text")
     private val SOURCE_FILE_KEYS = setOf("id", "type", "label")
+    private val PRODUCT_CANDIDATE_KEYS = setOf(
+        "client_key", "product_name", "merchant_sku", "brand_name", "sub_brand_name",
+        "manufacturer_name", "variant_name", "specification_text", "content_amount",
+        "content_unit", "package_count", "barcodes", "source_attachment_ids", "evidence",
+        "confidence",
+    )
+    private val PRODUCT_EVIDENCE_KEYS = setOf(
+        "source_type", "source_ref", "field", "observed_value", "content_hash",
+    )
+    private val BARCODE_KEYS = setOf("scheme", "value")
     private val PURCHASE_RECORD_REQUIRED_KEYS = setOf(
         "client_key", "platform", "seller", "ordered_on", "ordered_at", "paid_on", "paid_at",
-        "status", "currency", "totals", "payment", "line_items", "evidence", "confidence",
+        "purchase_kind", "status", "currency", "totals", "payment", "line_items", "evidence",
+        "confidence",
     )
     private val PURCHASE_RECORD_OPTIONAL_KEYS = setOf(
         "platform_code", "seller_branch_name", "seller_source_namespace", "seller_source_code",

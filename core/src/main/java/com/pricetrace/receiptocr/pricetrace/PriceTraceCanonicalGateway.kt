@@ -30,6 +30,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.IOException
 import java.net.SocketTimeoutException
 
@@ -331,7 +332,7 @@ class PriceTraceCanonicalGateway(
         config: PriceTraceSupabaseConfig,
         contract: PriceTracePurchaseObservationV4Contract,
     ): PriceTraceCanonicalOutcome = try {
-        val records = envelope.purchaseRecords.filter { it.priceObservationEligible }
+        val records = envelope.purchaseRecords.filter { it.priceTraceSourceEligible }
         require(records.isNotEmpty()) { "purchase_price_observation_missing" }
         val responses = records.map { record ->
             val recordKey = StableIds.sha256("$idempotencyKey|purchase_record=${record.clientKey}")
@@ -362,6 +363,16 @@ class PriceTraceCanonicalGateway(
         PriceTraceCanonicalOutcome.Success(buildJsonObject {
             put("schemaVersion", JsonPrimitive("purchase-price-observation.v4"))
             put("contractVersion", JsonPrimitive("purchase-price.v4"))
+            put("sourceSaved", JsonPrimitive(true))
+            put("observationCreated", JsonPrimitive(responses.any { it.observationCreated }))
+            put(
+                "observationCount",
+                JsonPrimitive(responses.sumOf { it.observationIds.size }),
+            )
+            put("purchaseSourceIds", JsonArray(responses.map {
+                JsonPrimitive(it.purchaseSourceId)
+            }))
+            put("observationIds", JsonArray(responses.flatMap { it.observationIds }.map(::JsonPrimitive)))
             put("sources", JsonArray(responses.map { it.raw }))
         })
     } catch (cancelled: CancellationException) {
@@ -640,6 +651,11 @@ class PriceTraceCanonicalProjectionSubmitter(
                             ProjectionSubmission.Success(
                                 remoteId = remoteId,
                                 metadataJson = result.response.encode(),
+                                primaryUploaded = result.response["observationCreated"]
+                                    ?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() == true,
+                                primaryPendingReason = result.response["observationCreated"]
+                                    ?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull()
+                                    ?.let { created -> if (created) null else "price_observation_not_created" },
                             )
                         }
                         is PriceTraceCanonicalOutcome.Failure -> ProjectionSubmission.Failure(
