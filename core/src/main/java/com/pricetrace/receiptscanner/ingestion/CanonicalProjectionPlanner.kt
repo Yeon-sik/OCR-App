@@ -17,7 +17,9 @@ object CanonicalProjectionPlanner {
                 add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
                 add(IngestionProjection.CASHOS_RECEIPT)
             }
-            if (envelope.priceObservations.isNotEmpty()) {
+            if (envelope.priceObservations.isNotEmpty() &&
+                envelope.priceObservations.all { it.netAmountMinor != null }
+            ) {
                 add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
             }
             if (envelope.productCandidates.isNotEmpty()) {
@@ -77,13 +79,21 @@ object CanonicalProjectionPlanner {
             add(IngestionProjection.PRICETRACE_RECEIPT)
         }
         if (requested.contains(IngestionProjection.PRICETRACE_PRICE_OBSERVATION) &&
+            envelope.priceObservations.isNotEmpty() &&
+            envelope.priceObservations.all { it.netAmountMinor != null } &&
             envelope.priceObservations.any { it.kind == StandalonePriceObservationKind.RETAIL_PURCHASE } &&
             envelope.productCandidates.isNotEmpty()
         ) {
             add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
         }
         if (requested.contains(IngestionProjection.FITNESS_NUTRITION) &&
-            envelope.nutrition.any { it is IngestionNutrition.RestaurantMenuEstimate }
+            envelope.nutrition.filterIsInstance<IngestionNutrition.RestaurantMenuEstimate>().let { menuItems ->
+                menuItems.isNotEmpty() && menuItems.all { item ->
+                    envelope.priceObservations.singleOrNull { observation ->
+                        observation.clientKey == item.priceObservationClientKey
+                    }?.netAmountMinor != null
+                }
+            }
         ) {
             add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
         }

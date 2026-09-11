@@ -19,6 +19,7 @@ import com.pricetrace.receiptscanner.domain.ReceiptV2Totals
 import com.pricetrace.receiptscanner.domain.RetailChannel
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
 import com.pricetrace.receiptscanner.ingestion.*
+import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -156,7 +157,7 @@ class PriceTraceCanonicalGatewayTest {
                     evidence = listOf(
                         StandalonePriceObservationEvidence(
                             sourceType = "product_photo",
-                            sourceRef = "product-photo-1",
+                            sourceAttachmentIds = listOf("product-photo-1"),
                             field = "net_amount_minor",
                             observedValue = "1000",
                         ),
@@ -259,7 +260,7 @@ class PriceTraceCanonicalGatewayTest {
                     evidence = listOf(
                         StandalonePriceObservationEvidence(
                             sourceType = "product_photo",
-                            sourceRef = "product-photo-unknowns",
+                            sourceAttachmentIds = listOf("product-photo-unknowns"),
                             field = "unit_price_amount_minor",
                             observedValue = "500",
                         ),
@@ -276,26 +277,10 @@ class PriceTraceCanonicalGatewayTest {
 
         val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
             .submitStandalonePriceObservations("unknown-price-key", envelope)
-        assertTrue(result is PriceTraceCanonicalOutcome.Success)
-
-        val observation = Json.parseToJsonElement(
-            requireNotNull(transport.requests.single().body),
-        ).jsonObject["p_observation"]!!.jsonObject
-        assertEquals("2026-09-07", observation["observed_on"]?.jsonPrimitive?.content)
-        assertFalse(observation.containsKey("observed_at"))
-        assertEquals(JsonNull, observation["gross_price"])
-        assertEquals(JsonNull, observation["discount"])
-        assertEquals(JsonNull, observation["net_price"])
-        assertEquals(JsonNull, observation["quantity"])
-        assertEquals("500", observation["unit_price"]?.jsonPrimitive?.content)
-        assertEquals(
-            "SKU-OBSERVED",
-            observation["product"]!!.jsonObject["merchant_sku"]?.jsonPrimitive?.content,
-        )
-        assertEquals(
-            "product-unknowns",
-            observation["product"]!!.jsonObject["product_client_key"]?.jsonPrimitive?.content,
-        )
+        assertTrue(result is PriceTraceCanonicalOutcome.Failure)
+        assertEquals(PriceObservationFailureKind.CONTRACT, (result as PriceTraceCanonicalOutcome.Failure).kind)
+        assertEquals("price_observation_net_amount_required", result.message)
+        assertTrue(transport.requests.isEmpty())
     }
 
     @Test
@@ -319,7 +304,7 @@ class PriceTraceCanonicalGatewayTest {
                     kind = StandalonePriceObservationKind.RESTAURANT_PURCHASE,
                     itemName = "Noodles",
                     observedOn = "2026-09-07",
-                    quantity = StandalonePriceObservationQuantity(1.0, "each"),
+                    quantity = StandalonePriceObservationQuantity(1.0, "serving"),
                     unitPriceAmountMinor = 11_000,
                     grossAmountMinor = 11_000,
                     discountAmountMinor = 0,
@@ -327,8 +312,8 @@ class PriceTraceCanonicalGatewayTest {
                     sourceAttachmentIds = listOf("menu-photo-1"),
                     evidence = listOf(
                         StandalonePriceObservationEvidence(
-                            sourceType = "ocr",
-                            sourceRef = "menu-photo-1",
+                            sourceType = "menu_photo",
+                            sourceAttachmentIds = listOf("menu-photo-1"),
                             field = "net_amount_minor",
                             observedValue = "11000",
                         ),
@@ -353,6 +338,7 @@ class PriceTraceCanonicalGatewayTest {
         val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
         val observation = body["p_observation"]!!.jsonObject
         assertEquals("restaurant_purchase", observation["kind"]?.jsonPrimitive?.content)
+        assertEquals("1", observation["quantity"]?.jsonPrimitive?.content)
         assertEquals("restaurant-location-1", observation["merchant"]!!.jsonObject["source_location_code"]?.jsonPrimitive?.content)
         assertFalse(observation["merchant"]!!.jsonObject.containsKey("source_code"))
         assertEquals("Noodles", observation["item"]!!.jsonObject["item_name"]?.jsonPrimitive?.content)

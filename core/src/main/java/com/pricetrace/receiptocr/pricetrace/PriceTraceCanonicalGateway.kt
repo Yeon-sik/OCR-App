@@ -268,6 +268,9 @@ class PriceTraceCanonicalGateway(
     ): PriceTraceCanonicalOutcome = try {
         require(envelope.priceObservations.isNotEmpty()) { "standalone_price_observation_missing" }
         require(envelope.merchantCandidate != null) { "merchant_candidate_missing" }
+        require(envelope.priceObservations.all { it.netAmountMinor != null }) {
+            "price_observation_net_amount_required"
+        }
         val responses = mutableListOf<JsonObject>()
         envelope.priceObservations.forEach { observation ->
             val observationKey = StableIds.sha256("$idempotencyKey|observation=${observation.clientKey}")
@@ -322,8 +325,12 @@ class PriceTraceCanonicalGateway(
         put("discount", observation.discountAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
         put("net_price", observation.netAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
         put("quantity", observation.quantity?.let { quantity ->
-            require(quantity.unit == "each") {
-                "PriceTrace standalone contract supports only each quantity units"
+            val expectedUnit = when (observation.kind) {
+                StandalonePriceObservationKind.RETAIL_PURCHASE -> "each"
+                StandalonePriceObservationKind.RESTAURANT_PURCHASE -> "serving"
+            }
+            require(quantity.unit == expectedUnit) {
+                "PriceTrace standalone quantity unit must be $expectedUnit"
             }
             JsonPrimitive(quantity.value.toLong())
         } ?: JsonNull)
@@ -544,6 +551,12 @@ class PriceTraceCanonicalProjectionSubmitter(
                 if (request.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
                     envelope.priceObservations.isNotEmpty()
                 ) {
+                    if (envelope.priceObservations.any { it.netAmountMinor == null }) {
+                        return ProjectionSubmission.Failure(
+                            "price_observation_net_amount_required",
+                            retryable = false,
+                        )
+                    }
                     if (envelope.review.status != com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus.READY) {
                         return ProjectionSubmission.Failure("canonical_review_required", retryable = false)
                     }

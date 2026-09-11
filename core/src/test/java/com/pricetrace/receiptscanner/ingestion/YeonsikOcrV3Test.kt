@@ -69,7 +69,15 @@ class YeonsikOcrV3Test {
         assertFalse(priceWire.containsKey("gross"))
         assertFalse(priceWire.containsKey("discount"))
         assertFalse(priceWire.containsKey("net"))
-        assertTrue(priceWire.getValue("evidence").jsonArray.single().jsonObject.containsKey("source_type"))
+        assertEquals(
+            setOf("source_type", "source_attachment_ids", "field", "observed_value"),
+            priceWire.getValue("evidence").jsonArray.single().jsonObject.keys,
+        )
+        assertEquals(
+            listOf("product-photo-1"),
+            priceWire.getValue("evidence").jsonArray.single().jsonObject
+                .getValue("source_attachment_ids").jsonArray.map { it.jsonPrimitive.content },
+        )
         assertEquals(null, roundTripped.productCandidates.single().merchantSku)
         val encodedReview = parse(YeonsikOcrV3Json.encode(envelope))["review"]!!.jsonObject
         assertEquals(setOf("status", "blocking_issues", "warnings"), encodedReview.keys)
@@ -96,6 +104,7 @@ class YeonsikOcrV3Test {
         assertEquals(2900L, price.netAmountMinor)
         assertTrue(price.sourceAttachmentIds.isEmpty())
         assertEquals("user_statement", price.evidence.single().sourceType)
+        assertTrue(price.evidence.single().sourceAttachmentIds.isEmpty())
         assertEquals("net_amount_minor", price.evidence.single().field)
         assertEquals("2900", price.evidence.single().observedValue)
 
@@ -107,6 +116,14 @@ class YeonsikOcrV3Test {
         assertTrue(evidenceWire.all { it.jsonObject.getValue("source_type").jsonPrimitive.content == "user_statement" })
         assertTrue(evidenceWire.all { it.jsonObject.getValue("source_ref").jsonPrimitive.content == "user-statement:purchase-20260910-1" })
         assertTrue(evidenceWire.all { it.jsonObject.getValue("content_hash") == JsonNull })
+        val priceEvidenceWire = parse(YeonsikOcrV3Json.encode(envelope))
+            .getValue("price_observations").jsonArray.single().jsonObject
+            .getValue("evidence").jsonArray.single().jsonObject
+        assertEquals(
+            setOf("source_type", "source_attachment_ids", "field", "observed_value"),
+            priceEvidenceWire.keys,
+        )
+        assertTrue(priceEvidenceWire.getValue("source_attachment_ids").jsonArray.isEmpty())
         assertEquals(IngestionReviewStatus.NEEDS_REVIEW, envelope.review.status)
 
         val persisted = YeonsikOcrV3Json.decode(
@@ -148,6 +165,49 @@ class YeonsikOcrV3Test {
         assertThrows(IllegalArgumentException::class.java) {
             YeonsikOcrV3Json.decode(encode(invalidDiscount), "v3-discount-mismatch")
         }
+    }
+
+    @Test
+    fun `net-null standalone draft is not PriceTrace eligible or submitted`() = runBlocking {
+        val root = parse(retailJson())
+        val price = root.getValue("price_observations").jsonArray.single().jsonObject
+        val draft = JsonObject(price.toMutableMap().apply { put("net_amount_minor", JsonNull) })
+        val input = JsonObject(root.toMutableMap().apply {
+            put("price_observations", JsonArray(listOf(draft)))
+        })
+        val submitter = RecordingSubmitter()
+        val useCase = CanonicalIngestionUseCase(
+            store = InMemoryIngestionSessionStore(),
+            submitters = mapOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION to submitter),
+        )
+        val imported = useCase.importJson(
+            encode(input),
+            localDocumentId = "v3-net-null",
+            ingestionId = "v3-net-null-ingestion",
+        ) as CanonicalImportResult.Success
+
+        assertEquals(null, imported.envelope.priceObservations.single().netAmountMinor)
+        assertFalse(
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION in
+                useCase.plan(imported.envelope).eligible,
+        )
+
+        val confirmation = useCase.confirm(
+            imported.session.ingestionId,
+            imported.envelope,
+            verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+        )
+        assertTrue(confirmation.result is IngestionStartResult.Success)
+        val states = useCase.submitSelected(
+            imported.session.ingestionId,
+            confirmation.envelope,
+            setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION),
+        )
+        assertEquals(
+            ProjectionStatus.DISABLED,
+            states.single { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }.status,
+        )
+        assertTrue(submitter.requests.isEmpty())
     }
 
     @Test
@@ -234,6 +294,9 @@ class YeonsikOcrV3Test {
 
         assertEquals(StandalonePriceObservationKind.RESTAURANT_PURCHASE, price.kind)
         assertEquals("Noodles", price.itemName)
+        assertEquals("serving", price.quantity?.unit)
+        assertEquals("menu_photo", price.evidence.single().sourceType)
+        assertEquals(listOf("menu-photo-1"), price.evidence.single().sourceAttachmentIds)
         assertEquals("price-1", menu.priceObservationClientKey)
         assertEquals(null, envelope.receipt)
         val roundTripped = YeonsikOcrV3Json.decode(
@@ -266,9 +329,11 @@ class YeonsikOcrV3Test {
         val price = envelope.priceObservations.single()
         assertEquals(StandalonePriceObservationKind.RESTAURANT_PURCHASE, price.kind)
         assertEquals("KRW", price.currency)
-        assertEquals(StandalonePriceObservationQuantity(1.0, "each"), price.quantity)
+        assertEquals(StandalonePriceObservationQuantity(1.0, "serving"), price.quantity)
         assertEquals(10_000L, price.netAmountMinor)
         assertEquals(listOf("menu-photo-1"), price.sourceAttachmentIds)
+        assertEquals("menu_photo", price.evidence.single().sourceType)
+        assertEquals(listOf("menu-photo-1"), price.evidence.single().sourceAttachmentIds)
 
         val roundTripped = YeonsikOcrV3Json.decode(
             YeonsikOcrV3Json.encode(envelope),
@@ -734,10 +799,9 @@ class YeonsikOcrV3Test {
         put("source_attachment_ids", JsonArray(listOf(JsonPrimitive("product-photo-1"))))
         put("evidence", JsonArray(listOf(buildJsonObject {
             put("source_type", JsonPrimitive("product_photo"))
-            put("source_ref", JsonPrimitive("product-photo-1"))
+            put("source_attachment_ids", JsonArray(listOf(JsonPrimitive("product-photo-1"))))
             put("field", JsonPrimitive("net_amount_minor"))
             put("observed_value", JsonPrimitive("1300"))
-            put("content_hash", JsonNull)
         })))
         put("confidence", JsonPrimitive(0.9))
     }
@@ -752,7 +816,7 @@ class YeonsikOcrV3Test {
         put("currency", JsonPrimitive("KRW"))
         put("quantity", buildJsonObject {
             put("value", JsonPrimitive(1.0))
-            put("unit", JsonPrimitive("each"))
+            put("unit", JsonPrimitive("serving"))
         })
         put("unit_price_amount_minor", JsonPrimitive(10000))
         put("gross_amount_minor", JsonPrimitive(10000))
@@ -760,11 +824,10 @@ class YeonsikOcrV3Test {
         put("net_amount_minor", JsonPrimitive(10000))
         put("source_attachment_ids", JsonArray(listOf(JsonPrimitive("menu-photo-1"))))
         put("evidence", JsonArray(listOf(buildJsonObject {
-            put("source_type", JsonPrimitive("ocr"))
-            put("source_ref", JsonPrimitive("menu-photo-1"))
+            put("source_type", JsonPrimitive("menu_photo"))
+            put("source_attachment_ids", JsonArray(listOf(JsonPrimitive("menu-photo-1"))))
             put("field", JsonPrimitive("net_amount_minor"))
             put("observed_value", JsonPrimitive("10000"))
-            put("content_hash", JsonNull)
         })))
         put("confidence", JsonPrimitive(0.9))
     }

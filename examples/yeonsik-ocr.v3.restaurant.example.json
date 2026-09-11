@@ -30,7 +30,7 @@
       "observed_on": "2026-09-07",
       "observed_at": null,
       "currency": "KRW",
-      "quantity": {"value": 1.0, "unit": "each"},
+      "quantity": {"value": 1.0, "unit": "serving"},
       "unit_price_amount_minor": 10000,
       "gross_amount_minor": 10000,
       "discount_amount_minor": 0,
@@ -38,11 +38,10 @@
       "source_attachment_ids": ["menu-photo-1"],
       "evidence": [
         {
-          "source_type": "ocr",
-          "source_ref": "menu-photo-1",
+          "source_type": "menu_photo",
+          "source_attachment_ids": ["menu-photo-1"],
           "field": "net_amount_minor",
-          "observed_value": "10000",
-          "content_hash": null
+          "observed_value": "10000"
         }
       ],
       "confidence": 0.9

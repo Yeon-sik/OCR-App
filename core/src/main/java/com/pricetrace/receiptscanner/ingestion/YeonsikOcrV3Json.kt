@@ -50,7 +50,7 @@ object YeonsikOcrV3Json {
             decodeProductCandidate(it, source.userText)
         }
         val priceObservations = root.arrayValue("price_observations").map {
-            decodePriceObservation(it, source.userText)
+            decodePriceObservation(it)
         }
         val nutrition = root.arrayValue("nutrition").map {
             decodeNutrition(it, localDocumentId, preservePersistedVerification)
@@ -234,10 +234,9 @@ object YeonsikOcrV3Json {
         put("evidence", JsonArray(value.evidence.map { evidence ->
             buildJsonObject {
                 put("source_type", JsonPrimitive(evidence.sourceType))
-                put("source_ref", JsonPrimitive(evidence.sourceRef))
+                put("source_attachment_ids", JsonArray(evidence.sourceAttachmentIds.map(::JsonPrimitive)))
                 put("field", JsonPrimitive(evidence.field))
                 put("observed_value", evidence.observedValue?.let(::JsonPrimitive) ?: JsonNull)
-                put("content_hash", evidence.contentHash?.let(::JsonPrimitive) ?: JsonNull)
             }
         }))
         put("confidence", JsonPrimitive(value.confidence))
@@ -461,7 +460,6 @@ object YeonsikOcrV3Json {
 
     private fun decodePriceObservation(
         element: JsonElement,
-        sourceUserText: String?,
     ): StandalonePriceObservation {
         val root = element.jsonObject
         requireKeys(root, PRICE_OBSERVATION_KEYS)
@@ -487,7 +485,7 @@ object YeonsikOcrV3Json {
             netAmountMinor = root.nullableLong("net_amount_minor"),
             sourceAttachmentIds = sourceAttachmentIds,
             evidence = root.arrayValue("evidence").map { evidenceElement ->
-                decodePriceObservationEvidence(evidenceElement, sourceAttachmentIds, sourceUserText)
+                decodePriceObservationEvidence(evidenceElement)
             },
             confidence = root.number("confidence"),
         )
@@ -495,32 +493,15 @@ object YeonsikOcrV3Json {
 
     private fun decodePriceObservationEvidence(
         element: JsonElement,
-        sourceAttachmentIds: List<String>,
-        sourceUserText: String?,
     ): StandalonePriceObservationEvidence {
         val root = element.jsonObject
         requireKeys(root, PRICE_OBSERVATION_EVIDENCE_KEYS)
-        val sourceType = root.string("source_type")
-        val sourceRef = root.nullableString("source_ref")
-            ?: resolvePriceObservationEvidenceSourceRef(sourceType, sourceAttachmentIds, sourceUserText)
-            ?: error("price observation evidence source_ref or source.user_text is required")
         return StandalonePriceObservationEvidence(
-            sourceType = sourceType,
-            sourceRef = sourceRef,
+            sourceType = root.string("source_type"),
+            sourceAttachmentIds = root.arrayValue("source_attachment_ids").strings(),
             field = root.string("field"),
             observedValue = root.nullableString("observed_value"),
-            contentHash = root.nullableString("content_hash"),
         )
-    }
-
-    private fun resolvePriceObservationEvidenceSourceRef(
-        sourceType: String,
-        sourceAttachmentIds: List<String>,
-        sourceUserText: String?,
-    ): String? = when {
-        sourceType == "user_statement" -> userStatementSourceRef(sourceUserText)
-        sourceAttachmentIds.isNotEmpty() -> sourceAttachmentIds.first()
-        else -> null
     }
 
     private fun decodeNutrition(
@@ -987,7 +968,7 @@ object YeonsikOcrV3Json {
     )
     private val PRICE_QUANTITY_KEYS = setOf("value", "unit")
     private val PRICE_OBSERVATION_EVIDENCE_KEYS = setOf(
-        "source_type", "source_ref", "field", "observed_value", "content_hash",
+        "source_type", "source_attachment_ids", "field", "observed_value",
     )
     private val NUTRITION_KEYS = setOf(
         "client_key", "kind", "line_id", "menu_name", "component_role", "payload", "estimate",

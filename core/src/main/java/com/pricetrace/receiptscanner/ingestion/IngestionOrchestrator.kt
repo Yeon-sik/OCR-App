@@ -416,6 +416,12 @@ class IngestionOrchestrator(
             val invalidated = invalidateVerification(session, envelope, "canonical_fingerprint_mismatch")
             return invalidated.projections.first { it.projection == projection }
         }
+        if (projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
+            envelope.priceObservations.isNotEmpty() &&
+            envelope.priceObservations.any { it.netAmountMinor == null }
+        ) {
+            return persistBlocked(session, projection, current, "price_observation_net_amount_required")
+        }
         if (projection == IngestionProjection.FITNESS_MEAL &&
             envelope.schemaVersion in setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V3_SCHEMA) &&
             !fitnessMealValuesComplete(envelope)
@@ -923,15 +929,14 @@ class IngestionOrchestrator(
         observation.sourceAttachmentIds.sorted().joinToString(","),
         observation.evidence.sortedWith(compareBy(
             { it.sourceType },
-            { it.sourceRef },
+            { it.sourceAttachmentIds.joinToString(",") },
             { it.field },
         )).joinToString(",") { evidence ->
             listOf(
                 evidence.sourceType,
-                evidence.sourceRef,
+                evidence.sourceAttachmentIds.sorted().joinToString(","),
                 evidence.field,
                 evidence.observedValue,
-                evidence.contentHash,
             ).joinToString("/") { it ?: "<null>" }
         },
         observation.confidence,

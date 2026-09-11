@@ -70,10 +70,9 @@
       "evidence": [
         {
           "source_type": "user_statement",
-          "source_ref": "user-statement:purchase-20260910-1",
+          "source_attachment_ids": [],
           "field": "net_amount_minor",
-          "observed_value": "2900",
-          "content_hash": null
+          "observed_value": "2900"
         }
       ],
       "confidence": 1.0

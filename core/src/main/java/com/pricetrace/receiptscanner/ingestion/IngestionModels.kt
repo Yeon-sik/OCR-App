@@ -25,6 +25,17 @@ private val ATTACHMENT_BACKED_EVIDENCE_SOURCE_TYPES = setOf(
     "receipt",
     "ocr",
 )
+private val PRICE_OBSERVATION_EVIDENCE_SOURCE_TYPES = setOf(
+    "product_photo",
+    "menu_photo",
+    "food_photo",
+    "user_statement",
+)
+private val PRICE_OBSERVATION_ATTACHMENT_BACKED_EVIDENCE_SOURCE_TYPES = setOf(
+    "product_photo",
+    "menu_photo",
+    "food_photo",
+)
 object IngestionArtifactKeys {
     const val RECEIPT = "receipt"
     const val MERCHANT_CANDIDATE = "merchant_candidate"
@@ -285,26 +296,30 @@ data class StandalonePriceObservationQuantity(
 
 data class StandalonePriceObservationEvidence(
     val sourceType: String,
-    val sourceRef: String,
+    val sourceAttachmentIds: List<String>,
     val field: String,
     val observedValue: String? = null,
-    val contentHash: String? = null,
 ) {
     init {
-        require(sourceType in CANONICAL_EVIDENCE_SOURCE_TYPES) {
+        require(sourceType in PRICE_OBSERVATION_EVIDENCE_SOURCE_TYPES) {
             "unsupported price observation evidence source type"
         }
-        require(sourceRef.isNotBlank()) {
-            "price observation evidence source_ref is required"
+        require(sourceAttachmentIds.distinct().size == sourceAttachmentIds.size) {
+            "price observation evidence source attachment IDs must be unique"
+        }
+        require(sourceAttachmentIds.all(String::isNotBlank)) {
+            "price observation evidence source attachment IDs must be non-empty"
+        }
+        if (sourceType in PRICE_OBSERVATION_ATTACHMENT_BACKED_EVIDENCE_SOURCE_TYPES) {
+            require(sourceAttachmentIds.isNotEmpty()) {
+                "attachment-backed price observation evidence requires source attachment IDs"
+            }
         }
         require(field.isNotBlank()) {
             "price observation evidence field is required"
         }
         require(observedValue == null || observedValue.isNotBlank()) {
             "price observation evidence observed_value must be non-empty when present"
-        }
-        require(contentHash == null || contentHash.matches(Regex("^sha256:[a-f0-9]{64}$"))) {
-            "price observation evidence content hash must be sha256"
         }
     }
 }
@@ -348,6 +363,18 @@ data class StandalonePriceObservation(
         require(sourceAttachmentIds.all(String::isNotBlank)) {
             "price observation source attachment IDs must be non-empty"
         }
+        evidence.forEach { item ->
+            require(item.sourceAttachmentIds.all { it in sourceAttachmentIds }) {
+                "price observation evidence source attachment IDs must belong to the observation"
+            }
+        }
+        val expectedQuantityUnit = when (kind) {
+            StandalonePriceObservationKind.RETAIL_PURCHASE -> "each"
+            StandalonePriceObservationKind.RESTAURANT_PURCHASE -> "serving"
+        }
+        require(quantity == null || quantity.unit == expectedQuantityUnit) {
+            "price observation ${kind.wireValue} quantity unit must be $expectedQuantityUnit"
+        }
         listOf(unitPriceAmountMinor, grossAmountMinor, discountAmountMinor, netAmountMinor).forEach { value ->
             require(value == null || value >= 0) { "price observation amounts must be non-negative" }
         }
@@ -386,11 +413,7 @@ data class StandalonePriceObservation(
             "price observation evidence is required"
         }
         evidence.forEach { item ->
-            if (item.sourceType in ATTACHMENT_BACKED_EVIDENCE_SOURCE_TYPES) {
-                require(sourceAttachmentIds.isNotEmpty()) {
-                    "attachment-backed price observation evidence requires source attachment IDs"
-                }
-            }
+            require(item.sourceType in PRICE_OBSERVATION_EVIDENCE_SOURCE_TYPES)
         }
         require(confidence.isFinite() && confidence in 0.0..1.0) {
             "price observation confidence must be between 0 and 1"
