@@ -1,14 +1,12 @@
 package com.yeonsik.ingestion.desktop
 
-import com.pricetrace.receiptscanner.importer.ExternalJsonImportOutcome
-import com.pricetrace.receiptscanner.importer.ExternalJsonImporter
-import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
+import com.pricetrace.receiptscanner.ingestion.CanonicalImportResult
+import com.pricetrace.receiptscanner.ingestion.CanonicalIngestionUseCase
 import com.pricetrace.receiptscanner.ingestion.IngestionArtifactKeys
 import com.pricetrace.receiptscanner.ingestion.IngestionEvidenceGate
-import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
-import com.pricetrace.receiptscanner.ingestion.IngestionOrchestrator
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionSession
+import com.pricetrace.receiptscanner.ingestion.IngestionStartResult
 import com.pricetrace.receiptscanner.input.InputOrigin
 import com.pricetrace.receiptscanner.ingestion.LocalEvidence
 import com.pricetrace.receiptscanner.ingestion.ProjectionState
@@ -16,6 +14,7 @@ import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec
+import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -50,15 +49,13 @@ data class DesktopUiState(
 class DesktopIngestionController(
     private val store: DesktopSessionStore = DesktopSessionStore(),
     private val bundle: DesktopProjectionBundle = DesktopProjectionBundle(),
-    private val importer: ExternalJsonImporter = ExternalJsonImporter(),
     private val now: () -> String = { OffsetDateTime.now().toString() },
 ) {
     private val _state = MutableStateFlow(DesktopUiState())
     val state: StateFlow<DesktopUiState> = _state.asStateFlow()
 
-    private val orchestrator = IngestionOrchestrator(
+    private val useCase = CanonicalIngestionUseCase(
         store = store,
-        identityResolver = null,
         submitters = bundle.submitters,
         now = now,
     )
@@ -71,17 +68,24 @@ class DesktopIngestionController(
         beginBusy()
         try {
             val localDocumentId = _state.value.localDocumentId ?: newLocalDocumentId()
-            val outcome = importer.import(value, localDocumentId)
-            when (outcome) {
-                is ExternalJsonImportOutcome.Failure -> {
+            val result = useCase.importJson(
+                value = value,
+                localDocumentId = localDocumentId,
+                ingestionId = _state.value.ingestionId ?: newIngestionId(),
+                evidence = localEvidence(_state.value.evidence),
+                inputOrigin = InputOrigin.EXTERNAL_JSON,
+            )
+            when (result) {
+                is CanonicalImportResult.Failure -> {
                     _state.value = _state.value.copy(
                         rawJson = value,
                         schema = null,
-                        error = "${outcome.error.code}: ${outcome.error.detail.orEmpty()}".trimEnd(),
+                        error = result.error?.let { "${it.code}: ${it.detail.orEmpty()}" }
+                            ?: result.issues.joinToString(", "),
                         notice = null,
                     )
                 }
-                is ExternalJsonImportOutcome.Success -> importCanonical(value, localDocumentId, outcome.result.canonicalEnvelope)
+                is CanonicalImportResult.Success -> importCanonical(value, result)
             }
         } catch (error: Exception) {
             _state.value = _state.value.copy(rawJson = value, error = error.message ?: error.javaClass.simpleName, notice = null)
@@ -124,68 +128,47 @@ class DesktopIngestionController(
         }
     }
 
-    suspend fun verify() {
+    suspend fun verify(
+        verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+    ) {
         beginBusy()
         try {
             val currentState = _state.value
             val currentSession = currentState.session ?: error("Import JSON before verification.")
-            val original = currentEnvelope()
-            val promoted = promoteForVerification(original)
-            val revised = orchestrator.reviseCanonicalDraft(currentSession.ingestionId, promoted)
-            if (revised is com.pricetrace.receiptscanner.ingestion.IngestionStartResult.Failure) {
-                failWithSession(revised.issues.joinToString(", "))
-                return
-            }
-
-            var latest = requireNotNull(store.get(currentSession.ingestionId))
-            val evidence = currentState.evidence
-            val operations = buildList<suspend () -> com.pricetrace.receiptscanner.ingestion.IngestionStartResult> {
-                if (promoted.receipt != null) {
-                    add { orchestrator.markReceiptVerified(latest.ingestionId, promoted, localEvidence(evidence)) }
-                }
-                if (promoted.nutrition.isNotEmpty()) {
-                    add { orchestrator.markNutritionVerified(latest.ingestionId, promoted, localEvidence(evidence)) }
-                }
-                if (promoted.consumption.isNotEmpty()) {
-                    add { orchestrator.markConsumptionVerified(latest.ingestionId, promoted, localEvidence(evidence)) }
-                }
-                if (promoted.productCandidates.isNotEmpty()) {
-                    add { orchestrator.markProductCandidatesVerified(latest.ingestionId, promoted, localEvidence(evidence)) }
-                }
-                if (promoted.receipt == null && promoted.nutrition.isEmpty() &&
-                    promoted.productCandidates.isEmpty() && promoted.merchantCandidate != null
-                ) {
-                    add { orchestrator.markUserVerified(latest.ingestionId, promoted, localEvidence(evidence)) }
+            val confirmation = useCase.confirm(
+                ingestionId = currentSession.ingestionId,
+                envelope = currentEnvelope(),
+                evidence = localEvidence(currentState.evidence),
+                inputOrigin = InputOrigin.EXTERNAL_JSON,
+                verificationBasis = verificationBasis,
+            )
+            val latest = when (val result = confirmation.result) {
+                is IngestionStartResult.Success -> result.session
+                is IngestionStartResult.Duplicate -> result.session
+                is IngestionStartResult.Failure -> {
+                    val saved = store.get(currentSession.ingestionId) ?: currentSession
+                    val canonicalJson = YeonsikOcrEnvelopeCodec.encodePersisted(confirmation.envelope)
+                    persistRecord(saved, currentState.rawJson, canonicalJson, currentState.evidence)
+                    publish(
+                        session = saved,
+                        envelope = confirmation.envelope,
+                        rawJson = currentState.rawJson,
+                        canonicalJson = canonicalJson,
+                        evidence = currentState.evidence,
+                        notice = null,
+                        error = "Verification blocked: ${result.issues.joinToString(", ")}",
+                    )
+                    return
                 }
             }
-            for (operation in operations) {
-                when (val result = operation()) {
-                    is com.pricetrace.receiptscanner.ingestion.IngestionStartResult.Success -> latest = result.session
-                    is com.pricetrace.receiptscanner.ingestion.IngestionStartResult.Duplicate -> latest = result.session
-                    is com.pricetrace.receiptscanner.ingestion.IngestionStartResult.Failure -> {
-                        latest = requireNotNull(store.get(currentSession.ingestionId))
-                        persistRecord(latest, currentState.rawJson, YeonsikOcrEnvelopeCodec.encode(promoted), evidence)
-                        publish(
-                            session = latest,
-                            envelope = promoted,
-                            rawJson = currentState.rawJson,
-                            canonicalJson = YeonsikOcrEnvelopeCodec.encode(promoted),
-                            evidence = evidence,
-                            notice = null,
-                            error = "Verification blocked: ${result.issues.joinToString(", ")}",
-                        )
-                        return
-                    }
-                }
-            }
-            val canonicalJson = YeonsikOcrEnvelopeCodec.encode(promoted)
-            persistRecord(latest, currentState.rawJson, canonicalJson, evidence)
+            val canonicalJson = YeonsikOcrEnvelopeCodec.encodePersisted(confirmation.envelope)
+            persistRecord(latest, currentState.rawJson, canonicalJson, currentState.evidence)
             publish(
                 session = latest,
-                envelope = promoted,
+                envelope = confirmation.envelope,
                 rawJson = currentState.rawJson,
                 canonicalJson = canonicalJson,
-                evidence = evidence,
+                evidence = currentState.evidence,
                 notice = if (latest.verifiedCanonicalFingerprint != null) {
                     "Verified. Projections are ready for Submit."
                 } else {
@@ -200,7 +183,7 @@ class DesktopIngestionController(
         }
     }
 
-    suspend fun submit() {
+    suspend fun submit(selectedProjections: Set<IngestionProjection> = emptySet()) {
         beginBusy()
         try {
             val currentState = _state.value
@@ -209,11 +192,13 @@ class DesktopIngestionController(
             if (session.verifiedCanonicalFingerprint != session.canonicalFingerprint) {
                 error("Verify the reviewed artifacts before submitting.")
             }
-            val active = session.projections
-                .filterNot { it.status == ProjectionStatus.DISABLED }
-                .map(ProjectionState::projection)
-                .toSet()
-            val authenticationErrors = bundle.ensureAuthenticated(active, envelope)
+            val plan = useCase.plan(envelope)
+            val selected = if (selectedProjections.isEmpty()) plan.eligible else {
+                selectedProjections.intersect(plan.eligible)
+            }
+            if (selected.isEmpty()) error("No eligible projection selected.")
+            val authenticationTargets = selected + selected.flatMap { plan.dependencies[it].orEmpty() }
+            val authenticationErrors = bundle.ensureAuthenticated(authenticationTargets, envelope)
             if (authenticationErrors.isNotEmpty()) {
                 _state.value = currentState.copy(
                     error = authenticationErrors.joinToString(" "),
@@ -221,7 +206,7 @@ class DesktopIngestionController(
                 )
                 return
             }
-            val projections = orchestrator.submitAllReadyProjections(session.ingestionId, envelope)
+            val projections = useCase.submitSelected(session.ingestionId, envelope, selected)
             val latest = requireNotNull(store.get(session.ingestionId))
             persistRecord(latest, currentState.rawJson, currentState.canonicalJson, currentState.evidence)
             publish(
@@ -239,6 +224,8 @@ class DesktopIngestionController(
             endBusy()
         }
     }
+
+    suspend fun retry(selectedProjections: Set<IngestionProjection> = emptySet()) = submit(selectedProjections)
 
     suspend fun loadLatest() {
         beginBusy()
@@ -266,26 +253,13 @@ class DesktopIngestionController(
 
     private suspend fun importCanonical(
         rawJson: String,
-        localDocumentId: String,
-        envelope: YeonsikOcrEnvelope,
+        result: CanonicalImportResult.Success,
     ) {
         val currentState = _state.value
-        val currentSession = currentState.session
-        val ingestionId = currentSession?.ingestionId ?: newIngestionId()
+        val envelope = result.envelope
         val evidence = currentState.evidence
-        val result = if (currentSession == null) {
-            orchestrator.start(
-                ingestionId = ingestionId,
-                localDocumentId = localDocumentId,
-                envelope = envelope,
-                evidence = localEvidence(evidence),
-                inputOrigin = InputOrigin.EXTERNAL_JSON,
-            )
-        } else {
-            orchestrator.reviseCanonicalDraft(currentSession.ingestionId, envelope)
-        }
 
-        if (result is com.pricetrace.receiptscanner.ingestion.IngestionStartResult.Duplicate && currentSession == null) {
+        if (result.startResult is IngestionStartResult.Duplicate && currentState.session == null) {
             val existing = store.loadRecord(result.session.ingestionId)
             if (existing != null && existing.canonicalJson.isNotBlank()) {
                 loadRecord(existing, "Duplicate fingerprint: loaded existing local session.")
@@ -297,32 +271,18 @@ class DesktopIngestionController(
             return
         }
 
-        val session = store.get(ingestionId) ?: error("The imported session was not persisted.")
+        val session = result.session
         val canonicalJson = YeonsikOcrEnvelopeCodec.encode(envelope)
-        val notice = when (result) {
-            is com.pricetrace.receiptscanner.ingestion.IngestionStartResult.Failure ->
-                "Parsed and saved. Verification is blocked: ${result.issues.joinToString(", ")}."
-            is com.pricetrace.receiptscanner.ingestion.IngestionStartResult.Success ->
+        val startResult = result.startResult
+        val notice = when (startResult) {
+            is IngestionStartResult.Failure ->
+                "Parsed and saved. Verification is blocked: ${startResult.issues.joinToString(", ")}."
+            is IngestionStartResult.Success ->
                 "Parsed and validated. Review the JSON and attach evidence before Verify."
             else -> "Parsed and validated."
         }
         persistRecord(session, rawJson, canonicalJson, evidence)
         publish(session, envelope, rawJson, canonicalJson, evidence, notice, null)
-    }
-
-    private fun promoteForVerification(envelope: YeonsikOcrEnvelope): YeonsikOcrEnvelope {
-        val confirmedAt = now()
-        return envelope.copy(
-            nutrition = envelope.nutrition.map { item ->
-                when (item) {
-                    is IngestionNutrition.ProductLabel -> item.copy(
-                        draft = item.draft.asUserVerified(confirmedAt),
-                    )
-                    else -> item
-                }
-            },
-            consumption = envelope.consumption.map { it.copy(status = ConsumptionVerificationStatus.USER_VERIFIED) },
-        )
     }
 
     private fun currentEnvelope(): YeonsikOcrEnvelope = _state.value.schema?.let {
@@ -399,7 +359,15 @@ class DesktopIngestionController(
         evidence: List<LocalEvidence>,
     ): List<DesktopArtifactState> = buildList {
         fun addArtifact(key: String, label: String) {
-            val gate = IngestionEvidenceGate.evaluate(envelope, evidence, InputOrigin.EXTERNAL_JSON, setOf(key))
+            val basis = envelope.review.verificationBasis
+            val gate = IngestionEvidenceGate.evaluate(
+                envelope = envelope,
+                evidence = evidence,
+                inputOrigin = InputOrigin.EXTERNAL_JSON,
+                artifactKeys = setOf(key),
+                verificationBasis = basis,
+                explicitUserConfirmation = basis == VerificationBasis.MANUAL_CANONICAL_REVIEW,
+            )
             add(
                 DesktopArtifactState(
                     key = key,
@@ -413,6 +381,9 @@ class DesktopIngestionController(
         if (envelope.receipt != null) addArtifact(IngestionArtifactKeys.RECEIPT, "Receipt")
         if (envelope.merchantCandidate != null && envelope.receipt == null) {
             addArtifact(IngestionArtifactKeys.MERCHANT_CANDIDATE, "Merchant candidate")
+        }
+        envelope.priceObservations.forEach {
+            addArtifact(IngestionArtifactKeys.priceObservation(it.clientKey), "Price: ${it.clientKey}")
         }
         envelope.nutrition.forEach { addArtifact(IngestionArtifactKeys.nutrition(it.clientKey), "Nutrition: ${it.clientKey}") }
         envelope.consumption.forEach { addArtifact(IngestionArtifactKeys.consumption(it.clientKey), "Consumption: ${it.clientKey}") }

@@ -27,7 +27,18 @@ object IngestionEvidenceGate {
          * bundle at once.
          */
         artifactKeys: Set<String>? = null,
+        verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+        explicitUserConfirmation: Boolean = false,
     ): IngestionEvidenceResult {
+        val domainIssues = CanonicalEnvelopeValidator.validate(envelope)
+        if (domainIssues.isNotEmpty()) return IngestionEvidenceResult(false, domainIssues)
+        if (verificationBasis == VerificationBasis.MANUAL_CANONICAL_REVIEW) {
+            return if (explicitUserConfirmation) {
+                IngestionEvidenceResult(isAllowed = true)
+            } else {
+                IngestionEvidenceResult(false, listOf("manual_canonical_confirmation_required"))
+            }
+        }
         val requiredTypes = requiredEvidenceTypes(envelope, artifactKeys)
         val scopedEvidence = if (artifactKeys == null) {
             evidence
@@ -60,6 +71,7 @@ object IngestionEvidenceGate {
                 when (item) {
                     is IngestionNutrition.ProductLabel -> add(SourceAttachmentType.NUTRITION_LABEL)
                     is IngestionNutrition.RestaurantEstimate -> add(SourceAttachmentType.FOOD_PHOTO)
+                    is IngestionNutrition.RestaurantMenuEstimate -> add(SourceAttachmentType.MENU_PHOTO)
                     is IngestionNutrition.MealComponentEstimate -> add(SourceAttachmentType.FOOD_PHOTO)
                 }
             }
@@ -69,5 +81,15 @@ object IngestionEvidenceGate {
         if (artifactKeys == null || artifactKeys.any { it.startsWith("${IngestionArtifactKeys.PRODUCT_CANDIDATE}:") }) {
             if (envelope.productCandidates.isNotEmpty()) add(SourceAttachmentType.PRODUCT_PHOTO)
         }
+        envelope.priceObservations
+            .filter { observation -> artifactKeys == null || IngestionArtifactKeys.priceObservation(observation.clientKey) in artifactKeys }
+            .forEach { observation ->
+                add(
+                    when (observation.kind) {
+                        StandalonePriceObservationKind.RETAIL_PURCHASE -> SourceAttachmentType.PRODUCT_PHOTO
+                        StandalonePriceObservationKind.RESTAURANT_PURCHASE -> SourceAttachmentType.MENU_PHOTO
+                    },
+                )
+            }
     }
 }

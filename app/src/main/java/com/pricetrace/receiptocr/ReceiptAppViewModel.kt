@@ -52,9 +52,10 @@ import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionConsumption
 import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
 import com.pricetrace.receiptscanner.ingestion.CONSUMPTION_AMOUNT_STATUSES
+import com.pricetrace.receiptscanner.ingestion.IngestionProjection
+import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.ingestion.ProductCandidate
 import com.pricetrace.receiptscanner.ingestion.IngestionOrchestrator
-import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus
 import com.pricetrace.receiptscanner.ingestion.IngestionArtifactKeys
 import com.pricetrace.receiptscanner.ingestion.IngestionEvidenceGate
@@ -155,6 +156,7 @@ enum class AppScreen {
     API_SETTINGS,
     IMAGE_CONFIRM,
     IMPORT_PREVIEW,
+    CANONICAL_JSON_VALIDATOR,
     MERCHANT_REVIEW,
     PRODUCT_CANDIDATE_REVIEW,
     OCR_PROGRESS,
@@ -314,9 +316,13 @@ class ReceiptAppViewModel(
     private val externalJsonImporter = ExternalJsonImporter()
     private val ingestionOrchestrator = container.ingestionOrchestrator
     private val ingestionSessionStore = container.ingestionSessionStore
+    private val canonicalJsonValidator = AndroidCanonicalJsonValidator(container.canonicalIngestionUseCase)
 
     private val mutableUiState = MutableStateFlow(ReceiptAppUiState())
     val uiState: StateFlow<ReceiptAppUiState> = mutableUiState.asStateFlow()
+    private val mutableCanonicalJsonValidatorState = MutableStateFlow(AndroidCanonicalJsonValidatorState())
+    val canonicalJsonValidatorState: StateFlow<AndroidCanonicalJsonValidatorState> =
+        mutableCanonicalJsonValidatorState.asStateFlow()
     private val mutableEvents = MutableSharedFlow<ReceiptUiEvent>(extraBufferCapacity = 1)
     val events: SharedFlow<ReceiptUiEvent> = mutableEvents.asSharedFlow()
 
@@ -548,6 +554,94 @@ class ReceiptAppViewModel(
                     message = externalImportFailureMessage(outcome.error.code),
                 )
                 is ExternalJsonImportOutcome.Success -> persistExternalImport(outcome.result, state)
+            }
+        }
+    }
+
+    fun showCanonicalJsonValidator() {
+        mutableUiState.value = mutableUiState.value.copy(
+            screen = AppScreen.CANONICAL_JSON_VALIDATOR,
+            message = null,
+        )
+    }
+
+    fun updateCanonicalJsonValidatorRawJson(value: String) {
+        mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(
+            rawJson = value,
+            error = null,
+        )
+    }
+
+    fun setCanonicalJsonValidatorBasis(value: VerificationBasis) {
+        mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(
+            verificationBasis = value,
+            error = null,
+        )
+    }
+
+    fun selectCanonicalJsonProjection(projection: IngestionProjection, selected: Boolean) {
+        val current = mutableCanonicalJsonValidatorState.value
+        if (projection !in current.plan?.eligible.orEmpty()) return
+        val selections = current.selectedProjections.toMutableSet().apply {
+            if (selected) add(projection) else remove(projection)
+        }
+        mutableCanonicalJsonValidatorState.value = current.copy(
+            selectedProjections = selections,
+            error = null,
+        )
+    }
+
+    fun importCanonicalJsonValidator(uri: Uri) {
+        val current = mutableCanonicalJsonValidatorState.value
+        if (current.busy) return
+        viewModelScope.launch {
+            val text = try {
+                getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+                    input.readBytes().toString(Charsets.UTF_8)
+                } ?: throw IllegalStateException("empty_stream")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableCanonicalJsonValidatorState.value = current.copy(
+                    error = "JSON 파일을 읽지 못했습니다: ${error.message ?: "empty_stream"}",
+                    notice = null,
+                )
+                return@launch
+            }
+            runCanonicalJsonValidator { state -> canonicalJsonValidator.importJson(text, state) }
+        }
+    }
+
+    fun parseCanonicalJsonValidator() =
+        runCanonicalJsonValidator { state -> canonicalJsonValidator.importJson(state.rawJson, state) }
+
+    fun confirmCanonicalJsonValidator() =
+        runCanonicalJsonValidator(canonicalJsonValidator::confirm)
+
+    fun submitCanonicalJsonValidator() =
+        runCanonicalJsonValidator(canonicalJsonValidator::submit)
+
+    fun retryCanonicalJsonValidator() =
+        runCanonicalJsonValidator(canonicalJsonValidator::retry)
+
+    private fun runCanonicalJsonValidator(
+        operation: suspend (AndroidCanonicalJsonValidatorState) -> AndroidCanonicalJsonValidatorState,
+    ) {
+        val before = mutableCanonicalJsonValidatorState.value
+        if (before.busy) return
+        mutableCanonicalJsonValidatorState.value = before.copy(busy = true, error = null)
+        viewModelScope.launch {
+            try {
+                mutableCanonicalJsonValidatorState.value = operation(before).copy(busy = false)
+            } catch (cancelled: CancellationException) {
+                mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(busy = false)
+                throw cancelled
+            } catch (error: Exception) {
+                mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(
+                    busy = false,
+                    error = error.message ?: error.javaClass.simpleName,
+                    notice = null,
+                )
             }
         }
     }
@@ -4138,6 +4232,7 @@ class ReceiptAppViewModel(
             AppScreen.API_SETTINGS -> AppScreen.SESSION_LIST
             AppScreen.IMAGE_CONFIRM -> AppScreen.SESSION_LIST
             AppScreen.IMPORT_PREVIEW -> AppScreen.SESSION_LIST
+            AppScreen.CANONICAL_JSON_VALIDATOR -> AppScreen.SESSION_LIST
             AppScreen.MERCHANT_REVIEW -> AppScreen.SESSION_LIST
             AppScreen.PRODUCT_CANDIDATE_REVIEW -> AppScreen.SESSION_LIST
             AppScreen.OCR_PROGRESS -> return true
@@ -4585,7 +4680,12 @@ class ReceiptAppViewModel(
     }
     private fun navigate(screen: AppScreen) {
         val state = mutableUiState.value
-        if (screen != AppScreen.IMAGE_CONFIRM && screen != AppScreen.SESSION_LIST && state.receipt == null) return
+        if (
+            screen != AppScreen.IMAGE_CONFIRM &&
+            screen != AppScreen.SESSION_LIST &&
+            screen != AppScreen.CANONICAL_JSON_VALIDATOR &&
+            state.receipt == null
+        ) return
         mutableUiState.value = state.copy(
             screen = screen,
             message = null,

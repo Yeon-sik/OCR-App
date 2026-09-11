@@ -121,6 +121,8 @@ import com.pricetrace.receiptscanner.ingestion.ProductCandidate
 import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionConsumption
 import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
+import com.pricetrace.receiptscanner.ingestion.IngestionProjection
+import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
 import com.pricetrace.receiptscanner.publisher.PriceObservationSource
 import com.pricetrace.receiptscanner.preflight.ReceiptAiReviewStatus
@@ -146,12 +148,21 @@ fun ReceiptOcrContent(
     onScan: () -> Unit = {},
     onPickImages: () -> Unit = {},
     onPickJson: () -> Unit = {},
+    onPickCanonicalJson: () -> Unit = {},
     onWorkflowSelected: (OcrWorkflowType) -> Unit = {},
     onAppendScan: () -> Unit = {},
     onAppendPickImages: () -> Unit = {},
     onStartImportReview: () -> Unit = {},
     onAttachImportImage: () -> Unit = {},
     onCancelImport: () -> Unit = {},
+    canonicalJsonValidatorState: AndroidCanonicalJsonValidatorState = AndroidCanonicalJsonValidatorState(),
+    onCanonicalJsonChanged: (String) -> Unit = {},
+    onCanonicalJsonBasisChanged: (VerificationBasis) -> Unit = {},
+    onCanonicalJsonParse: () -> Unit = {},
+    onCanonicalJsonConfirm: () -> Unit = {},
+    onCanonicalJsonProjectionSelected: (IngestionProjection, Boolean) -> Unit = { _, _ -> },
+    onCanonicalJsonSubmit: () -> Unit = {},
+    onCanonicalJsonRetry: () -> Unit = {},
     onSelectSession: (String) -> Unit = {},
     onDeleteSession: (String) -> Unit = {},
     onShowApiSettings: () -> Unit = {},
@@ -358,6 +369,7 @@ fun ReceiptOcrContent(
                     onScan = onScan,
                     onPickImages = onPickImages,
                     onPickJson = onPickJson,
+                    onPickCanonicalJson = onPickCanonicalJson,
                     onWorkflowSelected = onWorkflowSelected,
                     onSelectSession = onSelectSession,
                     onDeleteSession = onDeleteSession,
@@ -372,6 +384,17 @@ fun ReceiptOcrContent(
                         onCancel = onCancelImport,
                     )
                 }
+                AppScreen.CANONICAL_JSON_VALIDATOR -> CanonicalJsonValidatorScreen(
+                    state = canonicalJsonValidatorState,
+                    onBack = onBack,
+                    onJsonChanged = onCanonicalJsonChanged,
+                    onBasisChanged = onCanonicalJsonBasisChanged,
+                    onParse = onCanonicalJsonParse,
+                    onConfirm = onCanonicalJsonConfirm,
+                    onProjectionSelected = onCanonicalJsonProjectionSelected,
+                    onSubmit = onCanonicalJsonSubmit,
+                    onRetry = onCanonicalJsonRetry,
+                )
                 AppScreen.MERCHANT_REVIEW -> uiState.merchantCandidate?.let { candidate ->
                     MerchantCandidateReviewScreen(
                         candidate = candidate,
@@ -748,6 +771,7 @@ private fun SessionListScreen(
     onScan: () -> Unit,
     onPickImages: () -> Unit,
     onPickJson: () -> Unit,
+    onPickCanonicalJson: () -> Unit,
     onWorkflowSelected: (OcrWorkflowType) -> Unit,
     onSelectSession: (String) -> Unit,
     onDeleteSession: (String) -> Unit,
@@ -844,6 +868,15 @@ private fun SessionListScreen(
                 modifier = Modifier.fillMaxWidth().testTag("pick_json_button"),
             ) {
                 Text("JSON 가져오기")
+            }
+        }
+        item {
+            OutlinedButton(
+                onClick = onPickCanonicalJson,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth().testTag("pick_canonical_json_button"),
+            ) {
+                Text("올인원 JSON 검증기")
             }
         }
         item {
@@ -988,6 +1021,173 @@ private fun ImportPreviewScreen(
         item {
             TextButton(onClick = onCancel, modifier = Modifier.fillMaxWidth().testTag("cancel_import_button")) {
                 Text("취소")
+            }
+        }
+    }
+}
+
+@Composable
+private fun CanonicalJsonValidatorScreen(
+    state: AndroidCanonicalJsonValidatorState,
+    onBack: () -> Unit,
+    onJsonChanged: (String) -> Unit,
+    onBasisChanged: (VerificationBasis) -> Unit,
+    onParse: () -> Unit,
+    onConfirm: () -> Unit,
+    onProjectionSelected: (IngestionProjection, Boolean) -> Unit,
+    onSubmit: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    val plan = state.plan
+    val eligible = plan?.eligible.orEmpty().sortedBy(IngestionProjection::wireValue)
+    val disabled = plan?.disabled.orEmpty().sortedBy(IngestionProjection::wireValue)
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().testTag("canonical_json_validator"),
+        contentPadding = PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            ScreenHeader(
+                "올인원 JSON 검증기",
+                "동일한 canonical Core로 파싱·수정·확정하고 필요한 projection만 제출합니다.",
+                onBack,
+            )
+        }
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Verification basis", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (state.verificationBasis == VerificationBasis.MANUAL_CANONICAL_REVIEW) {
+                            "MANUAL_CANONICAL_REVIEW · 원본 이미지 없이도 domain validation과 명시적 확인 후 확정할 수 있습니다."
+                        } else {
+                            "SOURCE_EVIDENCE · 기존 이미지 evidence gate를 통과해야 확정할 수 있습니다."
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MaterialOutlinedButton(
+                            onClick = { onBasisChanged(VerificationBasis.MANUAL_CANONICAL_REVIEW) },
+                            enabled = !state.busy,
+                            modifier = Modifier.weight(1f),
+                        ) { Text("수동 canonical") }
+                        MaterialOutlinedButton(
+                            onClick = { onBasisChanged(VerificationBasis.SOURCE_EVIDENCE) },
+                            enabled = !state.busy,
+                            modifier = Modifier.weight(1f),
+                        ) { Text("원본 evidence") }
+                    }
+                }
+            }
+        }
+        item {
+            OutlinedTextField(
+                value = state.rawJson,
+                onValueChange = onJsonChanged,
+                enabled = !state.busy,
+                label = { Text("JSON") },
+                minLines = 12,
+                maxLines = 24,
+                modifier = Modifier.fillMaxWidth().testTag("canonical_json_input"),
+                textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace),
+            )
+        }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MaterialOutlinedButton(
+                    onClick = onParse,
+                    enabled = !state.busy && state.rawJson.isNotBlank(),
+                    modifier = Modifier.weight(1f).testTag("canonical_json_parse_button"),
+                ) { Text("파싱·저장") }
+                MaterialButton(
+                    onClick = onConfirm,
+                    enabled = !state.busy && state.envelope != null && state.session != null,
+                    modifier = Modifier.weight(1f).testTag("canonical_json_confirm_button"),
+                ) { Text("검수 확정") }
+            }
+        }
+        state.error?.let { error ->
+            item { Text(error, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("canonical_json_error")) }
+        }
+        state.notice?.let { notice ->
+            item { Text(notice, color = MaterialTheme.colorScheme.primary, modifier = Modifier.testTag("canonical_json_notice")) }
+        }
+        if (state.envelope != null) {
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Text("검수 대상", style = MaterialTheme.typography.titleMedium)
+                        Text("schema · ${state.envelope.schemaVersion}")
+                        Text("mode · ${state.envelope.mode.wireValue}")
+                        Text("receipt · ${if (state.envelope.receipt != null) "있음" else "없음"}")
+                        Text("standalone price · ${state.envelope.priceObservations.size}개")
+                        Text("nutrition · ${state.envelope.nutrition.size}개")
+                    }
+                }
+            }
+        }
+        if (plan != null) {
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("제출할 projection 선택", style = MaterialTheme.typography.titleMedium)
+                        if (eligible.isEmpty()) {
+                            Text("현재 eligible projection이 없습니다.", color = MaterialTheme.colorScheme.error)
+                        } else {
+                            eligible.forEach { projection ->
+                                Row(
+                                    Modifier.fillMaxWidth().testTag("canonical_projection_${projection.wireValue}"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Text(projection.wireValue)
+                                    Checkbox(
+                                        checked = projection in state.selectedProjections,
+                                        onCheckedChange = { checked -> onProjectionSelected(projection, checked) },
+                                        enabled = !state.busy,
+                                    )
+                                }
+                            }
+                        }
+                        if (disabled.isNotEmpty()) {
+                            Text(
+                                "disabled · ${disabled.joinToString { it.wireValue }}",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                }
+            }
+            item {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MaterialButton(
+                        onClick = onSubmit,
+                        enabled = !state.busy && state.session != null && state.selectedProjections.isNotEmpty(),
+                        modifier = Modifier.weight(1f).testTag("canonical_json_submit_button"),
+                    ) { Text("선택 제출") }
+                    MaterialOutlinedButton(
+                        onClick = onRetry,
+                        enabled = !state.busy && state.session != null && state.selectedProjections.isNotEmpty(),
+                        modifier = Modifier.weight(1f).testTag("canonical_json_retry_button"),
+                    ) { Text("재시도") }
+                }
+            }
+        }
+        if (state.canonicalJson.isNotBlank()) {
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("canonical 결과", style = MaterialTheme.typography.titleMedium)
+                        SelectionContainer {
+                            Text(
+                                state.canonicalJson,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -2081,12 +2281,14 @@ private fun CanonicalRestaurantNutritionReviewScreen(
             val verified = artifact.clientKey in verifiedClientKeys
             val menuName = when (artifact) {
                 is IngestionNutrition.RestaurantEstimate -> artifact.menuName
+                is IngestionNutrition.RestaurantMenuEstimate -> artifact.menuName
                 is IngestionNutrition.MealComponentEstimate -> artifact.menuName
                 is IngestionNutrition.ProductLabel -> artifact.draft.productName
             }
             val lineId = artifact.lineId
             val estimate = when (artifact) {
                 is IngestionNutrition.RestaurantEstimate -> artifact.estimate
+                is IngestionNutrition.RestaurantMenuEstimate -> artifact.estimate
                 is IngestionNutrition.MealComponentEstimate -> artifact.estimate
                 is IngestionNutrition.ProductLabel -> null
             }

@@ -6,6 +6,7 @@ import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 import com.pricetrace.receiptscanner.ingestion.PriceTraceProductIdentity
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V3_SCHEMA
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -58,7 +59,13 @@ class FitnessProductNutritionLinkProjectionSubmitter(
         }
 
         val pairs = try {
-            pairCandidatesToNutrition(envelope.productCandidates, nutritionItems, nutritionRows, resolvedProducts)
+            pairCandidatesToNutrition(
+                envelope.schemaVersion,
+                envelope.productCandidates,
+                nutritionItems,
+                nutritionRows,
+                resolvedProducts,
+            )
         } catch (error: IllegalArgumentException) {
             return ProjectionSubmission.Failure(error.message ?: "product_nutrition_mapping_missing", retryable = false)
         }
@@ -79,7 +86,7 @@ class FitnessProductNutritionLinkProjectionSubmitter(
                 put("catalogProductId", JsonPrimitive(productIdentity.catalogProductId))
                 put("productRevision", JsonPrimitive(revision))
                 put("candidateClientKey", JsonPrimitive(candidate.clientKey))
-                put("sourceSchema", JsonPrimitive("yeonsik-ocr.v2"))
+                put("sourceSchema", JsonPrimitive(envelope.schemaVersion))
             }
             val payload = try {
                 ProductNutritionLinkProposalPayload(
@@ -112,6 +119,7 @@ class FitnessProductNutritionLinkProjectionSubmitter(
     }
 
     private fun pairCandidatesToNutrition(
+        schemaVersion: String,
         candidates: List<com.pricetrace.receiptscanner.ingestion.ProductCandidate>,
         nutritionItems: List<IngestionNutrition.ProductLabel>,
         nutritionRows: JsonArray,
@@ -119,9 +127,17 @@ class FitnessProductNutritionLinkProjectionSubmitter(
     ): List<Triple<com.pricetrace.receiptscanner.ingestion.ProductCandidate, String, PriceTraceProductIdentity>> {
         val candidateByKey = candidates.associateBy { it.clientKey }
         return nutritionItems.mapIndexed { index, nutrition ->
-            val candidate = candidateByKey[nutrition.clientKey]
-                ?: candidates.singleOrNull().takeIf { candidates.size == 1 }
+            // v3 must carry the explicit local relation. v1/v2 have no such wire field,
+            // so retain their pre-v3 compatibility pairing without weakening v3.
+            val productClientKey = nutrition.productClientKey ?: if (schemaVersion != YEONSIK_OCR_V3_SCHEMA) {
+                candidateByKey[nutrition.clientKey]?.clientKey
+                    ?: candidates.singleOrNull()?.clientKey
+            } else {
+                null
+            }
                 ?: throw IllegalArgumentException("product_nutrition_mapping_missing:${nutrition.clientKey}")
+            val candidate = candidateByKey[productClientKey]
+                ?: throw IllegalArgumentException("product_nutrition_mapping_missing:$productClientKey")
             val identity = resolvedProducts[candidate.clientKey]
                 ?: throw IllegalArgumentException("pricetrace_product_identity_missing:${candidate.clientKey}")
             val response = nutritionRows[index].jsonObject

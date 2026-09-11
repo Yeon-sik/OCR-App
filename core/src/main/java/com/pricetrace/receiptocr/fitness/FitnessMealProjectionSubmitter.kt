@@ -179,6 +179,7 @@ class FitnessMealProjectionSubmitter(
     private fun nutritionKind(item: IngestionNutrition): String = when (item) {
         is IngestionNutrition.ProductLabel -> "product_label"
         is IngestionNutrition.RestaurantEstimate -> "restaurant_estimate"
+        is IngestionNutrition.RestaurantMenuEstimate -> "restaurant_menu_estimate"
         is IngestionNutrition.MealComponentEstimate -> "meal_component_estimate"
     }
 
@@ -190,6 +191,7 @@ class FitnessMealProjectionSubmitter(
                 when (it) {
                     is IngestionNutrition.ProductLabel -> it.draft.productName
                     is IngestionNutrition.RestaurantEstimate -> it.menuName
+                    is IngestionNutrition.RestaurantMenuEstimate -> it.menuName
                     is IngestionNutrition.MealComponentEstimate -> it.menuName
                 }
             }

@@ -5,6 +5,7 @@ enum class OcrWorkflowType(val wireValue: String) {
     PRICE_TRACE_RECEIPT("pricetrace_receipt"),
     PRICE_TRACE_RESTAURANT_RECEIPT("pricetrace_restaurant_receipt"),
     PRICE_TRACE_MERCHANT("pricetrace_merchant"),
+    PRICE_TRACE_PRICE_OBSERVATION("pricetrace_price_observation"),
     FITNESS_NUTRITION("fitness_nutrition"),
     ;
 

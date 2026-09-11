@@ -1,0 +1,60 @@
+{
+  "schema_version": "yeonsik-ocr.v3",
+  "mode": "restaurant",
+  "source": {
+    "producer": "chatgpt",
+    "source_files": [
+      {"id": "menu-photo-1", "type": "menu_photo", "label": "메뉴 사진"}
+    ],
+    "user_text": null
+  },
+  "merchant_candidate": {
+    "name": "Demo Restaurant",
+    "business_kind": "food_service",
+    "branch_name": "Main",
+    "address": null,
+    "phone": null,
+    "business_registration_number": null,
+    "source_attachment_ids": ["menu-photo-1"],
+    "source_namespace": "demo",
+    "source_location_code": "main"
+  },
+  "receipt": null,
+  "product_candidates": [],
+  "price_observations": [
+    {
+      "client_key": "restaurant-price-1",
+      "kind": "restaurant_purchase",
+      "product_client_key": null,
+      "item_name": "Noodles",
+      "observed_on": "2026-09-07",
+      "observed_at": null,
+      "currency": "KRW",
+      "quantity": {"value": 1.0, "unit": "serving"},
+      "unit_price_amount_minor": 10000,
+      "gross_amount_minor": 10000,
+      "discount_amount_minor": 0,
+      "net_amount_minor": 10000,
+      "source_attachment_ids": ["menu-photo-1"],
+      "evidence": [
+        {
+          "source_type": "menu_photo",
+          "source_attachment_ids": ["menu-photo-1"],
+          "field": "net_amount_minor",
+          "observed_value": "10000"
+        }
+      ],
+      "confidence": 0.9
+    }
+  ],
+  "nutrition": [],
+  "consumption": [],
+  "classification_hints": {"cashos": {}},
+  "links": [],
+  "projection_targets": ["pricetrace_price_observation"],
+  "review": {
+    "status": "needs_review",
+    "blocking_issues": [],
+    "warnings": []
+  }
+}

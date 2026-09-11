@@ -6,26 +6,172 @@ import com.pricetrace.receiptscanner.ingestion.IngestionSource
 import com.pricetrace.receiptscanner.ingestion.MerchantCandidate
 import com.pricetrace.receiptscanner.ingestion.NutritionNutrientProvenance
 import com.pricetrace.receiptscanner.ingestion.NutritionRange
+import com.pricetrace.receiptscanner.ingestion.ProductCandidate
+import com.pricetrace.receiptscanner.ingestion.ProductCandidateEvidence
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentity
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.ingestion.PriceTraceLineIdentity
 import com.pricetrace.receiptscanner.ingestion.ProjectionIdentity
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
+import com.pricetrace.receiptscanner.ingestion.SourceAttachment
+import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.nutrition.NutritionField
+import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FitnessCanonicalProjectionSubmitterTest {
+    @Test
+    fun restaurantMenuEstimateUsesFitnessV3RpcAndCarriesStandalonePriceLink() = runTest {
+        val transport = QueueTransport(
+            NutritionHttpResponse(
+                200,
+                """[{"canonical_import_id":"canonical-menu-1","idempotent_replay":false,"nutrition_food_id":"food-menu-1","input_contract":"food-estimate.v1","projection_source_type":"ocr_app","projection_import_id":"canonical-menu-1-projection","catalog_product_id":null,"estimation_evidence_id":"canonical-menu-1-evidence","visibility":"private"}]""",
+            ),
+        )
+        val item = IngestionNutrition.RestaurantMenuEstimate(
+            clientKey = "menu-1",
+            menuName = "Noodles",
+            priceObservationClientKey = "price-1",
+            estimate = estimate("menu-1").estimate,
+        )
+        val result = FitnessCanonicalProjectionSubmitter(
+            NutritionSupabaseGateway(FakeStore(signedIn()), transport),
+        ).submit(
+            ProjectionRequest(
+                ingestionId = "ingestion-menu-1",
+                projection = IngestionProjection.FITNESS_NUTRITION,
+                canonicalPayload = "{}",
+                envelope = YeonsikOcrEnvelope(
+                    mode = com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT,
+                    source = IngestionSource(producer = "chatgpt", sourceFiles = emptyList()),
+                    merchantCandidate = MerchantCandidate(name = "Test Restaurant"),
+                    nutrition = listOf(item),
+                    schemaVersion = com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V3_SCHEMA,
+                ),
+                localDocumentId = "ocr-menu-1",
+                revisionSeq = 1,
+                idempotencyKey = "menu-key",
+            ),
+        )
+
+        assertTrue(result is ProjectionSubmission.Success)
+        assertEquals("food-menu-1", (result as ProjectionSubmission.Success).remoteId)
+        val request = transport.requests.single()
+        assertEquals(
+            "https://nutrition.example.com/rest/v1/rpc/import_canonical_nutrition_v3",
+            request.url,
+        )
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        assertEquals(FOOD_ESTIMATE_V1, body["p_input_contract"]?.jsonPrimitive?.content)
+        assertFalse(body.containsKey("p_category_hierarchy"))
+        assertEquals(JsonNull, body["p_manufacturer_name"])
+        assertEquals(JsonNull, body["p_brand_name"])
+        assertEquals(JsonNull, body["p_sub_brand_name"])
+        assertEquals(JsonNull, body["p_product_name"])
+        assertEquals(
+            "price-1",
+            body["p_provenance"]!!.jsonObject["price_observation_client_key"]?.jsonPrimitive?.content,
+        )
+    }
+
+    @Test
+    fun packagedProductLabelUsesFitnessV3RpcAndExplicitProductHierarchy() = runTest {
+        val transport = QueueTransport(
+            NutritionHttpResponse(
+                200,
+                """[{"canonical_import_id":"canonical-label-1","idempotent_replay":false,"nutrition_food_id":"food-label-1","input_contract":"nutrition-label.v1","projection_source_type":"ocr_app","projection_import_id":"canonical-label-1-projection","catalog_product_id":null,"estimation_evidence_id":null,"visibility":"private"}]""",
+            ),
+        )
+        val candidate = ProductCandidate(
+            clientKey = "product-1",
+            productName = "Test cereal",
+            brand = "Brand",
+            subBrand = "Brand Original",
+            manufacturer = "Test Foods",
+            sourceAttachmentIds = listOf("product-photo-1"),
+            evidence = listOf(
+                ProductCandidateEvidence(
+                    sourceAttachmentIds = listOf("product-photo-1"),
+                    sourceType = "product_photo",
+                    sourceRef = "product-photo-1",
+                    field = "manufacturer_name",
+                    observedValue = "Test Foods",
+                ),
+            ),
+        )
+        val draft = NutritionLabelDraft(
+            documentId = "nutrition-label-1",
+            productName = "Test cereal",
+            brand = "Brand",
+            category = "processed",
+            basisAmount = 100.0,
+            basisUnit = "g",
+            nutrients = NutritionField.requiredFields.associateWith { 10.0 },
+        ).asUserVerified("2026-09-07T10:00:00+09:00")
+        val envelope = YeonsikOcrEnvelope(
+            mode = com.pricetrace.receiptscanner.ingestion.IngestionMode.PACKAGED_PRODUCT,
+            source = IngestionSource(
+                producer = "chatgpt",
+                sourceFiles = listOf(SourceAttachment("product-photo-1", SourceAttachmentType.PRODUCT_PHOTO)),
+            ),
+            merchantCandidate = MerchantCandidate(
+                name = "Test Mart",
+                businessKind = com.pricetrace.receiptscanner.domain.BusinessKind.RETAIL,
+            ),
+            productCandidates = listOf(candidate),
+            nutrition = listOf(
+                IngestionNutrition.ProductLabel(
+                    clientKey = "nutrition-1",
+                    draft = draft,
+                    productClientKey = "product-1",
+                ),
+            ),
+            schemaVersion = com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V3_SCHEMA,
+        )
+
+        val result = FitnessCanonicalProjectionSubmitter(
+            NutritionSupabaseGateway(FakeStore(signedIn()), transport),
+        ).submit(
+            ProjectionRequest(
+                ingestionId = "ingestion-label-1",
+                projection = IngestionProjection.FITNESS_NUTRITION,
+                canonicalPayload = "{}",
+                idempotencyKey = "label-key",
+                envelope = envelope,
+                localDocumentId = "ocr-label-1",
+                revisionSeq = 1,
+            ),
+        )
+
+        assertTrue(result is ProjectionSubmission.Success)
+        val request = transport.requests.single()
+        assertEquals(
+            "https://nutrition.example.com/rest/v1/rpc/import_canonical_nutrition_v3",
+            request.url,
+        )
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        assertEquals(NUTRITION_LABEL_V1, body["p_input_contract"]?.jsonPrimitive?.content)
+        assertEquals("Test Foods", body["p_manufacturer_name"]?.jsonPrimitive?.content)
+        assertEquals("Brand", body["p_brand_name"]?.jsonPrimitive?.content)
+        assertEquals("Brand Original", body["p_sub_brand_name"]?.jsonPrimitive?.content)
+        assertEquals("Test cereal", body["p_product_name"]?.jsonPrimitive?.content)
+        assertFalse(body.containsKey("p_category_hierarchy"))
+        assertEquals(true, body["p_user_verified"]?.jsonPrimitive?.content?.toBoolean())
+    }
+
     @Test
     fun restaurantBundlePublishesEveryEstimateThroughIndependentCanonicalRpcCalls() = runTest {
         val store = FakeStore(signedIn())

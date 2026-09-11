@@ -73,6 +73,7 @@ class FitnessProductNutritionLinkProjectionSubmitterTest {
         assertEquals("food-1", body["p_nutrition_food_id"]?.jsonPrimitive?.content)
         assertEquals(revision, body["p_source_revision"]?.jsonPrimitive?.content)
         assertEquals("product-1", body["p_source"]!!.jsonObject["candidateClientKey"]?.jsonPrimitive?.content)
+        assertEquals("yeonsik-ocr.v2", body["p_source"]!!.jsonObject["sourceSchema"]?.jsonPrimitive?.content)
     }
 
     @Test

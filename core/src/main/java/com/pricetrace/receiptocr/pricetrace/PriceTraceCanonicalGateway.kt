@@ -8,6 +8,9 @@ import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 import com.pricetrace.receiptscanner.ingestion.ProductCandidate
 import com.pricetrace.receiptscanner.ingestion.ProductCandidateBarcode
+import com.pricetrace.receiptscanner.ingestion.StandalonePriceObservation
+import com.pricetrace.receiptscanner.ingestion.StandalonePriceObservationKind
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.ingestion.PriceTraceProductIdentityJson
 import com.pricetrace.receiptscanner.publisher.PriceObservationJson
@@ -72,6 +75,21 @@ class PriceTraceCanonicalGateway(
         }
         val refreshed = refresh(initial) ?: return first
         return submitProductCandidatesOnce(idempotencyKey, candidates, refreshed)
+    }
+
+    /** Publishes receipt-independent v3 price facts through PriceTrace's identity boundary. */
+    suspend fun submitStandalonePriceObservations(
+        idempotencyKey: String,
+        envelope: YeonsikOcrEnvelope,
+    ): PriceTraceCanonicalOutcome {
+        val initial = store.read()
+        if (!initial.isSignedIn) return PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
+        val first = submitStandaloneOnce(idempotencyKey, envelope, initial)
+        if (first !is PriceTraceCanonicalOutcome.Failure || first.kind != PriceObservationFailureKind.AUTHENTICATION) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return submitStandaloneOnce(idempotencyKey, envelope, refreshed)
     }
 
     /** Reads the exact PriceTrace product revision required by the cross-service link contract. */
@@ -243,10 +261,140 @@ class PriceTraceCanonicalGateway(
         PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.CONTRACT, error.message)
     }
 
+    private suspend fun submitStandaloneOnce(
+        idempotencyKey: String,
+        envelope: YeonsikOcrEnvelope,
+        config: PriceTraceSupabaseConfig,
+    ): PriceTraceCanonicalOutcome = try {
+        require(envelope.priceObservations.isNotEmpty()) { "standalone_price_observation_missing" }
+        require(envelope.merchantCandidate != null) { "merchant_candidate_missing" }
+        require(envelope.priceObservations.all { it.netAmountMinor != null }) {
+            "price_observation_net_amount_required"
+        }
+        val responses = mutableListOf<JsonObject>()
+        envelope.priceObservations.forEach { observation ->
+            val observationKey = StableIds.sha256("$idempotencyKey|observation=${observation.clientKey}")
+            val response = transport.execute(
+                request(
+                    config = config,
+                    method = "POST",
+                    path = "/rest/v1/rpc/ingest_verified_standalone_price_observation_v1",
+                    body = buildJsonObject {
+                        put("p_idempotency_key", JsonPrimitive(observationKey))
+                        put("p_observation", standaloneObservationJson(observation, envelope))
+                    }.encode(),
+                ),
+            )
+            if (response.statusCode !in 200..299) {
+                return PriceTraceCanonicalOutcome.Failure(classify(response), response.body.takeIf(String::isNotBlank))
+            }
+            responses += decodeStandaloneResponse(response.body)
+        }
+        PriceTraceCanonicalOutcome.Success(buildJsonObject {
+            put("schemaVersion", JsonPrimitive("receipt-independent-price-observation.v3"))
+            put("observations", JsonArray(responses))
+        })
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: SocketTimeoutException) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NETWORK_TIMEOUT)
+    } catch (_: IOException) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NETWORK)
+    } catch (error: Exception) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.CONTRACT, error.message)
+    }
+
+    private fun standaloneObservationJson(
+        observation: StandalonePriceObservation,
+        envelope: YeonsikOcrEnvelope,
+    ): JsonObject = buildJsonObject {
+        put("schema_version", JsonPrimitive("receipt-independent-price-observation.v3"))
+        put("contract_version", JsonPrimitive("price-observation.v3"))
+        put("kind", JsonPrimitive(observation.kind.wireValue))
+        put("verification_basis", JsonPrimitive(
+            when (envelope.review.verificationBasis) {
+                com.pricetrace.receiptscanner.ingestion.VerificationBasis.SOURCE_EVIDENCE -> "source_evidence"
+                com.pricetrace.receiptscanner.ingestion.VerificationBasis.MANUAL_CANONICAL_REVIEW -> "manual_canonical_review"
+            },
+        ))
+        put("transcription_status", JsonPrimitive("user_verified"))
+        observation.observedOn?.let { put("observed_on", JsonPrimitive(it)) }
+        observation.observedAt?.let { put("observed_at", JsonPrimitive(it)) }
+        put("currency", JsonPrimitive(observation.currency))
+        put("gross_price", observation.grossAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
+        put("discount", observation.discountAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
+        put("net_price", observation.netAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
+        put("quantity", observation.quantity?.let { quantity ->
+            val expectedUnit = when (observation.kind) {
+                StandalonePriceObservationKind.RETAIL_PURCHASE -> "each"
+                StandalonePriceObservationKind.RESTAURANT_PURCHASE -> "serving"
+            }
+            require(quantity.unit == expectedUnit) {
+                "PriceTrace standalone quantity unit must be $expectedUnit"
+            }
+            JsonPrimitive(quantity.value.toLong())
+        } ?: JsonNull)
+        put("unit_price", observation.unitPriceAmountMinor?.let(::JsonPrimitive) ?: JsonNull)
+        put("merchant", merchantObservationJson(envelope, observation.kind))
+        when (observation.kind) {
+            StandalonePriceObservationKind.RETAIL_PURCHASE -> {
+                val candidate = envelope.productCandidates.singleOrNull {
+                    it.clientKey == observation.productClientKey
+                } ?: error("retail_product_candidate_missing")
+                put("product", retailProductObservationJson(candidate))
+            }
+            StandalonePriceObservationKind.RESTAURANT_PURCHASE -> {
+                put("item", buildJsonObject {
+                    put("item_name", JsonPrimitive(requireNotNull(observation.itemName)))
+                    put("serving_label", JsonPrimitive("1회 제공"))
+                    put("category_label", JsonPrimitive("restaurant"))
+                })
+            }
+        }
+    }
+
+    private fun merchantObservationJson(
+        envelope: YeonsikOcrEnvelope,
+        kind: StandalonePriceObservationKind,
+    ): JsonObject {
+        val merchant = requireNotNull(envelope.merchantCandidate)
+        return buildJsonObject {
+            put("merchant_name", JsonPrimitive(merchant.name))
+            merchant.branchName?.let { put("branch_name", JsonPrimitive(it)) }
+            merchant.sourceNamespace?.let { put("source_namespace", JsonPrimitive(it)) }
+            merchant.sourceLocationCode?.let {
+                put(
+                    if (kind == StandalonePriceObservationKind.RETAIL_PURCHASE) "source_code" else "source_location_code",
+                    JsonPrimitive(it),
+                )
+            }
+            merchant.businessRegistrationNumber?.let { put("business_registration_number", JsonPrimitive(it)) }
+            merchant.address?.let { put("address", JsonPrimitive(it)) }
+            merchant.phone?.let { put("phone", JsonPrimitive(it)) }
+        }
+    }
+
+    private fun retailProductObservationJson(candidate: ProductCandidate): JsonObject = buildJsonObject {
+        put("product_client_key", JsonPrimitive(candidate.clientKey))
+        put("merchant_sku", candidate.merchantSku?.let(::JsonPrimitive) ?: JsonNull)
+        put("product_name", JsonPrimitive(candidate.productName))
+        put("brand", candidate.brand?.let(::JsonPrimitive) ?: JsonNull)
+        put("sub_brand", candidate.subBrand?.let(::JsonPrimitive) ?: JsonNull)
+        put("manufacturer", candidate.manufacturer?.let(::JsonPrimitive) ?: JsonNull)
+        put("specification", candidate.specification?.let(::JsonPrimitive) ?: JsonNull)
+        put("variant", candidate.variant?.let(::JsonPrimitive) ?: JsonNull)
+        put("identifiers", JsonArray(candidate.barcodes.map { barcode -> buildJsonObject {
+            put("scheme", JsonPrimitive(priceTraceIdentifierScheme(barcode)))
+            put("value", JsonPrimitive(barcode.value.filterNot { it == ' ' || it == '-' }))
+        }}))
+    }
+
     private fun productCandidateJson(candidate: ProductCandidate): JsonObject = buildJsonObject {
         put("schema_version", JsonPrimitive("PRICETRACE_PRODUCT_CANDIDATE"))
         put("contract_version", JsonPrimitive("product-candidate.v1"))
         put("source_app", JsonPrimitive("pricetrace_ocr_app"))
+        put("client_key", JsonPrimitive(candidate.clientKey))
+        put("sub_brand", candidate.subBrand?.let(::JsonPrimitive) ?: JsonNull)
         put("source_version", candidate.sourceVersion?.let(::JsonPrimitive) ?: JsonNull)
         put("candidate_type", JsonPrimitive(candidate.candidateType))
         put("product_name", JsonPrimitive(candidate.productName))
@@ -258,16 +406,18 @@ class PriceTraceCanonicalGateway(
         put("package_count", candidate.packageCount?.let(::JsonPrimitive) ?: JsonNull)
         put("variant", candidate.variant?.let(::JsonPrimitive) ?: JsonNull)
         put("identifiers", JsonArray(candidateIdentifiers(candidate)))
-        put("evidence", JsonArray(candidate.evidence.flatMap { evidence ->
-            evidence.sourceAttachmentIds.map { attachmentId -> buildJsonObject {
+        put("evidence", JsonArray(candidate.evidence.map { evidence ->
+            val sourceRef = evidence.sourceRef?.takeIf(String::isNotBlank)
+                ?: evidence.source?.takeIf(String::isNotBlank)
+                ?: evidence.sourceAttachmentIds.firstOrNull()
+                ?: error("product candidate evidence source_ref is required")
+            buildJsonObject {
                 put("source_type", JsonPrimitive(evidence.sourceType))
-                put("source_ref", JsonPrimitive(evidence.sourceRef ?: evidence.source ?: attachmentId))
+                put("source_ref", JsonPrimitive(sourceRef))
                 put("field", JsonPrimitive(evidence.field))
-                put("observed_value", evidence.observedValue?.let(::JsonPrimitive)
-                    ?: JsonPrimitive(candidate.productName))
-                evidence.contentHash?.takeIf { it.matches(Regex("^sha256:[a-f0-9]{64}$")) }
-                    ?.let { put("content_hash", JsonPrimitive(it)) }
-            }}
+                put("observed_value", evidence.observedValue?.let(::JsonPrimitive) ?: JsonNull)
+                put("content_hash", evidence.contentHash?.let(::JsonPrimitive) ?: JsonNull)
+            }
         }))
         put("provenance", buildJsonObject {
             candidate.evidence.firstOrNull()?.sourceAttachmentIds?.firstOrNull()
@@ -308,6 +458,18 @@ class PriceTraceCanonicalGateway(
         }
         require(listOf("receiptId", "candidateId", "catalogProductId").any { row[it] is JsonPrimitive }) {
             "PriceTrace canonical response is missing receiptId/candidateId/catalogProductId"
+        }
+        return row
+    }
+
+    private fun decodeStandaloneResponse(value: String): JsonObject {
+        val element = json.parseToJsonElement(value)
+        val row = when (element) {
+            is JsonObject -> element
+            else -> element.jsonArray.single().jsonObject
+        }
+        require(row.requiredStringOrNull("observationId", "observation_id", "priceObservationId", "id") != null) {
+            "PriceTrace standalone response is missing observationId"
         }
         return row
     }
@@ -386,6 +548,32 @@ class PriceTraceCanonicalProjectionSubmitter(
         return when (request.projection) {
             IngestionProjection.PRICETRACE_RECEIPT,
             IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> {
+                if (request.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
+                    envelope.priceObservations.isNotEmpty()
+                ) {
+                    if (envelope.priceObservations.any { it.netAmountMinor == null }) {
+                        return ProjectionSubmission.Failure(
+                            "price_observation_net_amount_required",
+                            retryable = false,
+                        )
+                    }
+                    if (envelope.review.status != com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus.READY) {
+                        return ProjectionSubmission.Failure("canonical_review_required", retryable = false)
+                    }
+                    when (val result = gateway.submitStandalonePriceObservations(request.idempotencyKey, envelope)) {
+                        is PriceTraceCanonicalOutcome.Success -> {
+                            val observations = (result.response["observations"] as? JsonArray).orEmpty()
+                            val remoteId = observations.firstOrNull()?.let {
+                                (it as? JsonObject)?.standaloneId()
+                            } ?: return ProjectionSubmission.Failure("pricetrace_observation_identity_invalid", retryable = false)
+                            return ProjectionSubmission.Success(remoteId = remoteId, metadataJson = result.response.encode())
+                        }
+                        is PriceTraceCanonicalOutcome.Failure -> return ProjectionSubmission.Failure(
+                            message = result.message ?: result.kind.name,
+                            retryable = result.kind.retryable,
+                        )
+                    }
+                }
                 val receipt = envelope.receipt
                     ?: return ProjectionSubmission.Failure("receipt_artifact_missing", retryable = false)
                 when (val result = gateway.submitVerifiedReceipt(request.idempotencyKey, receipt)) {
@@ -447,6 +635,12 @@ class PriceTraceCanonicalProjectionSubmitter(
     private fun JsonObject.requiredId(key: String): String =
         (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
             ?: error("PriceTrace response is missing $key")
+
+    private fun JsonObject.standaloneId(): String? = listOf(
+        "observationId", "observation_id", "priceObservationId", "id",
+    ).firstNotNullOfOrNull { key ->
+        (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+    }
 
     private fun JsonObject.hasCompleteObservations(receipt: ReceiptV2): Boolean {
         val observationIds = (this["observationIds"] as? JsonArray)

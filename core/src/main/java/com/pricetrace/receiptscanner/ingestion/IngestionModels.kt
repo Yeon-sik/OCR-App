@@ -3,19 +3,51 @@ package com.pricetrace.receiptscanner.ingestion
 import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
+import java.time.LocalDate
+import java.time.OffsetDateTime
 
 const val YEONSIK_OCR_SCHEMA = "yeonsik-ocr.v1"
 const val YEONSIK_OCR_V2_SCHEMA = "yeonsik-ocr.v2"
+const val YEONSIK_OCR_V3_SCHEMA = "yeonsik-ocr.v3"
+
+private val CANONICAL_EVIDENCE_SOURCE_TYPES = setOf(
+    "product_photo",
+    "package_label",
+    "receipt",
+    "official_listing",
+    "manufacturer",
+    "user_statement",
+    "ocr",
+)
+private val ATTACHMENT_BACKED_EVIDENCE_SOURCE_TYPES = setOf(
+    "product_photo",
+    "package_label",
+    "receipt",
+    "ocr",
+)
+private val PRICE_OBSERVATION_EVIDENCE_SOURCE_TYPES = setOf(
+    "product_photo",
+    "menu_photo",
+    "food_photo",
+    "user_statement",
+)
+private val PRICE_OBSERVATION_ATTACHMENT_BACKED_EVIDENCE_SOURCE_TYPES = setOf(
+    "product_photo",
+    "menu_photo",
+    "food_photo",
+)
 object IngestionArtifactKeys {
     const val RECEIPT = "receipt"
     const val MERCHANT_CANDIDATE = "merchant_candidate"
     const val CASHOS_HINTS = "cashos_hints"
     const val CONSUMPTION = "consumption"
     const val PRODUCT_CANDIDATE = "product_candidate"
+    const val PRICE_OBSERVATION = "price_observation"
 
     fun nutrition(clientKey: String): String = "nutrition:$clientKey"
     fun consumption(clientKey: String): String = "$CONSUMPTION:$clientKey"
     fun productCandidate(clientKey: String): String = "$PRODUCT_CANDIDATE:$clientKey"
+    fun priceObservation(clientKey: String): String = "$PRICE_OBSERVATION:$clientKey"
 }
 
 enum class IngestionMode(val wireValue: String) {
@@ -71,7 +103,7 @@ data class MerchantCandidate(
 
 /** A fact-only product observation. PriceTrace identity is resolved after this leaves OCR-App. */
 data class ProductCandidateEvidence(
-    val sourceAttachmentIds: List<String>,
+    val sourceAttachmentIds: List<String> = emptyList(),
     val source: String? = null,
     val sourceType: String = "product_photo",
     val sourceRef: String? = null,
@@ -120,6 +152,10 @@ data class ProductCandidate(
     /** The Project-owned source references retained while the candidate is a local fact draft. */
     val sourceAttachmentIds: List<String> = emptyList(),
     val confidence: Double = 1.0,
+    /** A separately observed sub-brand fact; PriceTrace, not OCR-App, resolves identity. */
+    val subBrand: String? = null,
+    /** A real source product code, if one was actually observed. Never use clientKey here. */
+    val merchantSku: String? = null,
 ) {
     init {
         require(clientKey.isNotBlank() && productName.isNotBlank())
@@ -140,6 +176,8 @@ data class ProductCandidate(
             specification,
             contentUnit,
             variant,
+            subBrand,
+            merchantSku,
             sourceVersion,
         ).forEach { value ->
             require(value == null || value.isNotBlank()) { "product candidate text facts must not be blank" }
@@ -147,12 +185,16 @@ data class ProductCandidate(
         require(barcodes.distinct().size == barcodes.size) { "product candidate barcodes must be unique" }
         require(evidence.isNotEmpty()) { "product candidate evidence is required" }
         evidence.forEach { item ->
-            require(item.sourceAttachmentIds.isNotEmpty()) { "product candidate evidence requires a source" }
             require(item.sourceAttachmentIds.all(String::isNotBlank)) {
                 "product candidate evidence source IDs must be non-empty"
             }
-            require(item.sourceType in PRODUCT_EVIDENCE_SOURCE_TYPES && item.field.isNotBlank()) {
+            require(item.sourceType in CANONICAL_EVIDENCE_SOURCE_TYPES && item.field.isNotBlank()) {
                 "product candidate evidence source type and field are required"
+            }
+            if (item.sourceType in ATTACHMENT_BACKED_EVIDENCE_SOURCE_TYPES) {
+                require(item.sourceAttachmentIds.isNotEmpty()) {
+                    "attachment-backed product candidate evidence requires source attachment IDs"
+                }
             }
             require(item.source == null || item.source.isNotBlank()) {
                 "product candidate evidence source must be non-empty"
@@ -178,17 +220,15 @@ data class ProductCandidate(
             evidence.flatMap { it.sourceAttachmentIds }.distinct()
         }
 
-    private companion object {
-        val PRODUCT_EVIDENCE_SOURCE_TYPES = setOf(
-            "product_photo",
-            "package_label",
-            "receipt",
-            "official_listing",
-            "manufacturer",
-            "user_statement",
-            "ocr",
-        )
-    }
+    /** Wire-contract names used by yeonsik-ocr.v3 callers. */
+    val brandName: String?
+        get() = brand
+    val subBrandName: String?
+        get() = subBrand
+    val manufacturerName: String?
+        get() = manufacturer
+    val variantName: String?
+        get() = variant
 }
 
 data class NutritionNutrientProvenance(
@@ -214,6 +254,185 @@ data class RestaurantNutritionEstimate(
     val confidenceScore: Double? = null,
 )
 
+/** Verification authority is deliberately separate from producer-supplied review metadata. */
+enum class VerificationBasis(val wireValue: String) {
+    SOURCE_EVIDENCE("SOURCE_EVIDENCE"),
+    MANUAL_CANONICAL_REVIEW("MANUAL_CANONICAL_REVIEW"),
+    ;
+
+    companion object {
+        fun fromWireValue(value: String): VerificationBasis = entries.firstOrNull {
+            it.name == value || it.wireValue == value || it.wireValue.equals(value, ignoreCase = true)
+        } ?: error("Unsupported verification basis: $value")
+    }
+}
+
+enum class StandalonePriceObservationKind(val wireValue: String) {
+    RETAIL_PURCHASE("retail_purchase"),
+    RESTAURANT_PURCHASE("restaurant_purchase"),
+    ;
+
+    companion object {
+        fun fromWireValue(value: String): StandalonePriceObservationKind = entries.firstOrNull {
+            it.wireValue == value
+        } ?: error("Unsupported standalone price observation kind: $value")
+    }
+}
+
+data class StandalonePriceObservationQuantity(
+    val value: Double,
+    val unit: String,
+) {
+    init {
+        require(value.isFinite() && value > 0.0) {
+            "price observation quantity value must be positive"
+        }
+        require(value % 1.0 == 0.0) {
+            "price observation quantity value must be an integer"
+        }
+        require(unit.isNotBlank()) { "price observation quantity unit is required" }
+    }
+}
+
+data class StandalonePriceObservationEvidence(
+    val sourceType: String,
+    val sourceAttachmentIds: List<String>,
+    val field: String,
+    val observedValue: String? = null,
+) {
+    init {
+        require(sourceType in PRICE_OBSERVATION_EVIDENCE_SOURCE_TYPES) {
+            "unsupported price observation evidence source type"
+        }
+        require(sourceAttachmentIds.distinct().size == sourceAttachmentIds.size) {
+            "price observation evidence source attachment IDs must be unique"
+        }
+        require(sourceAttachmentIds.all(String::isNotBlank)) {
+            "price observation evidence source attachment IDs must be non-empty"
+        }
+        if (sourceType in PRICE_OBSERVATION_ATTACHMENT_BACKED_EVIDENCE_SOURCE_TYPES) {
+            require(sourceAttachmentIds.isNotEmpty()) {
+                "attachment-backed price observation evidence requires source attachment IDs"
+            }
+        }
+        require(field.isNotBlank()) {
+            "price observation evidence field is required"
+        }
+        require(observedValue == null || observedValue.isNotBlank()) {
+            "price observation evidence observed_value must be non-empty when present"
+        }
+    }
+}
+
+/** A price fact independent of receipt.v2 and never routed to CashOS. */
+data class StandalonePriceObservation(
+    val clientKey: String,
+    val kind: StandalonePriceObservationKind,
+    val productClientKey: String? = null,
+    val itemName: String? = null,
+    val observedOn: String? = null,
+    val observedAt: String? = null,
+    val currency: String = "KRW",
+    val quantity: StandalonePriceObservationQuantity? = null,
+    val unitPriceAmountMinor: Long? = null,
+    val grossAmountMinor: Long? = null,
+    val discountAmountMinor: Long? = null,
+    val netAmountMinor: Long? = null,
+    val sourceAttachmentIds: List<String> = emptyList(),
+    val evidence: List<StandalonePriceObservationEvidence>,
+    val confidence: Double,
+) {
+    init {
+        require(clientKey.isNotBlank()) { "price observation client_key is required" }
+        require(currency == "KRW") { "price observation currency must be KRW" }
+        require((observedOn != null) || (observedAt != null)) {
+            "price observation observed_on or observed_at is required"
+        }
+        observedOn?.let { require(runCatching { LocalDate.parse(it) }.isSuccess) { "invalid observed_on" } }
+        observedAt?.let { require(runCatching { OffsetDateTime.parse(it) }.isSuccess) { "invalid observed_at" } }
+        if (observedOn != null && observedAt != null) {
+            val observedDate = LocalDate.parse(observedOn)
+            val timestampDate = OffsetDateTime.parse(observedAt).toLocalDate()
+            require(observedDate == timestampDate) {
+                "price observation observed_on and observed_at must refer to the same calendar date"
+            }
+        }
+        require(sourceAttachmentIds.distinct().size == sourceAttachmentIds.size) {
+            "price observation source attachment IDs must be unique"
+        }
+        require(sourceAttachmentIds.all(String::isNotBlank)) {
+            "price observation source attachment IDs must be non-empty"
+        }
+        evidence.forEach { item ->
+            require(item.sourceAttachmentIds.all { it in sourceAttachmentIds }) {
+                "price observation evidence source attachment IDs must belong to the observation"
+            }
+        }
+        val expectedQuantityUnit = when (kind) {
+            StandalonePriceObservationKind.RETAIL_PURCHASE -> "each"
+            StandalonePriceObservationKind.RESTAURANT_PURCHASE -> "serving"
+        }
+        require(quantity == null || quantity.unit == expectedQuantityUnit) {
+            "price observation ${kind.wireValue} quantity unit must be $expectedQuantityUnit"
+        }
+        listOf(unitPriceAmountMinor, grossAmountMinor, discountAmountMinor, netAmountMinor).forEach { value ->
+            require(value == null || value >= 0) { "price observation amounts must be non-negative" }
+        }
+        require(
+            unitPriceAmountMinor != null ||
+                grossAmountMinor != null ||
+                discountAmountMinor != null ||
+                netAmountMinor != null,
+        ) {
+            "price observation requires at least one observed price fact"
+        }
+        if (grossAmountMinor != null && discountAmountMinor != null) {
+            require(discountAmountMinor <= grossAmountMinor) {
+                "price observation discount cannot exceed gross"
+            }
+        }
+        if (grossAmountMinor != null && netAmountMinor != null) {
+            require(grossAmountMinor >= netAmountMinor) {
+                "price observation gross cannot be below net"
+            }
+        }
+        if (quantity != null && unitPriceAmountMinor != null && netAmountMinor != null) {
+            require(
+                java.math.BigDecimal(quantity.value.toString()).multiply(java.math.BigDecimal.valueOf(unitPriceAmountMinor))
+                    .compareTo(java.math.BigDecimal.valueOf(netAmountMinor)) == 0,
+            ) {
+                "quantity.value times unit_price_amount_minor must equal net_amount_minor when all are known"
+            }
+        }
+        if (grossAmountMinor != null && discountAmountMinor != null && netAmountMinor != null) {
+            require(grossAmountMinor - discountAmountMinor == netAmountMinor) {
+                "gross_amount_minor minus discount_amount_minor must equal net_amount_minor when all are known"
+            }
+        }
+        require(evidence.isNotEmpty()) {
+            "price observation evidence is required"
+        }
+        evidence.forEach { item ->
+            require(item.sourceType in PRICE_OBSERVATION_EVIDENCE_SOURCE_TYPES)
+        }
+        require(confidence.isFinite() && confidence in 0.0..1.0) {
+            "price observation confidence must be between 0 and 1"
+        }
+        when (kind) {
+            StandalonePriceObservationKind.RETAIL_PURCHASE -> {
+                require(!productClientKey.isNullOrBlank()) { "retail price observation requires product_client_key" }
+                require(itemName == null) { "retail price observation cannot use item_name" }
+            }
+            StandalonePriceObservationKind.RESTAURANT_PURCHASE -> {
+                require(!itemName.isNullOrBlank()) { "restaurant price observation requires item_name" }
+                require(productClientKey == null) { "restaurant price observation cannot use product_client_key" }
+            }
+        }
+    }
+}
+
+typealias CanonicalPriceObservation = StandalonePriceObservation
+
 sealed interface IngestionNutrition {
     val clientKey: String
     val lineId: String?
@@ -222,7 +441,15 @@ sealed interface IngestionNutrition {
         override val clientKey: String,
         val draft: NutritionLabelDraft,
         override val lineId: String? = null,
-    ) : IngestionNutrition
+        /** Local relation to the Product Candidate carrying the observed hierarchy facts. */
+        val productClientKey: String? = null,
+    ) : IngestionNutrition {
+        init {
+            require(productClientKey == null || productClientKey.isNotBlank()) {
+                "product label product_client_key must be non-empty when provided"
+            }
+        }
+    }
 
     data class RestaurantEstimate(
         override val clientKey: String,
@@ -230,6 +457,21 @@ sealed interface IngestionNutrition {
         val menuName: String,
         val estimate: RestaurantNutritionEstimate,
     ) : IngestionNutrition
+
+    /** Paid restaurant menu nutrition linked to a standalone restaurant price observation. */
+    data class RestaurantMenuEstimate(
+        override val clientKey: String,
+        override val lineId: String? = null,
+        val menuName: String,
+        val priceObservationClientKey: String,
+        val estimate: RestaurantNutritionEstimate,
+    ) : IngestionNutrition {
+        init {
+            require(priceObservationClientKey.isNotBlank()) {
+                "restaurant menu estimate requires a price observation link"
+            }
+        }
+    }
 
     /**
      * A meal component inferred from food evidence. It may be absent from the receipt, in which
@@ -339,6 +581,8 @@ data class IngestionReview(
     val status: IngestionReviewStatus,
     val blockingIssues: List<String> = emptyList(),
     val warnings: List<String> = emptyList(),
+    /** Local authority state; external JSON values are discarded at import. */
+    val verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
 )
 
 /** Sanitized, local-draft representation of yeonsik-ocr.v1. */
@@ -357,7 +601,20 @@ data class YeonsikOcrEnvelope(
     /** v1 is the source-compatible default. v2 persistence must retain this discriminator. */
     val productCandidates: List<ProductCandidate> = emptyList(),
     val schemaVersion: String = YEONSIK_OCR_SCHEMA,
-)
+    val priceObservations: List<StandalonePriceObservation> = emptyList(),
+) {
+    init {
+        require(priceObservations.map { it.clientKey }.distinct().size == priceObservations.size) {
+            "price observation client_key values must be unique"
+        }
+        require(priceObservations.isEmpty() || schemaVersion == YEONSIK_OCR_V3_SCHEMA) {
+            "standalone price observations require yeonsik-ocr.v3"
+        }
+        require(receipt == null || priceObservations.isEmpty()) {
+            "standalone price observations cannot be combined with receipt"
+        }
+    }
+}
 
 enum class IngestionProjection(val wireValue: String) {
     PRICETRACE_RECEIPT("pricetrace_receipt"),

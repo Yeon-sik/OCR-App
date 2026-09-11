@@ -173,10 +173,15 @@ data class CanonicalNutritionImportPayload(
     val provenance: JsonObject = JsonObject(emptyMap()),
     val estimationEvidence: JsonObject? = null,
     val priceTraceIdentity: JsonObject? = null,
+    /** Explicit packaged-product source facts accepted only by the Fitness v3 RPC. */
+    val manufacturerName: String? = null,
+    val brandName: String? = null,
+    val subBrandName: String? = null,
+    val productName: String? = null,
 ) {
     init {
         require(idempotencyKey.isNotBlank())
-        require(inputContract == NUTRITION_LABEL_V1 || inputContract == FOOD_ESTIMATE_V1)
+        require(inputContract in setOf(NUTRITION_LABEL_V1, FOOD_ESTIMATE_V1))
         require(sourceDocumentRef.isNotBlank())
         require(foodName.isNotBlank())
         require(basisAmount.isFinite() && basisAmount > 0)
@@ -196,10 +201,20 @@ data class CanonicalNutritionImportPayload(
             require(nutrientProvenance.values.any { it.valueStatus == "estimated" })
             val confidence = (estimationEvidence?.get("confidence") as? JsonPrimitive)?.doubleOrNull
             require(confidence != null && confidence in 0.0..1.0)
+            require(manufacturerName == null && brandName == null && subBrandName == null && productName == null) {
+                "food-estimate.v1 cannot carry packaged-product hierarchy"
+            }
+        }
+        listOf(manufacturerName, brandName, subBrandName, productName).forEach { value ->
+            require(value == null || value.isNotBlank()) { "nutrition hierarchy facts must not be blank" }
+        }
+        require(brand == null || brandName == null || brand == brandName) {
+            "p_brand must match p_brand_name when both are supplied"
         }
     }
 
-    fun toRpcJson(): String = CanonicalNutritionImportJson.encode(this)
+    fun toRpcJson(includeHierarchyFields: Boolean = false): String =
+        CanonicalNutritionImportJson.encode(this, includeHierarchyFields)
 
     companion object {
         val REQUIRED_NUTRIENTS = NutritionField.requiredFields.map(NutritionField::wireKey).toSet()
@@ -223,7 +238,10 @@ data class CanonicalNutritionImportResponse(
 object CanonicalNutritionImportJson {
     private val json = Json { explicitNulls = true; ignoreUnknownKeys = false }
 
-    fun encode(payload: CanonicalNutritionImportPayload): String = json.encodeToString(
+    fun encode(
+        payload: CanonicalNutritionImportPayload,
+        includeHierarchyFields: Boolean = false,
+    ): String = json.encodeToString(
         JsonObject.serializer(),
         buildJsonObject {
             put("p_idempotency_key", JsonPrimitive(payload.idempotencyKey))
@@ -248,6 +266,12 @@ object CanonicalNutritionImportJson {
             put("p_user_verified", JsonPrimitive(true))
             put("p_pricetrace_identity", payload.priceTraceIdentity ?: JsonNull)
             put("p_estimation_evidence", payload.estimationEvidence ?: JsonNull)
+            if (includeHierarchyFields) {
+                put("p_manufacturer_name", payload.manufacturerName?.let(::JsonPrimitive) ?: JsonNull)
+                put("p_brand_name", payload.brandName?.let(::JsonPrimitive) ?: JsonNull)
+                put("p_sub_brand_name", payload.subBrandName?.let(::JsonPrimitive) ?: JsonNull)
+                put("p_product_name", payload.productName?.let(::JsonPrimitive) ?: JsonNull)
+            }
         },
     )
 
@@ -344,6 +368,8 @@ object CanonicalNutritionPayloadFactory {
         draft: NutritionLabelDraft,
         @Suppress("UNUSED_PARAMETER") envelopeVerified: Boolean = false,
         priceTraceIdentity: JsonObject? = null,
+        productCandidate: com.pricetrace.receiptscanner.ingestion.ProductCandidate? = null,
+        @Suppress("UNUSED_PARAMETER") useV3Contract: Boolean = false,
     ): CanonicalNutritionImportPayload {
         // Kept for source compatibility; a session/envelope flag cannot authorize a parsed draft.
         require(draft.status == NutritionDraftStatus.USER_VERIFIED) {
@@ -380,6 +406,10 @@ object CanonicalNutritionPayloadFactory {
                 put("estimated", JsonPrimitive(false))
             },
             priceTraceIdentity = priceTraceIdentity,
+            manufacturerName = productCandidate?.manufacturerName,
+            brandName = productCandidate?.brandName,
+            subBrandName = productCandidate?.subBrandName,
+            productName = productCandidate?.productName,
         )
     }
 
@@ -390,6 +420,7 @@ object CanonicalNutritionPayloadFactory {
         restaurantName: String,
         item: IngestionNutrition.RestaurantEstimate,
         priceTraceIdentity: JsonObject? = null,
+        @Suppress("UNUSED_PARAMETER") useV3Contract: Boolean = false,
     ): CanonicalNutritionImportPayload = fromEstimate(
         localDocumentId = localDocumentId,
         revisionSeq = revisionSeq,
@@ -400,6 +431,28 @@ object CanonicalNutritionPayloadFactory {
         foodName = item.menuName,
         estimate = item.estimate,
         priceTraceIdentity = priceTraceIdentity,
+        inputContract = FOOD_ESTIMATE_V1,
+    )
+
+    fun fromRestaurantMenuEstimate(
+        localDocumentId: String,
+        revisionSeq: Long,
+        idempotencyKey: String,
+        restaurantName: String,
+        item: IngestionNutrition.RestaurantMenuEstimate,
+        @Suppress("UNUSED_PARAMETER") useV3Contract: Boolean = false,
+    ): CanonicalNutritionImportPayload = fromEstimate(
+        localDocumentId = localDocumentId,
+        revisionSeq = revisionSeq,
+        idempotencyKey = idempotencyKey,
+        restaurantName = restaurantName,
+        branchName = null,
+        artifactKey = item.clientKey,
+        foodName = item.menuName,
+        estimate = item.estimate,
+        priceTraceIdentity = null,
+        priceObservationClientKey = item.priceObservationClientKey,
+        inputContract = FOOD_ESTIMATE_V1,
     )
 
     fun fromMealComponentEstimate(
@@ -434,6 +487,8 @@ object CanonicalNutritionPayloadFactory {
         estimate: RestaurantNutritionEstimate,
         componentRole: String? = null,
         priceTraceIdentity: JsonObject?,
+        priceObservationClientKey: String? = null,
+        inputContract: String = FOOD_ESTIMATE_V1,
     ): CanonicalNutritionImportPayload {
         require(estimate.estimated) { "restaurant_estimate_required" }
         val confidence = estimate.confidenceScore ?: estimate.confidence.toDoubleOrNull()
@@ -461,7 +516,7 @@ object CanonicalNutritionPayloadFactory {
         }.toMap()
         return CanonicalNutritionImportPayload(
             idempotencyKey = idempotencyKey,
-            inputContract = FOOD_ESTIMATE_V1,
+            inputContract = inputContract,
             sourceDocumentRef = sourceRef,
             foodName = foodName.trim(),
             brand = restaurantName.trim().takeIf(String::isNotEmpty),
@@ -475,6 +530,7 @@ object CanonicalNutritionPayloadFactory {
                 put("restaurant_name", JsonPrimitive(restaurantName))
                 put("branch_name", branchName?.let(::JsonPrimitive) ?: JsonNull)
                 put("restaurant_menu_id", JsonNull)
+                priceObservationClientKey?.let { put("price_observation_client_key", JsonPrimitive(it)) }
                 componentRole?.let { put("component_role", JsonPrimitive(it)) }
                 put("estimated", JsonPrimitive(true))
             },
