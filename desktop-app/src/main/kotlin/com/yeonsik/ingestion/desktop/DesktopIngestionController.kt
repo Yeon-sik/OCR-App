@@ -147,7 +147,7 @@ class DesktopIngestionController(
                 is IngestionStartResult.Duplicate -> result.session
                 is IngestionStartResult.Failure -> {
                     val saved = store.get(currentSession.ingestionId) ?: currentSession
-                    val canonicalJson = YeonsikOcrEnvelopeCodec.encode(confirmation.envelope)
+                    val canonicalJson = YeonsikOcrEnvelopeCodec.encodePersisted(confirmation.envelope)
                     persistRecord(saved, currentState.rawJson, canonicalJson, currentState.evidence)
                     publish(
                         session = saved,
@@ -161,7 +161,7 @@ class DesktopIngestionController(
                     return
                 }
             }
-            val canonicalJson = YeonsikOcrEnvelopeCodec.encode(confirmation.envelope)
+            val canonicalJson = YeonsikOcrEnvelopeCodec.encodePersisted(confirmation.envelope)
             persistRecord(latest, currentState.rawJson, canonicalJson, currentState.evidence)
             publish(
                 session = latest,

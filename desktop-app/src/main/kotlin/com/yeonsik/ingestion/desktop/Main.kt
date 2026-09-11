@@ -16,12 +16,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,6 +40,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
+import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.awt.dnd.DnDConstants
@@ -65,6 +68,16 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
     val state by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
     var evidenceType by remember { mutableStateOf(SourceAttachmentType.RECEIPT) }
+    var verificationBasis by remember { mutableStateOf(VerificationBasis.SOURCE_EVIDENCE) }
+    var selectedProjections by remember { mutableStateOf<Set<com.pricetrace.receiptscanner.ingestion.IngestionProjection>?>(null) }
+    val activeProjections = state.session?.projections.orEmpty()
+        .filterNot { it.status == ProjectionStatus.DISABLED }
+        .map { it.projection }
+        .toSet()
+    val effectiveSelectedProjections = selectedProjections?.intersect(activeProjections) ?: activeProjections
+    LaunchedEffect(state.ingestionId) {
+        selectedProjections = null
+    }
     val launchIo: (suspend () -> Unit) -> Unit = remember(scope) {
         { block -> scope.launch(Dispatchers.IO) { block() } }
     }
@@ -108,7 +121,7 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                         onValueChange = controller::updateRawJson,
                         modifier = Modifier.fillMaxWidth().weight(1f),
                         label = { Text("External JSON (editable)") },
-                        placeholder = { Text("Open or drop a yeonsik-ocr.v1/v2 JSON file") },
+                        placeholder = { Text("Open or drop a yeonsik-ocr.v1/v2/v3 JSON file") },
                         minLines = 14,
                         maxLines = 40,
                     )
@@ -131,15 +144,39 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                         onDrop = { files -> launchIo { controller.attachEvidence(files, evidenceType) } },
                     )
                     ReviewCard(state)
-                    ProjectionCard(state)
+                    ProjectionCard(
+                        state = state,
+                        selectedProjections = effectiveSelectedProjections,
+                        onProjectionSelected = { projection ->
+                            val next = effectiveSelectedProjections.toMutableSet()
+                            if (!next.add(projection)) next.remove(projection)
+                            selectedProjections = next
+                        },
+                    )
+                    Text("Verification basis", style = MaterialTheme.typography.titleMedium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        VerificationBasis.entries.forEach { basis ->
+                            if (basis == verificationBasis) {
+                                Button(onClick = { verificationBasis = basis }) {
+                                    Text(basis.wireValue)
+                                }
+                            } else {
+                                OutlinedButton(onClick = { verificationBasis = basis }) {
+                                    Text(basis.wireValue)
+                                }
+                            }
+                        }
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
                             enabled = !state.busy && state.session != null,
-                            onClick = { launchIo { controller.verify() } },
+                            onClick = { launchIo { controller.verify(verificationBasis) } },
                         ) { Text("Verify") }
                         Button(
                             enabled = !state.busy && state.session != null,
-                            onClick = { launchIo { controller.submit() } },
+                            onClick = {
+                                launchIo { controller.submit(effectiveSelectedProjections) }
+                            },
                         ) { Text("Submit / Retry") }
                     }
                     if (state.busy) Text("Working…", color = MaterialTheme.colorScheme.primary)
@@ -216,7 +253,11 @@ private fun ReviewCard(state: DesktopUiState) {
 }
 
 @Composable
-private fun ProjectionCard(state: DesktopUiState) {
+private fun ProjectionCard(
+    state: DesktopUiState,
+    selectedProjections: Set<com.pricetrace.receiptscanner.ingestion.IngestionProjection>,
+    onProjectionSelected: (com.pricetrace.receiptscanner.ingestion.IngestionProjection) -> Unit,
+) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("Active projections", style = MaterialTheme.typography.titleMedium)
@@ -226,7 +267,13 @@ private fun ProjectionCard(state: DesktopUiState) {
             } else {
                 projections.forEach { projection ->
                     Column(Modifier.fillMaxWidth().border(BorderStroke(1.dp, MaterialTheme.colorScheme.outline)).padding(8.dp)) {
-                        Text(projection.projection.wireValue, style = MaterialTheme.typography.labelLarge)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = projection.projection in selectedProjections,
+                                onCheckedChange = { onProjectionSelected(projection.projection) },
+                            )
+                            Text(projection.projection.wireValue, style = MaterialTheme.typography.labelLarge)
+                        }
                         Text("status=${projection.status.wireValue}, attempts=${projection.attemptCount}")
                         Text("remote id=${projection.remoteId ?: "—"}")
                         projection.lastError?.let { Text("error=$it", color = MaterialTheme.colorScheme.error) }

@@ -44,6 +44,9 @@ class YeonsikOcrV3Test {
         )
         assertEquals("Brand Sub", roundTripped.productCandidates.single().subBrand)
         assertEquals(envelope.priceObservations.single().net, roundTripped.priceObservations.single().net)
+        assertEquals(null, roundTripped.productCandidates.single().merchantSku)
+        val encodedReview = parse(YeonsikOcrV3Json.encode(envelope))["review"]!!.jsonObject
+        assertEquals(setOf("status", "blocking_issues", "warnings"), encodedReview.keys)
     }
 
     @Test
@@ -70,6 +73,10 @@ class YeonsikOcrV3Test {
         assertEquals(null, envelope.receipt)
         assertTrue(IngestionProjection.PRICETRACE_PRICE_OBSERVATION in CanonicalProjectionPlanner.plan(envelope).eligible)
         assertTrue(IngestionProjection.FITNESS_NUTRITION in CanonicalProjectionPlanner.plan(envelope).eligible)
+        assertEquals(
+            setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION),
+            CanonicalProjectionPlanner.plan(envelope).dependencies[IngestionProjection.FITNESS_NUTRITION],
+        )
         assertFalse(IngestionProjection.CASHOS_RECEIPT in CanonicalProjectionPlanner.plan(envelope).eligible)
     }
 
@@ -182,6 +189,11 @@ class YeonsikOcrV3Test {
         ) as CanonicalImportResult.Success
         val plan = useCase.plan(imported.envelope)
         assertTrue(IngestionProjection.PRICETRACE_PRICE_OBSERVATION in plan.eligible)
+        assertTrue(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE in plan.eligible)
+        assertEquals(
+            setOf(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE),
+            plan.dependencies[IngestionProjection.PRICETRACE_PRICE_OBSERVATION],
+        )
         assertFalse(IngestionProjection.CASHOS_RECEIPT in plan.eligible)
 
         val confirmation = useCase.confirm(
@@ -206,14 +218,16 @@ class YeonsikOcrV3Test {
         assertEquals(ProjectionStatus.UPLOADED, uploaded.status)
         assertEquals(2, price.requests.size)
         assertEquals(price.requests[0].idempotencyKey, price.requests[1].idempotencyKey)
+        assertEquals(1, product.requests.size)
+        assertTrue(product.requests.single().projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
         assertTrue(store.get(imported.session.ingestionId)!!.projections.none {
             it.projection == IngestionProjection.CASHOS_RECEIPT && it.status == ProjectionStatus.UPLOADED
         })
-        assertTrue(product.requests.isEmpty())
+        assertEquals(1, product.requests.size)
     }
 
     @Test
-    fun `selected fitness nutrition submission does not submit standalone price or CashOS`() = runBlocking {
+    fun `selected standalone menu nutrition submits its price dependency but not CashOS`() = runBlocking {
         val store = InMemoryIngestionSessionStore()
         val fitness = RecordingSubmitter()
         val price = RecordingSubmitter()
@@ -246,8 +260,15 @@ class YeonsikOcrV3Test {
             states.single { it.projection == IngestionProjection.FITNESS_NUTRITION }.status,
         )
         assertTrue(fitness.requests.size == 1)
-        assertTrue(price.requests.isEmpty())
-        assertTrue(states.single { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }.status == ProjectionStatus.PENDING)
+        assertTrue(price.requests.size == 1)
+        assertEquals(
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+            price.requests.single().projection,
+        )
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            states.single { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }.status,
+        )
         assertTrue(states.single { it.projection == IngestionProjection.CASHOS_RECEIPT }.status == ProjectionStatus.DISABLED)
     }
 
@@ -256,6 +277,7 @@ class YeonsikOcrV3Test {
         val store = InMemoryIngestionSessionStore()
         val order = mutableListOf<IngestionProjection>()
         val submitters = listOf(
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION to RecordingSubmitter(onSubmit = { order += it.projection }),
             IngestionProjection.FITNESS_NUTRITION to RecordingSubmitter(onSubmit = { order += it.projection }),
             IngestionProjection.FITNESS_MEAL to RecordingSubmitter(onSubmit = { order += it.projection }),
         ).toMap()
@@ -273,17 +295,29 @@ class YeonsikOcrV3Test {
         assertTrue(confirmation.result is IngestionStartResult.Success)
 
         val plan = useCase.plan(confirmation.envelope)
+        assertTrue(IngestionProjection.FITNESS_MEAL in plan.eligible)
+        assertEquals(
+            ProjectionStatus.PENDING,
+            useCase.session(imported.session.ingestionId)!!.projections
+                .single { it.projection == IngestionProjection.FITNESS_MEAL }.status,
+        )
         assertEquals(
             setOf(IngestionProjection.FITNESS_NUTRITION),
             plan.dependencies[IngestionProjection.FITNESS_MEAL],
         )
-        useCase.submitSelected(
+        val states = useCase.submitSelected(
             imported.session.ingestionId,
             confirmation.envelope,
             setOf(IngestionProjection.FITNESS_MEAL),
         )
+        val mealState = states.single { it.projection == IngestionProjection.FITNESS_MEAL }
+        assertEquals(ProjectionStatus.UPLOADED, mealState.status)
         assertEquals(
-            listOf(IngestionProjection.FITNESS_NUTRITION, IngestionProjection.FITNESS_MEAL),
+            listOf(
+                IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+                IngestionProjection.FITNESS_NUTRITION,
+                IngestionProjection.FITNESS_MEAL,
+            ),
             order,
         )
     }
@@ -327,8 +361,9 @@ class YeonsikOcrV3Test {
         put("merchant_candidate", merchantJson("retail"))
         put("receipt", JsonNull)
         put("product_candidates", JsonArray(listOf(buildJsonObject {
-            put("client_key", JsonPrimitive("product-1"))
-            put("product_name", JsonPrimitive("Demo Drink"))
+             put("client_key", JsonPrimitive("product-1"))
+             put("product_name", JsonPrimitive("Demo Drink"))
+             put("merchant_sku", JsonNull)
             put("brand_name", JsonPrimitive("Brand"))
             put("sub_brand_name", JsonPrimitive("Brand Sub"))
             put("manufacturer_name", JsonPrimitive("Demo Foods"))
@@ -370,7 +405,7 @@ class YeonsikOcrV3Test {
             put("payload", JsonNull)
             put("estimate", estimateJson())
             put("price_observation_client_key", JsonPrimitive("price-1"))
-            put("product_label_hierarchy", JsonArray(emptyList<JsonElement>()))
+             put("product_client_key", JsonNull)
         })))
         put("consumption", if (!withCompleteConsumption) {
             JsonArray(emptyList())

@@ -86,7 +86,7 @@ class AndroidCanonicalJsonValidator(
         }
         val plan = useCase.plan(confirmation.envelope)
         return state.copy(
-            canonicalJson = YeonsikOcrEnvelopeCodec.encode(confirmation.envelope),
+            canonicalJson = YeonsikOcrEnvelopeCodec.encodePersisted(confirmation.envelope),
             envelope = confirmation.envelope,
             session = session,
             plan = plan,

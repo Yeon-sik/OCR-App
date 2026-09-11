@@ -30,12 +30,10 @@
     }
   },
   "links": [],
-  "projection_targets": ["cashos_receipt"],
+  "projection_targets": ["pricetrace_merchant_candidate"],
   "review": {
-    "status": "ready",
+    "status": "needs_review",
     "blocking_issues": [],
-    "warnings": [],
-    "verification_basis": "SOURCE_EVIDENCE",
-    "user_verified": true
+    "warnings": []
   }
 }

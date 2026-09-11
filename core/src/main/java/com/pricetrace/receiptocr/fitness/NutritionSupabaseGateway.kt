@@ -155,7 +155,7 @@ class NutritionSupabaseGateway(
                 config = config,
                 method = "POST",
                 path = path,
-                body = payload.toRpcJson(),
+                body = payload.toRpcJson(includeHierarchyFields = path.endsWith("import_canonical_nutrition_v3")),
             ),
         )
         when {

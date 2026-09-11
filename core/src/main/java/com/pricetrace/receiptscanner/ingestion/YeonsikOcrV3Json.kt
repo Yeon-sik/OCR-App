@@ -78,13 +78,40 @@ object YeonsikOcrV3Json {
     }
 
     fun encode(envelope: YeonsikOcrEnvelope, canonicalIds: Boolean = false): String {
+        return encodeDraft(envelope, canonicalIds)
+    }
+
+    /** Encodes the producer-safe v3 draft shape; verification authority is internal-only. */
+    fun encodeDraft(envelope: YeonsikOcrEnvelope, canonicalIds: Boolean = false): String {
         require(envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA) {
             "yeonsik-ocr.v3 codec cannot encode ${envelope.schemaVersion}"
         }
-        return json.encodeToString(JsonElement.serializer(), toJson(envelope, canonicalIds))
+        return json.encodeToString(
+            JsonElement.serializer(),
+            toJson(envelope, canonicalIds, includeAuthorityFields = false, forFingerprint = false),
+        )
     }
 
-    fun canonicalize(envelope: YeonsikOcrEnvelope): String = encode(envelope, canonicalIds = true)
+    /** Encodes the local persisted snapshot, including Core-owned verification state. */
+    fun encodePersisted(envelope: YeonsikOcrEnvelope, canonicalIds: Boolean = false): String {
+        require(envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA) {
+            "yeonsik-ocr.v3 codec cannot encode ${envelope.schemaVersion}"
+        }
+        return json.encodeToString(
+            JsonElement.serializer(),
+            toJson(envelope, canonicalIds, includeAuthorityFields = true, forFingerprint = false),
+        )
+    }
+
+    fun canonicalize(envelope: YeonsikOcrEnvelope): String {
+        require(envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA) {
+            "yeonsik-ocr.v3 codec cannot encode ${envelope.schemaVersion}"
+        }
+        return json.encodeToString(
+            JsonElement.serializer(),
+            toJson(envelope, canonicalIds = true, includeAuthorityFields = false, forFingerprint = true),
+        )
+    }
 
     /** Re-checks cross-artifact invariants after a local review edit. */
     fun validate(envelope: YeonsikOcrEnvelope) {
@@ -104,7 +131,12 @@ object YeonsikOcrV3Json {
         )
     }
 
-    private fun toJson(envelope: YeonsikOcrEnvelope, canonicalIds: Boolean): JsonObject = buildJsonObject {
+    private fun toJson(
+        envelope: YeonsikOcrEnvelope,
+        canonicalIds: Boolean,
+        includeAuthorityFields: Boolean,
+        forFingerprint: Boolean,
+    ): JsonObject = buildJsonObject {
         put("schema_version", JsonPrimitive(YEONSIK_OCR_V3_SCHEMA))
         put("mode", JsonPrimitive(envelope.mode.wireValue))
         put("source", sourceJson(envelope.source))
@@ -115,17 +147,22 @@ object YeonsikOcrV3Json {
         } ?: JsonNull)
         put("product_candidates", JsonArray(envelope.productCandidates.map(::productCandidateJson)))
         put("price_observations", JsonArray(envelope.priceObservations.map(::priceObservationJson)))
-        put("nutrition", JsonArray(envelope.nutrition.map { nutritionJson(it, canonicalIds) }))
-        put("consumption", JsonArray(envelope.consumption.map(::consumptionJson)))
+        put("nutrition", JsonArray(envelope.nutrition.map {
+            nutritionJson(it, canonicalIds, includeAuthorityFields)
+        }))
+        put("consumption", JsonArray(envelope.consumption.map {
+            consumptionJson(it, includeAuthorityFields)
+        }))
         put("classification_hints", classificationHintsJson(envelope.classificationHints))
         put("links", JsonArray(envelope.links.map(::linkJson)))
         put("projection_targets", JsonArray(envelope.targets.sortedBy(IngestionProjection::wireValue).map { JsonPrimitive(it.wireValue) }))
-        put("review", reviewJson(envelope.review))
+        put("review", reviewJson(envelope.review, includeAuthorityFields, forFingerprint))
     }
 
     private fun productCandidateJson(value: ProductCandidate): JsonObject = buildJsonObject {
         put("client_key", JsonPrimitive(value.clientKey))
         put("product_name", JsonPrimitive(value.productName))
+        put("merchant_sku", value.merchantSku?.let(::JsonPrimitive) ?: JsonNull)
         put("brand_name", value.brandName?.let(::JsonPrimitive) ?: JsonNull)
         put("sub_brand_name", value.subBrandName?.let(::JsonPrimitive) ?: JsonNull)
         put("manufacturer_name", value.manufacturerName?.let(::JsonPrimitive) ?: JsonNull)
@@ -148,13 +185,20 @@ object YeonsikOcrV3Json {
         put("item_name", value.itemName?.let(::JsonPrimitive) ?: JsonNull)
         put("observed_on", value.observedOn?.let(::JsonPrimitive) ?: JsonNull)
         put("observed_at", value.observedAt?.let(::JsonPrimitive) ?: JsonNull)
-        put("quantity", JsonPrimitive(value.quantity)); put("unit_price", JsonPrimitive(value.unitPrice))
-        put("gross", JsonPrimitive(value.gross)); put("discount", JsonPrimitive(value.discount)); put("net", JsonPrimitive(value.net))
+        put("quantity", value.quantity?.let(::JsonPrimitive) ?: JsonNull)
+        put("unit_price", value.unitPrice?.let(::JsonPrimitive) ?: JsonNull)
+        put("gross", value.gross?.let(::JsonPrimitive) ?: JsonNull)
+        put("discount", value.discount?.let(::JsonPrimitive) ?: JsonNull)
+        put("net", value.net?.let(::JsonPrimitive) ?: JsonNull)
         put("evidence", JsonArray(value.evidence.map(::JsonPrimitive)))
         put("confidence", JsonPrimitive(value.confidence))
     }
 
-    private fun nutritionJson(item: IngestionNutrition, canonicalIds: Boolean): JsonObject = buildJsonObject {
+    private fun nutritionJson(
+        item: IngestionNutrition,
+        canonicalIds: Boolean,
+        includeAuthorityFields: Boolean,
+    ): JsonObject = buildJsonObject {
         put("client_key", JsonPrimitive(item.clientKey))
         put("kind", JsonPrimitive(nutritionKind(item)))
         put("line_id", item.lineId?.let(::JsonPrimitive) ?: JsonNull)
@@ -170,7 +214,10 @@ object YeonsikOcrV3Json {
         })
         put("payload", when (item) {
             is IngestionNutrition.ProductLabel -> json.parseToJsonElement(NutritionLabelJson.encode(
-                if (canonicalIds) item.draft.copy(documentId = "__nutrition__") else item.draft,
+                (if (includeAuthorityFields) item.draft else item.draft.copy(
+                    status = com.pricetrace.receiptscanner.nutrition.NutritionDraftStatus.PARSED,
+                    confirmedAt = null,
+                )).let { draft -> if (canonicalIds) draft.copy(documentId = "__nutrition__") else draft },
             ))
             else -> JsonNull
         })
@@ -184,9 +231,9 @@ object YeonsikOcrV3Json {
             is IngestionNutrition.RestaurantMenuEstimate -> JsonPrimitive(item.priceObservationClientKey)
             else -> JsonNull
         })
-        put("product_label_hierarchy", when (item) {
-            is IngestionNutrition.ProductLabel -> JsonArray(item.productLabelHierarchy.map(::JsonPrimitive))
-            else -> JsonArray(emptyList())
+        put("product_client_key", when (item) {
+            is IngestionNutrition.ProductLabel -> item.productClientKey?.let(::JsonPrimitive) ?: JsonNull
+            else -> JsonNull
         })
     }
 
@@ -226,7 +273,9 @@ object YeonsikOcrV3Json {
 
     private fun decodeProductCandidate(element: JsonElement): ProductCandidate {
         val root = element.jsonObject
-        requireKeys(root, PRODUCT_CANDIDATE_KEYS)
+        // merchant_sku is an optional source fact: producers may omit it when it was
+        // not observed; the canonical encoder writes explicit null for stable output.
+        requireKeysAllowingOptional(root, PRODUCT_CANDIDATE_KEYS - "merchant_sku", setOf("merchant_sku"))
         val sourceAttachmentIds = root.arrayValue("source_attachment_ids").strings()
         require(sourceAttachmentIds.isNotEmpty()) { "product candidates require source_attachment_ids" }
         val barcodes = root.arrayValue("barcodes").map { barcodeElement ->
@@ -235,6 +284,7 @@ object YeonsikOcrV3Json {
             ProductCandidateBarcode(type = barcode.string("scheme"), value = barcode.string("value"))
         }
         val productName = root.string("product_name")
+        val merchantSku = root.nullableString("merchant_sku")
         val brand = root.nullableString("brand_name")
         val subBrand = root.nullableString("sub_brand_name")
         val manufacturer = root.nullableString("manufacturer_name")
@@ -243,20 +293,25 @@ object YeonsikOcrV3Json {
         return ProductCandidate(
             clientKey = root.string("client_key"), productName = productName, brand = brand,
             subBrand = subBrand, manufacturer = manufacturer, specification = specification,
+            merchantSku = merchantSku,
             contentAmount = root.nullableNumber("content_amount"),
             contentUnit = root.nullableString("content_unit"),
             packageCount = root.nullableNumber("package_count")?.toPositiveInt("package_count"),
             variant = variant, barcodes = barcodes,
-            evidence = productFacts(sourceAttachmentIds, productName, brand, subBrand, manufacturer, variant, specification, barcodes),
+             evidence = productFacts(
+                 sourceAttachmentIds, productName, merchantSku, brand, subBrand,
+                 manufacturer, variant, specification, barcodes,
+             ),
             sourceAttachmentIds = sourceAttachmentIds, confidence = root.number("confidence"),
         )
     }
 
     private fun productFacts(
-        sourceAttachmentIds: List<String>, productName: String, brand: String?, subBrand: String?,
+        sourceAttachmentIds: List<String>, productName: String, merchantSku: String?, brand: String?, subBrand: String?,
         manufacturer: String?, variant: String?, specification: String?, barcodes: List<ProductCandidateBarcode>,
     ): List<ProductCandidateEvidence> = buildList {
         add("product_name" to productName)
+        merchantSku?.let { add("merchant_sku" to it) }
         brand?.let { add("brand_name" to it) }
         subBrand?.let { add("sub_brand_name" to it) }
         manufacturer?.let { add("manufacturer_name" to it) }
@@ -276,8 +331,9 @@ object YeonsikOcrV3Json {
             kind = StandalonePriceObservationKind.fromWireValue(root.string("kind")),
             productClientKey = root.nullableString("product_client_key"), itemName = root.nullableString("item_name"),
             observedOn = root.nullableString("observed_on"), observedAt = root.nullableString("observed_at"),
-            quantity = root.number("quantity"), unitPrice = root.long("unit_price"), gross = root.long("gross"),
-            discount = root.long("discount"), net = root.long("net"),
+            quantity = root.nullableNumber("quantity"), unitPrice = root.nullableLong("unit_price"),
+            gross = root.nullableLong("gross"), discount = root.nullableLong("discount"),
+            net = root.nullableLong("net"),
             evidence = root.arrayValue("evidence").strings(), confidence = root.number("confidence"),
         )
     }
@@ -291,7 +347,7 @@ object YeonsikOcrV3Json {
         val kind = root.string("kind")
         val lineId = root.nullableString("line_id")
         val componentRole = root.nullableString("component_role")
-        val hierarchy = root.arrayValue("product_label_hierarchy").strings()
+        val productClientKey = root.nullableString("product_client_key")
         return when (kind) {
             "product_label" -> {
                 require(lineId == null && root["menu_name"] == JsonNull && root["estimate"] == JsonNull)
@@ -304,16 +360,21 @@ object YeonsikOcrV3Json {
                         ?: error("product_label payload must be fitness-nutrition-draft.v1")
                     (result.result.draft as CanonicalDraft.Nutrition).value
                 }
-                IngestionNutrition.ProductLabel(clientKey, draft, productLabelHierarchy = hierarchy)
+                IngestionNutrition.ProductLabel(clientKey, draft, productClientKey = productClientKey)
             }
             "restaurant_estimate" -> {
                 require(lineId != null && root["menu_name"] != JsonNull && root["estimate"] != JsonNull)
-                require(componentRole == null && root["payload"] == JsonNull && root["price_observation_client_key"] == JsonNull)
+                require(
+                    componentRole == null && root["payload"] == JsonNull &&
+                        root["price_observation_client_key"] == JsonNull && root["product_client_key"] == JsonNull,
+                )
                 IngestionNutrition.RestaurantEstimate(clientKey, lineId, root.string("menu_name"), decodeEstimate(root.objectValue("estimate")))
             }
             "restaurant_menu_estimate" -> {
                 require(lineId == null && root["menu_name"] != JsonNull && root["estimate"] != JsonNull)
-                require(componentRole == null && root["payload"] == JsonNull)
+                require(
+                    componentRole == null && root["payload"] == JsonNull && root["product_client_key"] == JsonNull,
+                )
                 IngestionNutrition.RestaurantMenuEstimate(
                     clientKey = clientKey, menuName = root.string("menu_name"),
                     priceObservationClientKey = root.string("price_observation_client_key"),
@@ -322,7 +383,10 @@ object YeonsikOcrV3Json {
             }
             "meal_component_estimate" -> {
                 require(root["menu_name"] != JsonNull && root["estimate"] != JsonNull && componentRole == "complimentary_side")
-                require(root["payload"] == JsonNull && root["price_observation_client_key"] == JsonNull)
+                require(
+                    root["payload"] == JsonNull && root["price_observation_client_key"] == JsonNull &&
+                        root["product_client_key"] == JsonNull,
+                )
                 IngestionNutrition.MealComponentEstimate(
                     clientKey = clientKey, lineId = lineId, menuName = root.string("menu_name"),
                     estimate = decodeEstimate(root.objectValue("estimate"), requireFoodImageProvenance = true),
@@ -481,6 +545,21 @@ object YeonsikOcrV3Json {
                 }
             }
         }
+        val productKeys = productCandidates.map { it.clientKey }.toSet()
+        nutrition.filterIsInstance<IngestionNutrition.ProductLabel>().forEach { item ->
+            if (item.productClientKey != null) {
+                require(item.productClientKey in productKeys) {
+                    "product label must reference an existing product candidate"
+                }
+            }
+        }
+        if (productCandidates.isNotEmpty() && nutrition.any { it is IngestionNutrition.ProductLabel }) {
+            require(nutrition.filterIsInstance<IngestionNutrition.ProductLabel>().all {
+                it.productClientKey != null && it.productClientKey in productKeys
+            }) {
+                "packaged product labels must declare product_client_key when product candidates are present"
+            }
+        }
         require(nutrition.map { it.clientKey }.distinct().size == nutrition.size)
         require(consumption.map { it.clientKey }.distinct().size == consumption.size)
         require(consumption.all { item ->
@@ -558,10 +637,16 @@ object YeonsikOcrV3Json {
         put("nutrition_client_key", JsonPrimitive(value.nutritionClientKey))
     }
 
-    private fun consumptionJson(value: IngestionConsumption) = buildJsonObject {
+    private fun consumptionJson(value: IngestionConsumption, includeAuthorityFields: Boolean) = buildJsonObject {
         put("client_key", JsonPrimitive(value.clientKey))
         put("consumed_at", value.consumedAt?.let(::JsonPrimitive) ?: JsonNull)
-        put("status", JsonPrimitive(value.status.wireValue))
+        put(
+            "status",
+            JsonPrimitive(
+                if (includeAuthorityFields) value.status.wireValue
+                else ConsumptionVerificationStatus.UNVERIFIED.wireValue,
+            ),
+        )
         put("items", JsonArray(value.items.map { item -> buildJsonObject {
             put("nutrition_client_key", JsonPrimitive(item.nutritionClientKey))
             put("amount", item.amount?.let(::JsonPrimitive) ?: JsonNull)
@@ -578,12 +663,36 @@ object YeonsikOcrV3Json {
         ))
     }
 
-    private fun reviewJson(value: IngestionReview) = buildJsonObject {
-        put("status", JsonPrimitive(value.status.wireValue))
-        put("blocking_issues", JsonArray(value.blockingIssues.map(::JsonPrimitive)))
-        put("warnings", JsonArray(value.warnings.map(::JsonPrimitive)))
-        put("verification_basis", JsonPrimitive(value.verificationBasis.wireValue))
-        put("user_verified", JsonPrimitive(value.status == IngestionReviewStatus.READY))
+    private fun reviewJson(
+        value: IngestionReview,
+        includeAuthorityFields: Boolean,
+        forFingerprint: Boolean,
+    ) = buildJsonObject {
+        put(
+            "status",
+            JsonPrimitive(
+                if (includeAuthorityFields) value.status.wireValue
+                else IngestionReviewStatus.NEEDS_REVIEW.wireValue,
+            ),
+        )
+        put(
+            "blocking_issues",
+            JsonArray(
+                if (forFingerprint) emptyList()
+                else value.blockingIssues.map(::JsonPrimitive),
+            ),
+        )
+        put(
+            "warnings",
+            JsonArray(
+                if (forFingerprint) emptyList()
+                else value.warnings.map(::JsonPrimitive),
+            ),
+        )
+        if (includeAuthorityFields) {
+            put("verification_basis", JsonPrimitive(value.verificationBasis.wireValue))
+            put("user_verified", JsonPrimitive(value.status == IngestionReviewStatus.READY))
+        }
     }
 
     private fun JsonObject.withDocumentId(id: String): JsonObject {
@@ -596,6 +705,17 @@ object YeonsikOcrV3Json {
     private fun requireKeys(root: JsonObject, expected: Set<String>) {
         require(root.keys == expected) {
             "Unexpected or missing JSON keys: ${root.keys subtract expected} / ${expected subtract root.keys}"
+        }
+    }
+
+    private fun requireKeysAllowingOptional(
+        root: JsonObject,
+        required: Set<String>,
+        optional: Set<String>,
+    ) {
+        val allowed = required + optional
+        require(root.keys subtract allowed == emptySet<String>() && required subtract root.keys == emptySet<String>()) {
+            "Unexpected or missing JSON keys: ${root.keys subtract allowed} / ${required subtract root.keys}"
         }
     }
 
@@ -627,6 +747,11 @@ object YeonsikOcrV3Json {
         return primitive.content.toLongOrNull() ?: error("$key must be an integer")
     }
 
+    private fun JsonObject.nullableLong(key: String): Long? = this[key]
+        .takeUnless { it == null || it == JsonNull }
+        ?.let { (it as? JsonPrimitive)?.takeIf { primitive -> !primitive.isString }?.content?.toLongOrNull()
+            ?: error("$key must be an integer or null") }
+
     private fun JsonObject.nullableNumber(key: String): Double? = this[key]
         .takeUnless { it == null || it == JsonNull }
         ?.let { (it as? JsonPrimitive)?.takeIf { primitive -> !primitive.isString }?.doubleOrNull
@@ -655,7 +780,7 @@ object YeonsikOcrV3Json {
         "source_attachment_ids", "source_namespace", "source_location_code",
     )
     private val PRODUCT_CANDIDATE_KEYS = setOf(
-        "client_key", "product_name", "brand_name", "sub_brand_name", "manufacturer_name", "variant_name",
+        "client_key", "product_name", "merchant_sku", "brand_name", "sub_brand_name", "manufacturer_name", "variant_name",
         "specification_text", "content_amount", "content_unit", "package_count", "barcodes",
         "source_attachment_ids", "confidence",
     )
@@ -666,7 +791,7 @@ object YeonsikOcrV3Json {
     )
     private val NUTRITION_KEYS = setOf(
         "client_key", "kind", "line_id", "menu_name", "component_role", "payload", "estimate",
-        "price_observation_client_key", "product_label_hierarchy",
+        "price_observation_client_key", "product_client_key",
     )
     private val CONSUMPTION_KEYS = setOf("client_key", "consumed_at", "items", "status")
     private val CONSUMPTION_ITEM_KEYS = setOf("nutrition_client_key", "amount", "unit", "confidence", "amount_status")

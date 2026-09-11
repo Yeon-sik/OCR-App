@@ -660,7 +660,9 @@ class IngestionOrchestrator(
                     "ingestion-artifact|consumption|" +
                         consumptionPayloadDependency(
                             item,
-                            envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA || envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA,
+                            includeAmountStatus = envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA ||
+                                envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA,
+                            includeAuthorityStatus = envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA,
                         ),
                 ),
             )
@@ -672,18 +674,9 @@ class IngestionOrchestrator(
             )
         }
         envelope.merchantCandidate?.let {
-            val artifactEnvelope = envelope.copy(
-                merchantCandidate = it,
-                receipt = null,
-                nutrition = emptyList(),
-                classificationHints = emptyMap(),
-                links = emptyList(),
-                targets = emptySet(),
-                review = IngestionReview(IngestionReviewStatus.NEEDS_REVIEW),
-            )
             put(
                 IngestionArtifactKeys.MERCHANT_CANDIDATE,
-                StableIds.sha256("ingestion-artifact|merchant|${YeonsikOcrEnvelopeCodec.canonicalize(artifactEnvelope)}"),
+                StableIds.sha256("ingestion-artifact|merchant|${merchantPayloadDependency(it)}"),
             )
         }
     }
@@ -697,8 +690,24 @@ class IngestionOrchestrator(
         envelope: YeonsikOcrEnvelope,
         item: IngestionNutrition,
     ): String = when (item) {
-        is IngestionNutrition.ProductLabel ->
-            "product_label|client_key=" + item.clientKey + "|" + NutritionLabelJson.encode(item.draft)
+        is IngestionNutrition.ProductLabel -> {
+            val product = item.productClientKey?.let { productClientKey ->
+                envelope.productCandidates.singleOrNull { candidate ->
+                    candidate.clientKey == productClientKey
+                }
+            }
+            "product_label|client_key=" + item.clientKey +
+                "|product_client_key=" + (item.productClientKey ?: "<null>") +
+                "|product=" + (product?.let(::productCandidatePayloadDependency) ?: "<missing>") +
+                "|" + NutritionLabelJson.encode(
+                    if (envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA) {
+                        item.draft.copy(
+                            status = com.pricetrace.receiptscanner.nutrition.NutritionDraftStatus.PARSED,
+                            confirmedAt = null,
+                        )
+                    } else item.draft,
+                )
+        }
         is IngestionNutrition.RestaurantEstimate -> {
             val artifactEnvelope = YeonsikOcrEnvelope(
                 mode = IngestionMode.RESTAURANT,
@@ -720,6 +729,11 @@ class IngestionOrchestrator(
             )
             "restaurant_menu_estimate|client_key=" + item.clientKey +
                 "|price_observation=" + item.priceObservationClientKey +
+                "|price_observation_payload=" + (
+                    envelope.priceObservations.singleOrNull {
+                        it.clientKey == item.priceObservationClientKey
+                    }?.let(::standalonePriceObservationDependency) ?: "<missing>"
+                ) +
                 "|restaurant_name=" + (fitnessRestaurantName(envelope) ?: "<null>") +
                 "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
         }
@@ -756,7 +770,17 @@ class IngestionOrchestrator(
                 "pricetrace-receipt|" + priceTraceReceiptPayload(envelope.receipt)
             IngestionProjection.PRICETRACE_PRICE_OBSERVATION ->
                 if (envelope.priceObservations.isNotEmpty()) {
-                    "pricetrace-standalone-price|" + envelope.priceObservations
+                    "pricetrace-standalone-price|merchant=" + merchantPayloadDependency(envelope.merchantCandidate) +
+                        "|products=" + envelope.priceObservations
+                        .filter { it.kind == StandalonePriceObservationKind.RETAIL_PURCHASE }
+                        .mapNotNull { observation ->
+                            envelope.productCandidates.singleOrNull {
+                                it.clientKey == observation.productClientKey
+                            }
+                        }
+                        .sortedBy(ProductCandidate::clientKey)
+                        .joinToString("|") { productCandidatePayloadDependency(it) } +
+                        "|observations=" + envelope.priceObservations
                         .sortedBy(StandalonePriceObservation::clientKey)
                         .joinToString("|", transform = ::standalonePriceObservationDependency)
                 } else {
@@ -777,7 +801,9 @@ class IngestionOrchestrator(
                 } + "|consumption=" + envelope.consumption.joinToString("|") { consumption ->
                     consumptionPayloadDependency(
                         consumption,
-                        envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA || envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA,
+                        includeAmountStatus = envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA ||
+                            envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA,
+                        includeAuthorityStatus = envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA,
                     )
                 }
             IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE ->
@@ -843,10 +869,11 @@ class IngestionOrchestrator(
 
     private fun consumptionPayloadDependency(
         consumption: IngestionConsumption,
-        includeV2Fields: Boolean,
+        includeAmountStatus: Boolean,
+        includeAuthorityStatus: Boolean,
     ): String {
         val itemDependency = consumption.items.joinToString(",") { item ->
-            if (includeV2Fields) {
+            if (includeAmountStatus) {
                 listOf(item.nutritionClientKey, item.amount, item.unit, item.confidence, item.amountStatus)
                     .joinToString("/")
             } else {
@@ -854,12 +881,20 @@ class IngestionOrchestrator(
                     .joinToString("/")
             }
         }
-        return if (includeV2Fields) {
+        return if (includeAuthorityStatus) {
             listOf(
                 consumption.clientKey,
                 consumption.effectiveNutritionClientKeys.toSortedSet().joinToString(","),
                 consumption.consumedAt ?: "<null>",
                 consumption.status.wireValue,
+                itemDependency,
+            ).joinToString("|")
+        } else if (includeAmountStatus) {
+            listOf(
+                consumption.clientKey,
+                consumption.effectiveNutritionClientKeys.toSortedSet().joinToString(","),
+                consumption.consumedAt ?: "<null>",
+                ConsumptionVerificationStatus.UNVERIFIED.wireValue,
                 itemDependency,
             ).joinToString("|")
         } else {
@@ -906,6 +941,7 @@ class IngestionOrchestrator(
         candidate.confidence,
         candidate.candidateType,
         candidate.sourceVersion,
+        candidate.merchantSku,
         candidate.evidence.sortedWith(compareBy(
             { it.sourceAttachmentIds.joinToString(",") },
             { it.field },
@@ -930,15 +966,27 @@ class IngestionOrchestrator(
         IngestionProjection.PRICETRACE_RECEIPT -> if (envelope.receipt != null) {
             setOf(IngestionArtifactKeys.RECEIPT)
         } else emptySet()
-        IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> if (envelope.priceObservations.isNotEmpty()) {
-            envelope.priceObservations.map { IngestionArtifactKeys.priceObservation(it.clientKey) }.toSet()
+        IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> if (envelope.priceObservations.isNotEmpty()) buildSet {
+            addAll(envelope.priceObservations.map { IngestionArtifactKeys.priceObservation(it.clientKey) })
+            if (envelope.merchantCandidate != null) add(IngestionArtifactKeys.MERCHANT_CANDIDATE)
+            envelope.priceObservations.filter {
+                it.kind == StandalonePriceObservationKind.RETAIL_PURCHASE
+            }.mapNotNull { observation -> observation.productClientKey }
+                .forEach { add(IngestionArtifactKeys.productCandidate(it)) }
         } else if (envelope.receipt != null) {
             setOf(IngestionArtifactKeys.RECEIPT)
         } else emptySet()
         IngestionProjection.CASHOS_RECEIPT -> if (envelope.receipt != null) {
             setOf(IngestionArtifactKeys.RECEIPT, IngestionArtifactKeys.CASHOS_HINTS)
         } else emptySet()
-        IngestionProjection.FITNESS_NUTRITION -> envelope.nutrition.map { IngestionArtifactKeys.nutrition(it.clientKey) }.toSet()
+        IngestionProjection.FITNESS_NUTRITION -> buildSet {
+            addAll(envelope.nutrition.map { IngestionArtifactKeys.nutrition(it.clientKey) })
+            envelope.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>()
+                .mapNotNull { it.productClientKey }
+                .forEach { add(IngestionArtifactKeys.productCandidate(it)) }
+            envelope.nutrition.filterIsInstance<IngestionNutrition.RestaurantMenuEstimate>()
+                .forEach { add(IngestionArtifactKeys.priceObservation(it.priceObservationClientKey)) }
+        }
         IngestionProjection.FITNESS_MEAL -> buildSet {
             addAll(envelope.nutrition.map { IngestionArtifactKeys.nutrition(it.clientKey) })
             addAll(envelope.consumption.map { IngestionArtifactKeys.consumption(it.clientKey) })
@@ -961,9 +1009,17 @@ class IngestionOrchestrator(
         IngestionProjection.PRICETRACE_RECEIPT -> IngestionArtifactKeys.RECEIPT in artifactKeys
         IngestionProjection.PRICETRACE_PRICE_OBSERVATION ->
             IngestionArtifactKeys.RECEIPT in artifactKeys ||
-                artifactKeys.any { it.startsWith("${IngestionArtifactKeys.PRICE_OBSERVATION}:") }
+                IngestionArtifactKeys.MERCHANT_CANDIDATE in artifactKeys ||
+                artifactKeys.any {
+                    it.startsWith("${IngestionArtifactKeys.PRICE_OBSERVATION}:") ||
+                        it.startsWith("${IngestionArtifactKeys.PRODUCT_CANDIDATE}:")
+                }
         IngestionProjection.CASHOS_RECEIPT -> IngestionArtifactKeys.RECEIPT in artifactKeys || IngestionArtifactKeys.CASHOS_HINTS in artifactKeys
-        IngestionProjection.FITNESS_NUTRITION -> artifactKeys.any { it.startsWith("nutrition:") }
+        IngestionProjection.FITNESS_NUTRITION -> artifactKeys.any {
+            it.startsWith("nutrition:") ||
+                it.startsWith("${IngestionArtifactKeys.PRODUCT_CANDIDATE}:") ||
+                it.startsWith("${IngestionArtifactKeys.PRICE_OBSERVATION}:")
+        }
         IngestionProjection.FITNESS_MEAL -> artifactKeys.any {
             it.startsWith("nutrition:") || it.startsWith("${IngestionArtifactKeys.CONSUMPTION}:")
         }
@@ -1139,50 +1195,6 @@ class IngestionOrchestrator(
     fun planProjections(envelope: YeonsikOcrEnvelope): CanonicalProjectionPlan =
         CanonicalProjectionPlanner.plan(envelope)
 
-    private fun withDependencies(
-        requested: Set<IngestionProjection>,
-        envelope: YeonsikOcrEnvelope,
-    ): Set<IngestionProjection> = buildSet {
-        addAll(requested)
-        if (envelope.receipt != null && requested.any {
-                it == IngestionProjection.PRICETRACE_PRICE_OBSERVATION ||
-                    it == IngestionProjection.CASHOS_RECEIPT ||
-                    it == IngestionProjection.FITNESS_NUTRITION ||
-                    it == IngestionProjection.FITNESS_MEAL
-            }) {
-            add(IngestionProjection.PRICETRACE_RECEIPT)
-        }
-        if (requested.contains(IngestionProjection.FITNESS_MEAL)) {
-            add(IngestionProjection.FITNESS_NUTRITION)
-        }
-        if (requested.contains(IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK)) {
-            add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
-            add(IngestionProjection.FITNESS_NUTRITION)
-        }
-    }
-
-    private fun inferredTargets(envelope: YeonsikOcrEnvelope): Set<IngestionProjection> = buildSet {
-        if (envelope.receipt != null) {
-            add(IngestionProjection.PRICETRACE_RECEIPT)
-            add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
-            add(IngestionProjection.CASHOS_RECEIPT)
-        }
-        if (envelope.merchantCandidate != null && envelope.receipt == null) {
-            add(IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE)
-        }
-        if (envelope.nutrition.isNotEmpty()) add(IngestionProjection.FITNESS_NUTRITION)
-        if (envelope.consumption.isNotEmpty() &&
-            (envelope.schemaVersion != YEONSIK_OCR_V2_SCHEMA ||
-                (envelope.nutrition.isNotEmpty() && fitnessMealReady(envelope)))
-        ) {
-            add(IngestionProjection.FITNESS_MEAL)
-        }
-        if (envelope.productCandidates.isNotEmpty()) add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
-        if (envelope.productCandidates.isNotEmpty() && envelope.nutrition.isNotEmpty()) {
-            add(IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK)
-        }
-    }
-
     private fun disabledProjections(envelope: YeonsikOcrEnvelope): List<IngestionProjection> =
         IngestionProjection.entries - enabledProjections(envelope).toSet()
 
@@ -1192,31 +1204,10 @@ class IngestionOrchestrator(
             envelope.consumption.isNotEmpty() &&
             envelope.consumption.all(IngestionConsumption::isCompleteForFitnessMeal)
 
-    private fun fitnessMealReady(envelope: YeonsikOcrEnvelope): Boolean =
-        fitnessMealValuesComplete(envelope) &&
-            envelope.consumption.all {
-                it.status == ConsumptionVerificationStatus.USER_VERIFIED
-            }
-
     private fun projectionDependencies(
         projection: IngestionProjection,
         envelope: YeonsikOcrEnvelope,
-    ): Set<IngestionProjection> = buildSet {
-        when (projection) {
-            IngestionProjection.PRICETRACE_PRICE_OBSERVATION ->
-                if (envelope.receipt != null) add(IngestionProjection.PRICETRACE_RECEIPT)
-            IngestionProjection.CASHOS_RECEIPT,
-            IngestionProjection.FITNESS_NUTRITION -> if (envelope.receipt != null) {
-                add(IngestionProjection.PRICETRACE_RECEIPT)
-            }
-            IngestionProjection.FITNESS_MEAL -> add(IngestionProjection.FITNESS_NUTRITION)
-            IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK -> {
-                add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
-                add(IngestionProjection.FITNESS_NUTRITION)
-            }
-            else -> Unit
-        }
-    }
+    ): Set<IngestionProjection> = CanonicalProjectionPlanner.dependenciesFor(projection, envelope)
 
     private fun requiresPriceTraceIdentity(
         projection: IngestionProjection,

@@ -39,7 +39,15 @@ object YeonsikOcrEnvelopeCodec {
     fun encode(envelope: YeonsikOcrEnvelope, canonicalIds: Boolean = false): String = when (envelope.schemaVersion) {
         YEONSIK_OCR_SCHEMA -> YeonsikOcrEnvelopeJson.encode(envelope, canonicalIds)
         YEONSIK_OCR_V2_SCHEMA -> YeonsikOcrV2Json.encode(envelope, canonicalIds)
-        YEONSIK_OCR_V3_SCHEMA -> YeonsikOcrV3Json.encode(envelope, canonicalIds)
+        YEONSIK_OCR_V3_SCHEMA -> YeonsikOcrV3Json.encodeDraft(envelope, canonicalIds)
+        else -> error("Unsupported yeonsik OCR schema: ${envelope.schemaVersion}")
+    }
+
+    /** Local persistence path for v3; v1/v2 retain their existing wire codecs. */
+    fun encodePersisted(envelope: YeonsikOcrEnvelope, canonicalIds: Boolean = false): String = when (envelope.schemaVersion) {
+        YEONSIK_OCR_SCHEMA -> YeonsikOcrEnvelopeJson.encode(envelope, canonicalIds)
+        YEONSIK_OCR_V2_SCHEMA -> YeonsikOcrV2Json.encode(envelope, canonicalIds)
+        YEONSIK_OCR_V3_SCHEMA -> YeonsikOcrV3Json.encodePersisted(envelope, canonicalIds)
         else -> error("Unsupported yeonsik OCR schema: ${envelope.schemaVersion}")
     }
 

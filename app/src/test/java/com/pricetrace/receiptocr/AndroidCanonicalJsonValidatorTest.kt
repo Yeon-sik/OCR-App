@@ -12,8 +12,10 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.buildJsonObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -37,10 +39,18 @@ class AndroidCanonicalJsonValidatorTest {
         assertEquals(CanonicalProjectionPlanner.plan(envelope), plan)
         assertEquals(setOf(IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE), plan.eligible)
         assertEquals(plan.eligible, imported.selectedProjections)
+        val draftReview = Json.parseToJsonElement(imported.canonicalJson)
+            .jsonObject["review"]!!.jsonObject
+        assertEquals(setOf("status", "blocking_issues", "warnings"), draftReview.keys)
+        assertFalse(imported.canonicalJson.contains("verification_basis"))
 
         val confirmed = validator.confirm(imported)
         assertEquals(IngestionReviewStatus.READY, confirmed.envelope?.review?.status)
         assertEquals(VerificationBasis.MANUAL_CANONICAL_REVIEW, confirmed.envelope?.review?.verificationBasis)
+        val persistedReview = Json.parseToJsonElement(confirmed.canonicalJson)
+            .jsonObject["review"]!!.jsonObject
+        assertTrue(persistedReview.containsKey("verification_basis"))
+        assertTrue(persistedReview.containsKey("user_verified"))
         assertNotNull(confirmed.session)
         assertTrue(confirmed.error == null)
     }

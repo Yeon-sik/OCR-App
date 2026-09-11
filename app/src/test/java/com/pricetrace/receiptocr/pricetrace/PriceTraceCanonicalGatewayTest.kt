@@ -189,9 +189,89 @@ class PriceTraceCanonicalGatewayTest {
         assertEquals("1000", observation["net_price"]?.jsonPrimitive?.content)
         assertEquals("Test Mart", observation["merchant"]!!.jsonObject["merchant_name"]?.jsonPrimitive?.content)
         assertEquals("store-1", observation["merchant"]!!.jsonObject["source_code"]?.jsonPrimitive?.content)
-        assertEquals("product-1", observation["product"]!!.jsonObject["merchant_sku"]?.jsonPrimitive?.content)
+        val product = observation["product"]!!.jsonObject
+        assertEquals("product-1", product["product_client_key"]?.jsonPrimitive?.content)
+        assertEquals(JsonNull, product["merchant_sku"])
+        assertEquals("Test Sub Brand", product["sub_brand"]?.jsonPrimitive?.content)
+        assertEquals("Test Foods", product["manufacturer"]?.jsonPrimitive?.content)
         assertFalse(observation.containsKey("cashos"))
         assertFalse(observation.containsKey("user_verified"))
+    }
+
+    @Test
+    fun standaloneRetailObservationPreservesUnknownAmountsDateOnlyAndObservedSku() = runTest {
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(200, """{"observationId":"observation-unknowns","replayed":false}"""),
+        )
+        val candidate = ProductCandidate(
+            clientKey = "product-unknowns",
+            productName = "Observed Drink",
+            brand = "Observed Brand",
+            manufacturer = "Observed Foods",
+            merchantSku = "SKU-OBSERVED",
+            sourceAttachmentIds = listOf("product-photo-unknowns"),
+            evidence = listOf(
+                ProductCandidateEvidence(
+                    sourceAttachmentIds = listOf("product-photo-unknowns"),
+                    sourceType = "product_photo",
+                    sourceRef = "product-photo-unknowns",
+                    field = "merchant_sku",
+                    observedValue = "SKU-OBSERVED",
+                ),
+            ),
+        )
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.PACKAGED_PRODUCT,
+            source = IngestionSource("chatgpt", emptyList()),
+            merchantCandidate = MerchantCandidate(
+                name = "Observed Mart",
+                businessKind = BusinessKind.RETAIL,
+            ),
+            productCandidates = listOf(candidate),
+            priceObservations = listOf(
+                StandalonePriceObservation(
+                    clientKey = "price-unknowns",
+                    kind = StandalonePriceObservationKind.RETAIL_PURCHASE,
+                    productClientKey = candidate.clientKey,
+                    observedOn = "2026-09-07",
+                    quantity = null,
+                    unitPrice = 500,
+                    gross = null,
+                    discount = null,
+                    net = null,
+                    evidence = listOf("product-photo-unknowns"),
+                    confidence = 0.8,
+                ),
+            ),
+            review = IngestionReview(
+                status = IngestionReviewStatus.READY,
+                verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+            ),
+            schemaVersion = YEONSIK_OCR_V3_SCHEMA,
+        )
+
+        val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .submitStandalonePriceObservations("unknown-price-key", envelope)
+        assertTrue(result is PriceTraceCanonicalOutcome.Success)
+
+        val observation = Json.parseToJsonElement(
+            requireNotNull(transport.requests.single().body),
+        ).jsonObject["p_observation"]!!.jsonObject
+        assertEquals("2026-09-07", observation["observed_on"]?.jsonPrimitive?.content)
+        assertFalse(observation.containsKey("observed_at"))
+        assertEquals(JsonNull, observation["gross_price"])
+        assertEquals(JsonNull, observation["discount"])
+        assertEquals(JsonNull, observation["net_price"])
+        assertEquals(JsonNull, observation["quantity"])
+        assertEquals("500", observation["unit_price"]?.jsonPrimitive?.content)
+        assertEquals(
+            "SKU-OBSERVED",
+            observation["product"]!!.jsonObject["merchant_sku"]?.jsonPrimitive?.content,
+        )
+        assertEquals(
+            "product-unknowns",
+            observation["product"]!!.jsonObject["product_client_key"]?.jsonPrimitive?.content,
+        )
     }
 
     @Test
@@ -296,6 +376,8 @@ class PriceTraceCanonicalGatewayTest {
         assertEquals(setOf("p_idempotency_key", "p_candidate"), body.keys)
         assertEquals("PRICETRACE_PRODUCT_CANDIDATE", sent["schema_version"]?.jsonPrimitive?.content)
         assertEquals("product-candidate.v1", sent["contract_version"]?.jsonPrimitive?.content)
+        assertEquals("product-1", sent["client_key"]?.jsonPrimitive?.content)
+        assertEquals(JsonNull, sent["sub_brand"])
         val identifier = sent["identifiers"]!!.jsonArray.single().jsonObject
         assertEquals("ean", identifier["scheme"]?.jsonPrimitive?.content)
         assertEquals("8801234567890", identifier["value"]?.jsonPrimitive?.content)

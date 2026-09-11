@@ -4,6 +4,8 @@ import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.MealComponentReference
 import com.pricetrace.receiptscanner.ingestion.NutritionNutrientProvenance
 import com.pricetrace.receiptscanner.ingestion.NutritionRange
+import com.pricetrace.receiptscanner.ingestion.ProductCandidate
+import com.pricetrace.receiptscanner.ingestion.ProductCandidateEvidence
 import com.pricetrace.receiptscanner.ingestion.RestaurantNutritionEstimate
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionFieldEvidence
@@ -68,6 +70,51 @@ class NutritionCanonicalModelsTest {
             }.isSuccess,
         )
     }
+
+    @Test
+    fun productLabelCarriesOnlyExplicitObservedHierarchyOnFitnessV3Rpc() {
+        val candidate = ProductCandidate(
+            clientKey = "product-1",
+            productName = "Test cereal",
+            brand = "Brand",
+            subBrand = "Brand Original",
+            manufacturer = "Test Foods",
+            sourceAttachmentIds = listOf("product-photo-1"),
+            evidence = listOf(
+                ProductCandidateEvidence(
+                    sourceAttachmentIds = listOf("product-photo-1"),
+                    sourceType = "product_photo",
+                    sourceRef = "product-photo-1",
+                    field = "manufacturer_name",
+                    observedValue = "Test Foods",
+                ),
+            ),
+        )
+        val payload = CanonicalNutritionPayloadFactory.fromProductLabel(
+            localDocumentId = "ocr-label-session",
+            revisionSeq = 3,
+            idempotencyKey = "nutrition-label-v3-key",
+            draft = verifiedDraft(),
+            productCandidate = candidate,
+            useV3Contract = true,
+        )
+
+        val v1 = Json.parseToJsonElement(payload.toRpcJson()).jsonObject
+        assertFalse(v1.containsKey("p_manufacturer_name"))
+        assertFalse(v1.containsKey("p_brand_name"))
+        assertFalse(v1.containsKey("p_sub_brand_name"))
+        assertFalse(v1.containsKey("p_product_name"))
+
+        val v3 = Json.parseToJsonElement(payload.toRpcJson(includeHierarchyFields = true)).jsonObject
+        assertEquals(NUTRITION_LABEL_V1, v3["p_input_contract"]?.jsonPrimitive?.content)
+        assertEquals("Test Foods", v3["p_manufacturer_name"]?.jsonPrimitive?.content)
+        assertEquals("Brand", v3["p_brand_name"]?.jsonPrimitive?.content)
+        assertEquals("Brand Original", v3["p_sub_brand_name"]?.jsonPrimitive?.content)
+        assertEquals("Test cereal", v3["p_product_name"]?.jsonPrimitive?.content)
+        assertFalse(v3.containsKey("p_category_hierarchy"))
+        assertFalse(v3.toString().contains("product_label_hierarchy"))
+    }
+
     @Test
     fun restaurantEstimateUsesFoodEstimateContractWithConfidenceRangeAndDeclaredEvidence() {
         val evidenceRefs = NutritionField.requiredFields.associate { field ->

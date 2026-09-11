@@ -54,7 +54,7 @@ object CanonicalProjectionPlanner {
         }
         val withDependencies = withDependencies(eligible, envelope)
         val dependencies = withDependencies.associateWith { projection ->
-            projectionDependencies(projection, envelope).intersect(withDependencies)
+            dependenciesFor(projection, envelope).intersect(withDependencies)
         }
         return CanonicalProjectionPlan(
             eligible = withDependencies,
@@ -76,6 +76,17 @@ object CanonicalProjectionPlanner {
             }) {
             add(IngestionProjection.PRICETRACE_RECEIPT)
         }
+        if (requested.contains(IngestionProjection.PRICETRACE_PRICE_OBSERVATION) &&
+            envelope.priceObservations.any { it.kind == StandalonePriceObservationKind.RETAIL_PURCHASE } &&
+            envelope.productCandidates.isNotEmpty()
+        ) {
+            add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
+        }
+        if (requested.contains(IngestionProjection.FITNESS_NUTRITION) &&
+            envelope.nutrition.any { it is IngestionNutrition.RestaurantMenuEstimate }
+        ) {
+            add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+        }
         if (requested.contains(IngestionProjection.FITNESS_MEAL)) add(IngestionProjection.FITNESS_NUTRITION)
         if (requested.contains(IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK)) {
             add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
@@ -83,16 +94,31 @@ object CanonicalProjectionPlanner {
         }
     }
 
-    private fun projectionDependencies(
+    /** Shared dependency graph consumed by planning and by the submission orchestrator. */
+    fun dependenciesFor(
         projection: IngestionProjection,
         envelope: YeonsikOcrEnvelope,
     ): Set<IngestionProjection> = buildSet {
         when (projection) {
-            IngestionProjection.PRICETRACE_PRICE_OBSERVATION ->
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> {
                 if (envelope.receipt != null) add(IngestionProjection.PRICETRACE_RECEIPT)
+                if (envelope.priceObservations.any {
+                        it.kind == StandalonePriceObservationKind.RETAIL_PURCHASE
+                    }) {
+                    add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
+                }
+            }
             IngestionProjection.CASHOS_RECEIPT,
-            IngestionProjection.FITNESS_NUTRITION -> if (envelope.receipt != null) {
-                add(IngestionProjection.PRICETRACE_RECEIPT)
+            IngestionProjection.FITNESS_NUTRITION -> {
+                if (projection == IngestionProjection.CASHOS_RECEIPT && envelope.receipt != null) {
+                    add(IngestionProjection.PRICETRACE_RECEIPT)
+                }
+                if (projection == IngestionProjection.FITNESS_NUTRITION) {
+                    if (envelope.receipt != null) add(IngestionProjection.PRICETRACE_RECEIPT)
+                    if (envelope.nutrition.any { it is IngestionNutrition.RestaurantMenuEstimate }) {
+                        add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+                    }
+                }
             }
             IngestionProjection.FITNESS_MEAL -> add(IngestionProjection.FITNESS_NUTRITION)
             IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK -> {

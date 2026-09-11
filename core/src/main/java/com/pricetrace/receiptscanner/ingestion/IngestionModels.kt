@@ -3,7 +3,6 @@ package com.pricetrace.receiptscanner.ingestion
 import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
-import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
 
@@ -128,6 +127,8 @@ data class ProductCandidate(
     val confidence: Double = 1.0,
     /** A separately observed sub-brand fact; PriceTrace, not OCR-App, resolves identity. */
     val subBrand: String? = null,
+    /** A real source product code, if one was actually observed. Never use clientKey here. */
+    val merchantSku: String? = null,
 ) {
     init {
         require(clientKey.isNotBlank() && productName.isNotBlank())
@@ -149,6 +150,7 @@ data class ProductCandidate(
             contentUnit,
             variant,
             subBrand,
+            merchantSku,
             sourceVersion,
         ).forEach { value ->
             require(value == null || value.isNotBlank()) { "product candidate text facts must not be blank" }
@@ -266,11 +268,11 @@ data class StandalonePriceObservation(
     val itemName: String? = null,
     val observedOn: String? = null,
     val observedAt: String? = null,
-    val quantity: Double,
-    val unitPrice: Long,
-    val gross: Long,
-    val discount: Long,
-    val net: Long,
+    val quantity: Double?,
+    val unitPrice: Long?,
+    val gross: Long?,
+    val discount: Long?,
+    val net: Long?,
     val evidence: List<String>,
     val confidence: Double,
 ) {
@@ -283,25 +285,40 @@ data class StandalonePriceObservation(
         observedAt?.let { require(runCatching { OffsetDateTime.parse(it) }.isSuccess) { "invalid observed_at" } }
         if (observedOn != null && observedAt != null) {
             val observedDate = LocalDate.parse(observedOn)
-            val timestampDate = OffsetDateTime.parse(observedAt).toInstant()
-                .atZone(java.time.ZoneOffset.UTC).toLocalDate()
+            val timestampDate = OffsetDateTime.parse(observedAt).toLocalDate()
             require(observedDate == timestampDate) {
-                "price observation observed_on and observed_at must refer to the same UTC date"
+                "price observation observed_on and observed_at must refer to the same calendar date"
             }
         }
-        require(quantity.isFinite() && quantity > 0.0) { "price observation quantity must be positive" }
-        require(quantity % 1.0 == 0.0) { "price observation quantity must be an integer" }
-        require(unitPrice >= 0 && gross >= 0 && discount >= 0 && net >= 0) {
-            "price observation amounts must be non-negative"
+        quantity?.let {
+            require(it.isFinite() && it > 0.0) { "price observation quantity must be positive" }
+            require(it % 1.0 == 0.0) { "price observation quantity must be an integer" }
         }
-        require(gross >= discount) { "price observation discount cannot exceed gross" }
-        require(
-            BigDecimal(quantity.toString()).multiply(BigDecimal.valueOf(unitPrice))
-                .compareTo(BigDecimal.valueOf(net)) == 0,
-        ) {
-            "quantity times unit_price must equal net"
+        listOf(unitPrice, gross, discount, net).forEach { value ->
+            require(value == null || value >= 0) { "price observation amounts must be non-negative" }
         }
-        require(gross - discount == net) { "gross minus discount must equal net" }
+        require(unitPrice != null || gross != null || discount != null || net != null) {
+            "price observation requires at least one observed price fact"
+        }
+        if (gross != null && discount != null) {
+            require(discount <= gross) { "price observation discount cannot exceed gross" }
+        }
+        if (gross != null && net != null) {
+            require(gross >= net) { "price observation gross cannot be below net" }
+        }
+        if (quantity != null && unitPrice != null && net != null) {
+            require(
+                java.math.BigDecimal(quantity.toString()).multiply(java.math.BigDecimal.valueOf(unitPrice))
+                    .compareTo(java.math.BigDecimal.valueOf(net)) == 0,
+            ) {
+                "quantity times unit_price must equal net when all are known"
+            }
+        }
+        if (gross != null && discount != null && net != null) {
+            require(gross - discount == net) {
+                "gross minus discount must equal net when all are known"
+            }
+        }
         require(evidence.isNotEmpty() && evidence.all(String::isNotBlank)) {
             "price observation evidence is required"
         }
@@ -321,7 +338,7 @@ data class StandalonePriceObservation(
     }
 
     /** Compatibility aliases for callers that use the wire spelling. */
-    val unit_price: Long get() = unitPrice
+    val unit_price: Long? get() = unitPrice
     val observed_on: String? get() = observedOn
     val observed_at: String? get() = observedAt
 }
@@ -336,9 +353,15 @@ sealed interface IngestionNutrition {
         override val clientKey: String,
         val draft: NutritionLabelDraft,
         override val lineId: String? = null,
-        /** Fitness v3 category hierarchy; each entry remains a source classification fact. */
-        val productLabelHierarchy: List<String> = emptyList(),
-    ) : IngestionNutrition
+        /** Local relation to the Product Candidate carrying the observed hierarchy facts. */
+        val productClientKey: String? = null,
+    ) : IngestionNutrition {
+        init {
+            require(productClientKey == null || productClientKey.isNotBlank()) {
+                "product label product_client_key must be non-empty when provided"
+            }
+        }
+    }
 
     data class RestaurantEstimate(
         override val clientKey: String,

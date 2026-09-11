@@ -31,7 +31,7 @@ class FitnessCanonicalProjectionSubmitter(
             return ProjectionSubmission.Failure("pricetrace_identity_missing", retryable = false)
         }
         val priceTraceIdentity = request.resolvedIdentity?.priceTrace?.let(PriceTraceIdentityJson::encode)
-        val useV3Contract = envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA && envelope.receipt == null
+        val useV3Contract = envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA
 
         val responses = mutableListOf<String>()
         var lastFoodId: String? = null
@@ -45,9 +45,16 @@ class FitnessCanonicalProjectionSubmitter(
                         idempotencyKey = itemKey,
                         draft = item.draft,
                         // submitProjection() verifies the persisted envelope fingerprint first.
-                        envelopeVerified = false,
-                        priceTraceIdentity = priceTraceIdentity,
-                        productLabelHierarchy = item.productLabelHierarchy,
+                    envelopeVerified = false,
+                    priceTraceIdentity = priceTraceIdentity,
+                    productCandidate = item.productClientKey?.let { productClientKey ->
+                        envelope.productCandidates.singleOrNull { candidate ->
+                            candidate.clientKey == productClientKey
+                        } ?: return ProjectionSubmission.Failure(
+                            "product_candidate_missing:$productClientKey",
+                            retryable = false,
+                        )
+                    },
                         useV3Contract = useV3Contract,
                     )
                     is IngestionNutrition.RestaurantEstimate -> {
@@ -77,6 +84,7 @@ class FitnessCanonicalProjectionSubmitter(
                             idempotencyKey = itemKey,
                             restaurantName = restaurantName,
                             item = item,
+                            useV3Contract = useV3Contract,
                         )
                     }
                     is IngestionNutrition.MealComponentEstimate -> {
@@ -109,9 +117,7 @@ class FitnessCanonicalProjectionSubmitter(
                             )
                         }
                     }
-                    else -> when (val result = if (payload.inputContract == NUTRITION_LABEL_V3 ||
-                        payload.inputContract == FOOD_ESTIMATE_V3
-                    ) {
+                    else -> when (val result = if (useV3Contract) {
                         gateway.importCanonicalV3(payload)
                     } else {
                         gateway.importCanonical(payload)

@@ -318,11 +318,11 @@ class PriceTraceCanonicalGateway(
         observation.observedOn?.let { put("observed_on", JsonPrimitive(it)) }
         observation.observedAt?.let { put("observed_at", JsonPrimitive(it)) }
         put("currency", JsonPrimitive("KRW"))
-        put("gross_price", JsonPrimitive(observation.gross))
-        put("discount", JsonPrimitive(observation.discount))
-        put("net_price", JsonPrimitive(observation.net))
-        put("quantity", JsonPrimitive(observation.quantity.toLong()))
-        put("unit_price", JsonPrimitive(observation.unitPrice))
+        put("gross_price", observation.gross?.let(::JsonPrimitive) ?: JsonNull)
+        put("discount", observation.discount?.let(::JsonPrimitive) ?: JsonNull)
+        put("net_price", observation.net?.let(::JsonPrimitive) ?: JsonNull)
+        put("quantity", observation.quantity?.toLong()?.let(::JsonPrimitive) ?: JsonNull)
+        put("unit_price", observation.unitPrice?.let(::JsonPrimitive) ?: JsonNull)
         put("merchant", merchantObservationJson(envelope, observation.kind))
         when (observation.kind) {
             StandalonePriceObservationKind.RETAIL_PURCHASE -> {
@@ -363,10 +363,14 @@ class PriceTraceCanonicalGateway(
     }
 
     private fun retailProductObservationJson(candidate: ProductCandidate): JsonObject = buildJsonObject {
+        put("product_client_key", JsonPrimitive(candidate.clientKey))
+        put("merchant_sku", candidate.merchantSku?.let(::JsonPrimitive) ?: JsonNull)
         put("product_name", JsonPrimitive(candidate.productName))
-        put("merchant_sku", JsonPrimitive(candidate.clientKey))
-        candidate.brand?.let { put("brand", JsonPrimitive(it)) }
-        candidate.specification?.let { put("specification", JsonPrimitive(it)) }
+        put("brand", candidate.brand?.let(::JsonPrimitive) ?: JsonNull)
+        put("sub_brand", candidate.subBrand?.let(::JsonPrimitive) ?: JsonNull)
+        put("manufacturer", candidate.manufacturer?.let(::JsonPrimitive) ?: JsonNull)
+        put("specification", candidate.specification?.let(::JsonPrimitive) ?: JsonNull)
+        put("variant", candidate.variant?.let(::JsonPrimitive) ?: JsonNull)
         put("identifiers", JsonArray(candidate.barcodes.map { barcode -> buildJsonObject {
             put("scheme", JsonPrimitive(priceTraceIdentifierScheme(barcode)))
             put("value", JsonPrimitive(barcode.value.filterNot { it == ' ' || it == '-' }))
@@ -377,6 +381,8 @@ class PriceTraceCanonicalGateway(
         put("schema_version", JsonPrimitive("PRICETRACE_PRODUCT_CANDIDATE"))
         put("contract_version", JsonPrimitive("product-candidate.v1"))
         put("source_app", JsonPrimitive("pricetrace_ocr_app"))
+        put("client_key", JsonPrimitive(candidate.clientKey))
+        put("sub_brand", candidate.subBrand?.let(::JsonPrimitive) ?: JsonNull)
         put("source_version", candidate.sourceVersion?.let(::JsonPrimitive) ?: JsonNull)
         put("candidate_type", JsonPrimitive(candidate.candidateType))
         put("product_name", JsonPrimitive(candidate.productName))
