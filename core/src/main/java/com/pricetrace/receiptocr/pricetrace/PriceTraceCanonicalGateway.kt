@@ -11,6 +11,7 @@ import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 import com.pricetrace.receiptscanner.ingestion.ProductCandidate
 import com.pricetrace.receiptscanner.ingestion.ProductCandidateBarcode
+import com.pricetrace.receiptscanner.ingestion.ProductCandidateEvidence
 import com.pricetrace.receiptscanner.ingestion.StandalonePriceObservation
 import com.pricetrace.receiptscanner.ingestion.StandalonePriceObservationKind
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
@@ -487,17 +488,22 @@ class PriceTraceCanonicalGateway(
         put("package_count", candidate.packageCount?.let(::JsonPrimitive) ?: JsonNull)
         put("variant", candidate.variant?.let(::JsonPrimitive) ?: JsonNull)
         put("identifiers", JsonArray(candidateIdentifiers(candidate)))
-        put("evidence", JsonArray(candidate.evidence.map { evidence ->
-            val sourceRef = evidence.sourceRef?.takeIf(String::isNotBlank)
-                ?: evidence.source?.takeIf(String::isNotBlank)
-                ?: evidence.sourceAttachmentIds.firstOrNull()
-                ?: error("product candidate evidence source_ref is required")
-            buildJsonObject {
-                put("source_type", JsonPrimitive(evidence.sourceType))
-                put("source_ref", JsonPrimitive(sourceRef))
-                put("field", JsonPrimitive(evidence.field))
-                put("observed_value", evidence.observedValue?.let(::JsonPrimitive) ?: JsonNull)
-                put("content_hash", evidence.contentHash?.let(::JsonPrimitive) ?: JsonNull)
+        put("evidence", JsonArray(candidate.evidence.mapNotNull { evidence ->
+            val field = priceTraceProductCandidateEvidenceField(evidence)
+            if (field == null) {
+                null
+            } else {
+                val sourceRef = evidence.sourceRef?.takeIf(String::isNotBlank)
+                    ?: evidence.source?.takeIf(String::isNotBlank)
+                    ?: evidence.sourceAttachmentIds.firstOrNull()
+                    ?: error("product candidate evidence source_ref is required")
+                buildJsonObject {
+                    put("source_type", JsonPrimitive(evidence.sourceType))
+                    put("source_ref", JsonPrimitive(sourceRef))
+                    put("field", JsonPrimitive(field))
+                    put("observed_value", evidence.observedValue?.let(::JsonPrimitive) ?: JsonNull)
+                    put("content_hash", evidence.contentHash?.let(::JsonPrimitive) ?: JsonNull)
+                }
             }
         }))
         put("provenance", buildJsonObject {
@@ -508,6 +514,24 @@ class PriceTraceCanonicalGateway(
             candidate.sourceVersion?.let { put("extractor_version", JsonPrimitive(it)) }
             candidate.sourceVersion?.let { put("source_revision", JsonPrimitive(it)) }
         })
+    }
+
+    /** Normalize only the V4 order-history aliases at the PriceTrace boundary. */
+    private fun priceTraceProductCandidateEvidenceField(
+        evidence: ProductCandidateEvidence,
+    ): String? = if (evidence.sourceType != "order_history") {
+        evidence.field
+    } else {
+        when (evidence.field) {
+            "brand_name" -> "brand"
+            "manufacturer_name" -> "manufacturer"
+            "variant_name" -> "variant"
+            "specification_text" -> "specification"
+            // PriceTrace's current order_history allowlist excludes sub_brand;
+            // the candidate-level sub_brand fact is already sent separately.
+            "barcodes", "sub_brand_name" -> null
+            else -> evidence.field
+        }
     }
 
     private fun candidateIdentifiers(candidate: ProductCandidate): List<JsonObject> {

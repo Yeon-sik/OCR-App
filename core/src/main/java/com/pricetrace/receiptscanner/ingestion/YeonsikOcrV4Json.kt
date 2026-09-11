@@ -413,12 +413,22 @@ object YeonsikOcrV4Json {
     ): List<ProductCandidateEvidence> = buildList {
         add("product_name" to productName)
         merchantSku?.let { add("merchant_sku" to it) }
-        brand?.let { add("brand_name" to it) }
-        subBrand?.let { add("sub_brand_name" to it) }
-        manufacturer?.let { add("manufacturer_name" to it) }
-        variant?.let { add("variant_name" to it) }
-        specification?.let { add("specification_text" to it) }
-        if (barcodes.isNotEmpty()) {
+        brand?.let {
+            add((if (sourceType == "order_history") "brand" else "brand_name") to it)
+        }
+        if (sourceType != "order_history") {
+            subBrand?.let { add("sub_brand_name" to it) }
+        }
+        manufacturer?.let {
+            add((if (sourceType == "order_history") "manufacturer" else "manufacturer_name") to it)
+        }
+        variant?.let {
+            add((if (sourceType == "order_history") "variant" else "variant_name") to it)
+        }
+        specification?.let {
+            add((if (sourceType == "order_history") "specification" else "specification_text") to it)
+        }
+        if (sourceType != "order_history" && barcodes.isNotEmpty()) {
             add("barcodes" to barcodes.joinToString(",") { "${it.scheme}:${it.value}" })
         }
     }.map { (field, observedValue) ->

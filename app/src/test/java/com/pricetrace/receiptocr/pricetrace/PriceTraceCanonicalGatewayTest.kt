@@ -588,6 +588,98 @@ class PriceTraceCanonicalGatewayTest {
     }
 
     @Test
+    fun v4OrderHistoryProductCandidateUsesPriceTraceEvidenceVocabularyAndIdentifiers() = runTest {
+        val candidate = ProductCandidate(
+            clientKey = "order-history-product-1",
+            productName = "Coupang cereal",
+            brand = "Brand fact",
+            subBrand = "Sub-brand fact",
+            manufacturer = "Manufacturer fact",
+            specification = "500 g",
+            variant = "Original",
+            barcodes = listOf(ProductCandidateBarcode(type = "ean13", value = "8801234567890")),
+            evidence = listOf(
+                ProductCandidateEvidence(
+                    sourceAttachmentIds = listOf("order-history-1"),
+                    sourceType = "order_history",
+                    sourceRef = "order-history-1",
+                    field = "product_name",
+                    observedValue = "Coupang cereal",
+                ),
+                ProductCandidateEvidence(
+                    sourceAttachmentIds = listOf("order-history-1"),
+                    sourceType = "order_history",
+                    sourceRef = "order-history-1",
+                    field = "brand_name",
+                    observedValue = "Brand fact",
+                ),
+                ProductCandidateEvidence(
+                    sourceAttachmentIds = listOf("order-history-1"),
+                    sourceType = "order_history",
+                    sourceRef = "order-history-1",
+                    field = "manufacturer_name",
+                    observedValue = "Manufacturer fact",
+                ),
+                ProductCandidateEvidence(
+                    sourceAttachmentIds = listOf("order-history-1"),
+                    sourceType = "order_history",
+                    sourceRef = "order-history-1",
+                    field = "variant_name",
+                    observedValue = "Original",
+                ),
+                ProductCandidateEvidence(
+                    sourceAttachmentIds = listOf("order-history-1"),
+                    sourceType = "order_history",
+                    sourceRef = "order-history-1",
+                    field = "specification_text",
+                    observedValue = "500 g",
+                ),
+                ProductCandidateEvidence(
+                    sourceAttachmentIds = listOf("order-history-1"),
+                    sourceType = "order_history",
+                    sourceRef = "order-history-1",
+                    field = "barcodes",
+                    observedValue = "ean13:8801234567890",
+                ),
+                ProductCandidateEvidence(
+                    sourceAttachmentIds = listOf("order-history-1"),
+                    sourceType = "order_history",
+                    sourceRef = "order-history-1",
+                    field = "sub_brand_name",
+                    observedValue = "Sub-brand fact",
+                ),
+            ),
+        )
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(
+                200,
+                """{"schemaVersion":"product-candidate.v1","contract":"PRICETRACE_PRODUCT_CANDIDATE","outcome":"pending_review","catalogProductId":null}""",
+            ),
+        )
+
+        val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .submitProductCandidates("order-history-product-key", listOf(candidate))
+        assertTrue(result is PriceTraceCanonicalOutcome.Success)
+
+        val body = Json.parseToJsonElement(requireNotNull(transport.requests.single().body)).jsonObject
+        val sent = body["p_candidate"]!!.jsonObject
+        assertEquals("Sub-brand fact", sent["sub_brand"]?.jsonPrimitive?.content)
+        assertEquals(
+            listOf("product_name", "brand", "manufacturer", "variant", "specification"),
+            sent["evidence"]!!.jsonArray.map { it.jsonObject["field"]!!.jsonPrimitive.content },
+        )
+        assertFalse(sent.toString().contains("brand_name"))
+        assertFalse(sent.toString().contains("manufacturer_name"))
+        assertFalse(sent.toString().contains("variant_name"))
+        assertFalse(sent.toString().contains("specification_text"))
+        assertFalse(sent.toString().contains("barcodes"))
+        assertFalse(sent.toString().contains("sub_brand_name"))
+        val identifier = sent["identifiers"]!!.jsonArray.single().jsonObject
+        assertEquals("ean", identifier["scheme"]?.jsonPrimitive?.content)
+        assertEquals("8801234567890", identifier["value"]?.jsonPrimitive?.content)
+    }
+
+    @Test
     fun textOnlyProductCandidateAndStandalonePricePreserveUserStatementEvidence() = runTest {
         val transport = QueueTransport(
             PriceObservationHttpResponse(

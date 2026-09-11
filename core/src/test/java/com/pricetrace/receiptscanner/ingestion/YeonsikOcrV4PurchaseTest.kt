@@ -531,6 +531,53 @@ class YeonsikOcrV4PurchaseTest {
     }
 
     @Test
+    fun `v4 order history auto candidate evidence uses PriceTrace fields and identifiers`() {
+        val candidate = ProductCandidate(
+            clientKey = "auto-order-history-product",
+            productName = "주문 상품",
+            brand = "브랜드",
+            subBrand = "서브브랜드",
+            manufacturer = "제조사",
+            specification = "500 g",
+            variant = "오리지널",
+            barcodes = listOf(ProductCandidateBarcode(type = "ean13", value = "8801234567890")),
+            sourceAttachmentIds = listOf("order-history-1"),
+            evidence = listOf(
+                ProductCandidateEvidence(
+                    sourceAttachmentIds = listOf("order-history-1"),
+                    sourceType = "order_history",
+                    sourceRef = "order-history-1",
+                    field = "product_name",
+                    observedValue = "주문 상품",
+                ),
+            ),
+        )
+        val encoded = YeonsikOcrV4Json.encode(
+            purchaseEnvelope(orderRecord(), productCandidates = listOf(candidate)),
+        )
+        val root = Json.parseToJsonElement(encoded).jsonObject
+        val candidateRoot = root["product_candidates"]!!.jsonArray.single().jsonObject
+        val withoutExplicitEvidence = JsonObject(candidateRoot.toMutableMap().apply { remove("evidence") })
+        val autoEvidenceRoot = JsonObject(root.toMutableMap().apply {
+            put("product_candidates", JsonArray(listOf(withoutExplicitEvidence)))
+        })
+        val decoded = YeonsikOcrV4Json.decode(
+            Json.encodeToString(JsonObject.serializer(), autoEvidenceRoot),
+            "v4-auto-order-history-candidate",
+        )
+
+        val decodedCandidate = decoded.productCandidates.single()
+        assertEquals(
+            listOf("product_name", "brand", "manufacturer", "variant", "specification"),
+            decodedCandidate.evidence.map { it.field },
+        )
+        assertFalse(decodedCandidate.evidence.any { it.field == "barcodes" })
+        assertFalse(decodedCandidate.evidence.any { it.field == "sub_brand_name" })
+        assertEquals("8801234567890", decodedCandidate.barcodes.single().value)
+        assertEquals("서브브랜드", decodedCandidate.subBrand)
+    }
+
+    @Test
     fun `restaurant purchase uses restaurant PriceTrace kind without inventing timestamps`() {
         val record = orderRecord(
             seller = "테스트 식당",
