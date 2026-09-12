@@ -91,12 +91,12 @@ class DesktopProjectionBundle(
         if (current.isSignedIn) return null
         val credentials = config.priceTrace
         if (credentials.email.isBlank() || credentials.password.isBlank()) {
-            return "PriceTrace credentials are missing: provide an access token or email/password."
+            return "PriceTrace 인증 정보가 없습니다. 접근 토큰 또는 이메일과 비밀번호를 입력하세요."
         }
         return when (val outcome = priceObservationGateway.signIn(credentials.email, credentials.password)) {
             is com.pricetrace.receiptocr.pricetrace.PriceTraceAuthOutcome.Success -> null
             is com.pricetrace.receiptocr.pricetrace.PriceTraceAuthOutcome.Failure ->
-                "PriceTrace sign-in failed: ${outcome.kind.name.lowercase()}"
+                "PriceTrace 로그인에 실패했습니다."
         }
     }
 
@@ -105,11 +105,11 @@ class DesktopProjectionBundle(
         if (current.isSignedIn) return null
         val credentials = config.nutrition
         if (credentials.email.isBlank() || credentials.password.isBlank()) {
-            return "Fitness Nutrition credentials are missing: provide an access token or email/password."
+            return "Fitness 영양 정보 인증이 없습니다. 접근 토큰 또는 이메일과 비밀번호를 입력하세요."
         }
         return when (val outcome = nutritionGateway.signIn(credentials.email, credentials.password)) {
             is NutritionAuthOutcome.Success -> null
-            is NutritionAuthOutcome.Failure -> "Fitness Nutrition sign-in failed: ${outcome.reason.name.lowercase()}"
+            is NutritionAuthOutcome.Failure -> "Fitness 영양 정보 로그인에 실패했습니다."
         }
     }
 
@@ -118,11 +118,11 @@ class DesktopProjectionBundle(
         if (current.isSignedIn) return null
         val credentials = config.cashOs
         if (credentials.email.isBlank() || credentials.password.isBlank()) {
-            return "CashOS credentials are missing: provide an access token or email/password."
+            return "CashOS 인증 정보가 없습니다. 접근 토큰 또는 이메일과 비밀번호를 입력하세요."
         }
         return when (val outcome = cashOsReceiptGateway.signIn(credentials.email, credentials.password)) {
             is CashOsAuthOutcome.Success -> null
-            is CashOsAuthOutcome.Failure -> "CashOS sign-in failed: ${outcome.kind.name.lowercase()}"
+            is CashOsAuthOutcome.Failure -> "CashOS 로그인에 실패했습니다."
         }
     }
 

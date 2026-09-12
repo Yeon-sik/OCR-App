@@ -41,6 +41,7 @@ import androidx.compose.ui.window.application
 import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
+import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.awt.dnd.DnDConstants
@@ -57,7 +58,7 @@ import javax.swing.filechooser.FileNameExtensionFilter
 fun main() = application {
     Window(
         onCloseRequest = ::exitApplication,
-        title = "Yeonsik Ingestion Console",
+        title = "영식 영수증 수집 콘솔",
     ) {
         YeonsikIngestionConsole(DesktopIngestionController())
     }
@@ -69,7 +70,7 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
     val scope = rememberCoroutineScope()
     var evidenceType by remember { mutableStateOf(SourceAttachmentType.RECEIPT) }
     var verificationBasis by remember { mutableStateOf(VerificationBasis.SOURCE_EVIDENCE) }
-    var selectedProjections by remember { mutableStateOf<Set<com.pricetrace.receiptscanner.ingestion.IngestionProjection>?>(null) }
+    var selectedProjections by remember { mutableStateOf<Set<IngestionProjection>?>(null) }
     val activeProjections = state.session?.projections.orEmpty()
         .filterNot { it.status == ProjectionStatus.DISABLED }
         .map { it.projection }
@@ -90,9 +91,9 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                     Modifier.weight(1.35f).fillMaxHeight(),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text("Yeonsik Ingestion Console", style = MaterialTheme.typography.headlineSmall)
+                    Text("영식 영수증 수집 콘솔", style = MaterialTheme.typography.headlineSmall)
                     Text(
-                        "IMPORT → PARSE → VALIDATE → USER REVIEW → VERIFIED → PROJECT → SUBMIT",
+                        "가져오기 → 파싱 → 검증 → 사용자 검수 → 검수 완료 → 대상 생성 → 전송",
                         style = MaterialTheme.typography.labelMedium,
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -103,7 +104,7 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                                     launchIo { controller.importBundle(file) }
                                 }
                             },
-                        ) { Text("Open .yeonsik") }
+                        ) { Text(".yeonsik 파일 열기") }
                         OutlinedButton(
                             enabled = !state.busy,
                             onClick = {
@@ -111,15 +112,15 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                                     launchIo { controller.importJson(Files.readString(file)) }
                                 }
                             },
-                        ) { Text("Open JSON (new ingestion)") }
+                        ) { Text("새 수집을 위한 JSON 열기") }
                         Button(
                             enabled = !state.busy && !bundleActive && state.rawJson.isNotBlank(),
                             onClick = { launchIo { controller.parseJson() } },
-                        ) { Text("Parse & Validate") }
+                        ) { Text("파싱 및 검증") }
                         OutlinedButton(
                             enabled = !state.busy,
                             onClick = { launchIo { controller.loadLatest() } },
-                        ) { Text("Load Latest") }
+                        ) { Text("최신 항목 불러오기") }
                     }
                     JsonDropZone(
                         enabled = !state.busy,
@@ -131,8 +132,8 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                         enabled = !state.busy && !bundleActive,
                         readOnly = bundleActive,
                         modifier = Modifier.fillMaxWidth().weight(1f),
-                        label = { Text(if (bundleActive) "Bundle canonical JSON (read-only)" else "External JSON (editable)") },
-                        placeholder = { Text("Open or drop a yeonsik-ocr.v1/v2/v3 JSON file") },
+                        label = { Text(if (bundleActive) "번들 정본 JSON (읽기 전용)" else "외부 JSON (편집 가능)") },
+                        placeholder = { Text("yeonsik-ocr.v1/v2/v3 JSON 파일을 열거나 여기에 놓으세요") },
                         minLines = 14,
                         maxLines = 40,
                     )
@@ -158,7 +159,7 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                         Button(
                             enabled = !state.busy,
                             onClick = { launchIo { controller.archiveEvidence() } },
-                        ) { Text("Archive / Retry") }
+                        ) { Text("보관 / 재시도") }
                     }
                     ReviewCard(state)
                     ProjectionCard(
@@ -170,18 +171,18 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                             selectedProjections = next
                         },
                     )
-                    Text("Verification basis", style = MaterialTheme.typography.titleMedium)
+                    Text("검수 기준", style = MaterialTheme.typography.titleMedium)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         val availableBases = if (state.bundleMetadata == null) VerificationBasis.entries
                         else listOf(VerificationBasis.SOURCE_EVIDENCE)
                         availableBases.forEach { basis ->
                             if (basis == verificationBasis) {
                                 Button(onClick = { verificationBasis = basis }) {
-                                    Text(basis.wireValue)
+                                    Text(DesktopUiLabels.verificationBasis(basis))
                                 }
                             } else {
                                 OutlinedButton(onClick = { verificationBasis = basis }) {
-                                    Text(basis.wireValue)
+                                    Text(DesktopUiLabels.verificationBasis(basis))
                                 }
                             }
                         }
@@ -199,7 +200,7 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                                     )
                                 }
                             },
-                        ) { Text("Verify") }
+                        ) { Text("검수 완료 처리") }
                         Button(
                             enabled = !state.busy && state.session != null &&
                                 state.session?.verifiedCanonicalFingerprint == state.session?.canonicalFingerprint &&
@@ -209,9 +210,9 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                             onClick = {
                                 launchIo { controller.submit(effectiveSelectedProjections) }
                             },
-                        ) { Text("Submit / Retry") }
+                        ) { Text("전송 / 재시도") }
                     }
-                    if (state.busy) Text("Working…", color = MaterialTheme.colorScheme.primary)
+                    if (state.busy) Text("처리 중…", color = MaterialTheme.colorScheme.primary)
                     state.notice?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
                     state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 }
@@ -224,13 +225,13 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
 private fun SummaryCard(state: DesktopUiState) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text("Validation", style = MaterialTheme.typography.titleMedium)
-            Text("Schema: ${state.schema ?: "—"}")
-            Text("Ingestion: ${state.ingestionId ?: "—"}")
-            Text("Local document: ${state.localDocumentId ?: "—"}")
-            Text("Session: ${state.session?.reviewStatus?.wireValue ?: "not imported"}")
-            Text("Bundle: ${state.bundleValidationStatus?.name ?: "LEGACY / NONE"}")
-            Text("Evidence archive: ${state.bundleMetadata?.archiveStatus?.name ?: "NOT_STARTED"}")
+            Text("검증 결과", style = MaterialTheme.typography.titleMedium)
+            Text("스키마: ${state.schema ?: "—"}")
+            Text("수집 ID: ${state.ingestionId ?: "—"}")
+            Text("로컬 문서 ID: ${state.localDocumentId ?: "—"}")
+            Text("세션: ${state.session?.reviewStatus?.let(DesktopUiLabels::ingestionReviewStatus) ?: "가져오지 않음"}")
+            Text("번들: ${state.bundleValidationStatus?.let(DesktopUiLabels::bundleValidationStatus) ?: "기존 형식 / 없음"}")
+            Text("증거 보관: ${state.bundleMetadata?.archiveStatus?.let(DesktopUiLabels::evidenceArchiveStatus) ?: "시작 전"}")
         }
     }
 }
@@ -245,26 +246,26 @@ private fun EvidenceCard(
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Source evidence", style = MaterialTheme.typography.titleMedium)
+            Text("원본 증거", style = MaterialTheme.typography.titleMedium)
             Text(
-                if (state.bundleMetadata == null) "Legacy evidence remains local until explicitly archived by a bundle flow."
-                else "Bundle evidence is bound by manifest id/type and archived before verification.",
+                if (state.bundleMetadata == null) "기존 형식의 증거는 번들 흐름에서 명시적으로 보관하기 전까지 로컬에만 남습니다."
+                else "번들 증거는 매니페스트 ID/유형으로 연결되며 검수 전에 보관됩니다.",
             )
             if (state.bundleMetadata == null) {
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     SourceAttachmentType.entries.forEach { type ->
                         if (type == selectedType) {
-                            Button(onClick = { onTypeSelected(type) }) { Text(type.wireValue) }
+                            Button(onClick = { onTypeSelected(type) }) { Text(DesktopUiLabels.sourceAttachmentType(type)) }
                         } else {
-                            OutlinedButton(onClick = { onTypeSelected(type) }) { Text(type.wireValue) }
+                            OutlinedButton(onClick = { onTypeSelected(type) }) { Text(DesktopUiLabels.sourceAttachmentType(type)) }
                         }
                     }
                 }
-                Button(enabled = state.session != null && !state.busy, onClick = onChoose) { Text("Choose evidence files") }
+                Button(enabled = state.session != null && !state.busy, onClick = onChoose) { Text("증거 파일 선택") }
                 EvidenceDropZone(enabled = state.session != null && !state.busy, onFiles = onDrop)
             }
             state.evidence.forEach { evidence ->
-                Text("${evidence.type.wireValue}: ${evidence.path.fileName} (${if (Files.isReadable(evidence.path)) "readable" else "missing"})")
+                Text("${DesktopUiLabels.sourceAttachmentType(evidence.type)}: ${evidence.path.fileName} (${DesktopUiLabels.fileAvailability(Files.isReadable(evidence.path))})")
             }
         }
     }
@@ -274,15 +275,17 @@ private fun EvidenceCard(
 private fun ReviewCard(state: DesktopUiState) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text("Artifact review", style = MaterialTheme.typography.titleMedium)
+            Text("자료 검수", style = MaterialTheme.typography.titleMedium)
             if (state.artifacts.isEmpty()) {
-                Text("No parsed artifacts.")
+                Text("파싱된 자료가 없습니다.")
             } else {
                 state.artifacts.forEach { artifact ->
                     val status = when {
-                        artifact.verified -> "VERIFIED"
-                        artifact.evidenceReady -> "READY FOR VERIFY"
-                        else -> "BLOCKED: ${artifact.evidenceIssues.joinToString()}"
+                        else -> DesktopUiLabels.artifactStatus(
+                            verified = artifact.verified,
+                            evidenceReady = artifact.evidenceReady,
+                            issues = artifact.evidenceIssues,
+                        )
                     }
                     Text("${artifact.label}: $status")
                 }
@@ -294,15 +297,15 @@ private fun ReviewCard(state: DesktopUiState) {
 @Composable
 private fun ProjectionCard(
     state: DesktopUiState,
-    selectedProjections: Set<com.pricetrace.receiptscanner.ingestion.IngestionProjection>,
-    onProjectionSelected: (com.pricetrace.receiptscanner.ingestion.IngestionProjection) -> Unit,
+    selectedProjections: Set<IngestionProjection>,
+    onProjectionSelected: (IngestionProjection) -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Active projections", style = MaterialTheme.typography.titleMedium)
+            Text("활성 전송 대상", style = MaterialTheme.typography.titleMedium)
             val projections = state.session?.projections.orEmpty().filterNot { it.status == ProjectionStatus.DISABLED }
             if (projections.isEmpty()) {
-                Text("No active projection.")
+                Text("활성 전송 대상이 없습니다.")
             } else {
                 projections.forEach { projection ->
                     Column(Modifier.fillMaxWidth().border(BorderStroke(1.dp, MaterialTheme.colorScheme.outline)).padding(8.dp)) {
@@ -311,11 +314,11 @@ private fun ProjectionCard(
                                 checked = projection.projection in selectedProjections,
                                 onCheckedChange = { onProjectionSelected(projection.projection) },
                             )
-                            Text(projection.projection.wireValue, style = MaterialTheme.typography.labelLarge)
+                            Text(DesktopUiLabels.projection(projection.projection), style = MaterialTheme.typography.labelLarge)
                         }
-                        Text("status=${projection.status.wireValue}, attempts=${projection.attemptCount}")
-                        Text("remote id=${projection.remoteId ?: "—"}")
-                        projection.lastError?.let { Text("error=$it", color = MaterialTheme.colorScheme.error) }
+                        Text("상태: ${DesktopUiLabels.projectionStatus(projection.status)}, 시도 횟수: ${projection.attemptCount}")
+                        Text("원격 ID: ${projection.remoteId ?: "—"}")
+                        projection.lastError?.let { Text("오류: $it", color = MaterialTheme.colorScheme.error) }
                     }
                 }
             }
@@ -327,7 +330,7 @@ private fun ProjectionCard(
 private fun JsonDropZone(enabled: Boolean, onJson: (String) -> Unit) {
     DropZone(
         enabled = enabled,
-        label = "Drop a .json file here",
+        label = "JSON 파일을 여기에 놓으세요",
         onFiles = { files ->
             files.firstOrNull { it.fileName.toString().lowercase().endsWith(".json") }?.let { file ->
                 runCatching { onJson(Files.readString(file)) }
@@ -338,7 +341,7 @@ private fun JsonDropZone(enabled: Boolean, onJson: (String) -> Unit) {
 
 @Composable
 private fun EvidenceDropZone(enabled: Boolean, onFiles: (List<Path>) -> Unit) {
-    DropZone(enabled = enabled, label = "Drop evidence images here", onFiles = onFiles)
+    DropZone(enabled = enabled, label = "증거 이미지를 여기에 놓으세요", onFiles = onFiles)
 }
 
 @Composable
@@ -380,19 +383,19 @@ private fun DropZone(enabled: Boolean, label: String, onFiles: (List<Path>) -> U
 }
 
 private fun chooseJsonFile(): Path? = JFileChooser().run {
-    fileFilter = FileNameExtensionFilter("JSON files", "json")
+    fileFilter = FileNameExtensionFilter("JSON 파일", "json")
     isMultiSelectionEnabled = false
     if (showOpenDialog(null) == JFileChooser.APPROVE_OPTION) selectedFile?.toPath() else null
 }
 
 private fun chooseBundleFile(): Path? = JFileChooser().run {
-    fileFilter = FileNameExtensionFilter("Yeonsik bundles", "yeonsik")
+    fileFilter = FileNameExtensionFilter("영식 번들 파일", "yeonsik")
     isMultiSelectionEnabled = false
     if (showOpenDialog(null) == JFileChooser.APPROVE_OPTION) selectedFile?.toPath() else null
 }
 
 private fun chooseEvidenceFiles(): List<Path>? = JFileChooser().run {
-    fileFilter = FileNameExtensionFilter("Image files", "png", "jpg", "jpeg", "webp", "heic")
+    fileFilter = FileNameExtensionFilter("이미지 파일", "png", "jpg", "jpeg", "webp", "heic")
     isMultiSelectionEnabled = true
     if (showOpenDialog(null) == JFileChooser.APPROVE_OPTION) selectedFiles?.map { it.toPath() } else null
 }

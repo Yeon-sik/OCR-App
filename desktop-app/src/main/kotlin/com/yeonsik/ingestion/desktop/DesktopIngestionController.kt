@@ -76,7 +76,7 @@ class DesktopIngestionController(
     fun updateRawJson(value: String) {
         if (_state.value.bundleMetadata != null || _state.value.bundleValidationStatus != null) {
             _state.value = _state.value.copy(
-                error = "Bundle canonical JSON is read-only. Open JSON to start a separate ingestion.",
+                error = "번들의 정본 JSON은 읽기 전용입니다. 별도 수집을 시작하려면 JSON을 여세요.",
                 notice = null,
             )
         } else {
@@ -118,8 +118,8 @@ class DesktopIngestionController(
                     if (result.startResult is IngestionStartResult.Duplicate) {
                         materializer.abort()
                         val existing = store.loadRecord(result.session.ingestionId)
-                            ?: error("Duplicate bundle session is missing its durable record.")
-                        loadRecord(existing, "Duplicate bundle fingerprint: loaded existing immutable session.")
+                            ?: error("중복 번들 세션의 영속 레코드를 찾을 수 없습니다.")
+                        loadRecord(existing, "중복 번들 지문을 확인해 기존의 변경 불가 세션을 불러왔습니다.")
                         archiveAfterImport = existing.bundle?.let {
                             it.archiveStatus != DesktopEvidenceArchiveStatus.ARCHIVED
                         } == true
@@ -139,7 +139,7 @@ class DesktopIngestionController(
                             importedBundle.canonicalJson,
                             canonicalJson,
                             evidence,
-                            "Bundle validated and evidence bound. Starting archive.",
+                            "번들 검증 및 증거 연결이 완료되었습니다. 보관을 시작합니다.",
                             null,
                             metadata,
                         )
@@ -156,7 +156,7 @@ class DesktopIngestionController(
                 session = null,
                 evidence = emptyList(),
                 artifacts = emptyList(),
-                error = "Bundle invalid: ${error.message ?: error.javaClass.simpleName}",
+                error = "번들이 유효하지 않습니다: ${error.message ?: error.javaClass.simpleName}",
                 notice = null,
                 bundleMetadata = null,
                 bundleValidationStatus = DesktopBundleValidationStatus.INVALID,
@@ -171,8 +171,8 @@ class DesktopIngestionController(
         beginBusy()
         try {
             val current = _state.value
-            val session = current.session ?: error("Import a .yeonsik bundle before archiving.")
-            val metadata = current.bundleMetadata ?: error("No bundle archive is available.")
+            val session = current.session ?: error("보관하려면 .yeonsik 번들을 먼저 가져오세요.")
+            val metadata = current.bundleMetadata ?: error("보관할 번들이 없습니다.")
             val archiving = metadata.copy(archiveStatus = DesktopEvidenceArchiveStatus.ARCHIVING, archiveError = null)
             persistRecord(session, current.rawJson, current.canonicalJson, current.evidence, archiving)
             _state.value = current.copy(bundleMetadata = archiving, busy = true, error = null)
@@ -187,7 +187,7 @@ class DesktopIngestionController(
             val result = bundle.evidenceArchivePort.archive(
                 EvidenceArchiveRequest(importedBundle) { sourceFileId ->
                     val attachment = current.evidence.singleOrNull { it.attachmentId == sourceFileId }
-                        ?: error("Bundle evidence is missing locally: $sourceFileId")
+                        ?: error("번들 증거를 로컬에서 찾을 수 없습니다: $sourceFileId")
                     Files.newInputStream(attachment.path)
                 },
                 metadata.archiveCheckpoint,
@@ -207,7 +207,7 @@ class DesktopIngestionController(
             persistRecord(session, current.rawJson, current.canonicalJson, current.evidence, updated)
             publish(
                 session, envelope, current.rawJson, current.canonicalJson, current.evidence,
-                if (updated.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED) "Evidence archive completed."
+                if (updated.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED) "증거 보관이 완료되었습니다."
                 else null,
                 updated.archiveError,
                 updated,
@@ -240,7 +240,7 @@ class DesktopIngestionController(
             val bundleActive = current.bundleMetadata != null || current.bundleValidationStatus != null
             if (!startNewIngestion && bundleActive) {
                 _state.value = current.copy(
-                    error = "Bundle canonical JSON is read-only. Open JSON to start a separate ingestion.",
+                    error = "번들의 정본 JSON은 읽기 전용입니다. 별도 수집을 시작하려면 JSON을 여세요.",
                     notice = null,
                 )
                 return
@@ -300,7 +300,7 @@ class DesktopIngestionController(
         beginBusy()
         try {
             val current = _state.value
-            val session = current.session ?: error("Import JSON before attaching evidence.")
+            val session = current.session ?: error("증거를 추가하려면 JSON을 먼저 가져오세요.")
             val envelope = currentEnvelope()
             val isV4Purchase = envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA
             val v4SourceIds = if (isV4Purchase) {
@@ -311,16 +311,16 @@ class DesktopIngestionController(
             val usedIds = current.evidence.map { it.attachmentId }.toMutableSet()
             if (isV4Purchase) {
                 require(v4SourceIds.isNotEmpty()) {
-                    "No V4 source file is declared for evidence type ${type.wireValue}."
+                    "V4 원본 파일이 ${DesktopUiLabels.sourceAttachmentType(type)} 유형으로 선언되지 않았습니다."
                 }
                 require(paths.size <= v4SourceIds.count { it !in usedIds }) {
-                    "Too many evidence files for V4 source type ${type.wireValue}."
+                    "V4 원본 유형 ${DesktopUiLabels.sourceAttachmentType(type)}에 증거 파일이 너무 많습니다."
                 }
             }
             val added = paths.map { path ->
                 val logicalId = if (isV4Purchase) {
                     v4SourceIds.firstOrNull { it !in usedIds }
-                        ?: error("No unused V4 source file is available for evidence type ${type.wireValue}.")
+                        ?: error("${DesktopUiLabels.sourceAttachmentType(type)} 유형에 사용할 수 있는 V4 원본 파일이 없습니다.")
                 } else {
                     null
                 }
@@ -342,7 +342,7 @@ class DesktopIngestionController(
                 rawJson = current.rawJson,
                 canonicalJson = current.canonicalJson,
                 evidence = evidence,
-                notice = "Evidence attached. Verify is still required.",
+                notice = "증거가 추가되었습니다. 검수를 완료해야 합니다.",
                 error = null,
             )
         } catch (error: Exception) {
@@ -358,7 +358,7 @@ class DesktopIngestionController(
         beginBusy()
         try {
             val currentState = _state.value
-            val currentSession = currentState.session ?: error("Import JSON before verification.")
+            val currentSession = currentState.session ?: error("검수하려면 JSON을 먼저 가져오세요.")
             val confirmation = useCase.confirm(
                 ingestionId = currentSession.ingestionId,
                 envelope = currentEnvelope(),
@@ -382,7 +382,7 @@ class DesktopIngestionController(
                         canonicalJson = canonicalJson,
                         evidence = currentState.evidence,
                         notice = null,
-                        error = "Verification blocked: ${result.issues.joinToString(", ")}",
+                        error = "검수가 차단되었습니다: ${result.issues.joinToString(", ")}",
                     )
                     return
                 }
@@ -391,7 +391,7 @@ class DesktopIngestionController(
             var bundleMetadata = currentState.bundleMetadata
             if (bundleMetadata != null) {
                 val artifactId = bundleMetadata.archiveCheckpoint.canonicalArtifactId
-                    ?: error("Evidence archive is missing the canonical artifact id.")
+                    ?: error("증거 보관에 정본 자료 ID가 없습니다.")
                 when (val event = bundle.evidenceArchivePort.recordVerification(
                     artifactId,
                     verificationBasis,
@@ -419,9 +419,9 @@ class DesktopIngestionController(
                 notice = if (latest.verifiedCanonicalFingerprint != null &&
                     (bundleMetadata == null || bundleMetadata.verificationEventRecorded)
                 ) {
-                    "Verified. Projections are ready for Submit."
+                    "검수가 완료되었습니다. 전송할 수 있습니다."
                 } else {
-                    "Verification event is not archived; Submit remains blocked."
+                    "검수 이벤트가 보관되지 않아 전송이 차단되었습니다."
                 },
                 error = bundleMetadata?.archiveError,
                 bundleMetadata = bundleMetadata,
@@ -437,24 +437,24 @@ class DesktopIngestionController(
         beginBusy()
         try {
             val currentState = _state.value
-            require(currentState.bundleValidationStatus != DesktopBundleValidationStatus.INVALID) { "Bundle is invalid." }
-            val session = currentState.session ?: error("Import JSON before submitting.")
+            require(currentState.bundleValidationStatus != DesktopBundleValidationStatus.INVALID) { "번들이 유효하지 않습니다." }
+            val session = currentState.session ?: error("전송하려면 JSON을 먼저 가져오세요.")
             val envelope = currentEnvelope()
             currentState.bundleMetadata?.let { metadata ->
-                require(metadata.validationStatus == DesktopBundleValidationStatus.VALID) { "Bundle is invalid." }
+                require(metadata.validationStatus == DesktopBundleValidationStatus.VALID) { "번들이 유효하지 않습니다." }
                 require(metadata.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED) {
-                    "Archive / Retry must complete before Submit."
+                    "보관 / 재시도를 완료해야 전송할 수 있습니다."
                 }
-                require(metadata.verificationEventRecorded) { "Verification event must be archived before Submit." }
+                require(metadata.verificationEventRecorded) { "전송 전에 검수 이벤트를 보관해야 합니다." }
             }
             if (session.verifiedCanonicalFingerprint != session.canonicalFingerprint) {
-                error("Verify the reviewed artifacts before submitting.")
+                error("전송하려면 검수한 자료를 먼저 검수 완료 처리하세요.")
             }
             val plan = useCase.plan(envelope)
             val selected = if (selectedProjections.isEmpty()) plan.eligible else {
                 selectedProjections.intersect(plan.eligible)
             }
-            if (selected.isEmpty()) error("No eligible projection selected.")
+            if (selected.isEmpty()) error("전송할 수 있는 대상이 선택되지 않았습니다.")
             val authenticationTargets = selected + selected.flatMap { plan.dependencies[it].orEmpty() }
             val authenticationErrors = bundle.ensureAuthenticated(authenticationTargets, envelope)
             if (authenticationErrors.isNotEmpty()) {
@@ -473,7 +473,7 @@ class DesktopIngestionController(
                 rawJson = currentState.rawJson,
                 canonicalJson = currentState.canonicalJson,
                 evidence = currentState.evidence,
-                notice = "Projection run finished: ${projectionSummary(projections)}",
+                notice = "전송 작업이 끝났습니다: ${projectionSummary(projections)}",
                 error = null,
             )
         } catch (error: Exception) {
@@ -488,8 +488,8 @@ class DesktopIngestionController(
     suspend fun loadLatest() {
         beginBusy()
         try {
-            val record = store.latestRecord() ?: error("No saved Desktop ingestion session.")
-            loadRecord(record, "Loaded latest local session. Retry remains available.")
+            val record = store.latestRecord() ?: error("저장된 데스크톱 수집 세션이 없습니다.")
+            loadRecord(record, "최신 로컬 세션을 불러왔습니다. 재시도할 수 있습니다.")
         } catch (error: Exception) {
             _state.value = _state.value.copy(error = error.message ?: error.javaClass.simpleName, notice = null)
         } finally {
@@ -500,8 +500,8 @@ class DesktopIngestionController(
     suspend fun load(ingestionId: String) {
         beginBusy()
         try {
-            val record = store.loadRecord(ingestionId) ?: error("Saved ingestion not found: $ingestionId")
-            loadRecord(record, "Loaded local ingestion session.")
+            val record = store.loadRecord(ingestionId) ?: error("저장된 수집을 찾을 수 없습니다: $ingestionId")
+            loadRecord(record, "로컬 수집 세션을 불러왔습니다.")
         } catch (error: Exception) {
             _state.value = _state.value.copy(error = error.message ?: error.javaClass.simpleName, notice = null)
         } finally {
@@ -520,11 +520,11 @@ class DesktopIngestionController(
         if (result.startResult is IngestionStartResult.Duplicate && currentState.session == null) {
             val existing = store.loadRecord(result.session.ingestionId)
             if (existing != null && existing.canonicalJson.isNotBlank()) {
-                loadRecord(existing, "Duplicate fingerprint: loaded existing local session.")
+                loadRecord(existing, "중복 지문을 확인해 기존 로컬 세션을 불러왔습니다.")
             } else {
                 val canonicalJson = YeonsikOcrEnvelopeCodec.encode(envelope)
                 persistRecord(result.session, rawJson, canonicalJson, evidence)
-                publish(result.session, envelope, rawJson, canonicalJson, evidence, "Duplicate fingerprint found.", null)
+                publish(result.session, envelope, rawJson, canonicalJson, evidence, "중복 지문을 확인했습니다.", null)
             }
             return
         }
@@ -534,10 +534,10 @@ class DesktopIngestionController(
         val startResult = result.startResult
         val notice = when (startResult) {
             is IngestionStartResult.Failure ->
-                "Parsed and saved. Verification is blocked: ${startResult.issues.joinToString(", ")}."
+                "파싱 후 저장했지만 검수가 차단되었습니다: ${startResult.issues.joinToString(", ")}."
             is IngestionStartResult.Success ->
-                "Parsed and validated. Review the JSON and attach evidence before Verify."
-            else -> "Parsed and validated."
+                "파싱 및 검증이 완료되었습니다. JSON을 검토하고 증거를 추가한 뒤 검수 완료 처리하세요."
+            else -> "파싱 및 검증이 완료되었습니다."
         }
         persistRecord(session, rawJson, canonicalJson, evidence)
         publish(session, envelope, rawJson, canonicalJson, evidence, notice, null)
@@ -547,14 +547,14 @@ class DesktopIngestionController(
         _state.value.canonicalJson.takeIf(String::isNotBlank)?.let { canonical ->
             YeonsikOcrEnvelopeCodec.decode(
                 value = canonical,
-                localDocumentId = _state.value.localDocumentId ?: error("local document id missing"),
+                localDocumentId = _state.value.localDocumentId ?: error("로컬 문서 ID가 없습니다."),
                 preservePersistedVerification = true,
             )
         }
-    } ?: error("No parsed canonical envelope is loaded.")
+    } ?: error("파싱된 정본 자료가 없습니다.")
 
     private fun loadRecord(record: DesktopSessionRecord, notice: String) {
-        require(record.canonicalJson.isNotBlank()) { "Saved session has no canonical JSON." }
+        require(record.canonicalJson.isNotBlank()) { "저장된 세션에 정본 JSON이 없습니다." }
         val envelope = YeonsikOcrEnvelopeCodec.decode(
             value = record.canonicalJson,
             localDocumentId = record.session.localDocumentId,
@@ -642,20 +642,20 @@ class DesktopIngestionController(
                 ),
             )
         }
-        if (envelope.receipt != null) addArtifact(IngestionArtifactKeys.RECEIPT, "Receipt")
+        if (envelope.receipt != null) addArtifact(IngestionArtifactKeys.RECEIPT, "영수증")
         if (envelope.merchantCandidate != null && envelope.receipt == null) {
-            addArtifact(IngestionArtifactKeys.MERCHANT_CANDIDATE, "Merchant candidate")
+            addArtifact(IngestionArtifactKeys.MERCHANT_CANDIDATE, "상점 후보")
         }
         envelope.priceObservations.forEach {
-            addArtifact(IngestionArtifactKeys.priceObservation(it.clientKey), "Price: ${it.clientKey}")
+            addArtifact(IngestionArtifactKeys.priceObservation(it.clientKey), "가격 관측: ${it.clientKey}")
         }
-        envelope.nutrition.forEach { addArtifact(IngestionArtifactKeys.nutrition(it.clientKey), "Nutrition: ${it.clientKey}") }
-        envelope.consumption.forEach { addArtifact(IngestionArtifactKeys.consumption(it.clientKey), "Consumption: ${it.clientKey}") }
+        envelope.nutrition.forEach { addArtifact(IngestionArtifactKeys.nutrition(it.clientKey), "영양 정보: ${it.clientKey}") }
+        envelope.consumption.forEach { addArtifact(IngestionArtifactKeys.consumption(it.clientKey), "섭취 기록: ${it.clientKey}") }
         envelope.productCandidates.forEach {
-            addArtifact(IngestionArtifactKeys.productCandidate(it.clientKey), "Product: ${it.clientKey}")
+            addArtifact(IngestionArtifactKeys.productCandidate(it.clientKey), "상품: ${it.clientKey}")
         }
         envelope.purchaseRecords.forEach {
-            addArtifact(IngestionArtifactKeys.purchaseRecord(it.clientKey), "Purchase: ${it.platform}")
+            addArtifact(IngestionArtifactKeys.purchaseRecord(it.clientKey), "구매: ${it.platform}")
         }
     }
 
@@ -671,7 +671,7 @@ class DesktopIngestionController(
     private fun projectionSummary(projections: List<ProjectionState>): String = projections
         .filterNot { it.status == ProjectionStatus.DISABLED }
         .joinToString(", ") { state ->
-            val base = "${state.projection.wireValue}=${state.status.wireValue}"
+            val base = "${DesktopUiLabels.projection(state.projection)}=${DesktopUiLabels.projectionStatus(state.status)}"
             if (state.projection != IngestionProjection.PRICETRACE_PRICE_OBSERVATION) {
                 base
             } else {
@@ -682,9 +682,17 @@ class DesktopIngestionController(
                     ?.contentOrNull ?: "unknown"
                 val observationCreated = (metadata?.get("observationCreated") as? JsonPrimitive)
                     ?.contentOrNull ?: "unknown"
-                "$base(source_saved=$sourceSaved,observation_created=$observationCreated)"
+                val sourceSavedLabel = booleanMetadataLabel(sourceSaved)
+                val observationCreatedLabel = booleanMetadataLabel(observationCreated)
+                "$base (원본 저장: $sourceSavedLabel, 관측 생성: $observationCreatedLabel)"
             }
         }
+
+    private fun booleanMetadataLabel(value: String): String = when (value.lowercase()) {
+        "true" -> "예"
+        "false" -> "아니오"
+        else -> "알 수 없음"
+    }
 
     private fun failWithSession(message: String) {
         _state.value = _state.value.copy(error = message, notice = null)
