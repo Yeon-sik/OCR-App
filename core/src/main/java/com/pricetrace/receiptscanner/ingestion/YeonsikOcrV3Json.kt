@@ -671,7 +671,7 @@ object YeonsikOcrV3Json {
         return IngestionReview(
             status = if (preservePersistedVerification) declaredStatus else IngestionReviewStatus.NEEDS_REVIEW,
             blockingIssues = if (preservePersistedVerification) root.arrayValue("blocking_issues").strings()
-            else listOf("source_image_required"),
+            else emptyList(),
             warnings = root.arrayValue("warnings").strings(),
             verificationBasis = if (preservePersistedVerification) {
                 declaredBasis ?: VerificationBasis.SOURCE_EVIDENCE

@@ -149,6 +149,7 @@ fun ReceiptOcrContent(
     onPickImages: () -> Unit = {},
     onPickJson: () -> Unit = {},
     onPickCanonicalJson: () -> Unit = {},
+    onPickCanonicalBundle: () -> Unit = {},
     onWorkflowSelected: (OcrWorkflowType) -> Unit = {},
     onAppendScan: () -> Unit = {},
     onAppendPickImages: () -> Unit = {},
@@ -163,6 +164,7 @@ fun ReceiptOcrContent(
     onCanonicalJsonProjectionSelected: (IngestionProjection, Boolean) -> Unit = { _, _ -> },
     onCanonicalJsonSubmit: () -> Unit = {},
     onCanonicalJsonRetry: () -> Unit = {},
+    onCanonicalBundleArchiveRetry: () -> Unit = {},
     onSelectSession: (String) -> Unit = {},
     onDeleteSession: (String) -> Unit = {},
     onShowApiSettings: () -> Unit = {},
@@ -183,6 +185,8 @@ fun ReceiptOcrContent(
     onSignInPriceTrace: (String, String) -> Unit = { _, _ -> },
     onSaveCashOsConnection: (String, String) -> Unit = { _, _ -> },
     onSignInCashOs: (String, String) -> Unit = { _, _ -> },
+    onSaveEvidenceConnection: (String, String) -> Unit = { _, _ -> },
+    onSignInEvidence: (String, String) -> Unit = { _, _ -> },
     onLoadCashOsLedgerCandidates: () -> Unit = {},
     onSelectCashOsLedgerEntry: (String) -> Unit = {},
     onSubmitCashOsReceipt: () -> Unit = {},
@@ -370,6 +374,7 @@ fun ReceiptOcrContent(
                     onPickImages = onPickImages,
                     onPickJson = onPickJson,
                     onPickCanonicalJson = onPickCanonicalJson,
+                    onPickCanonicalBundle = onPickCanonicalBundle,
                     onWorkflowSelected = onWorkflowSelected,
                     onSelectSession = onSelectSession,
                     onDeleteSession = onDeleteSession,
@@ -394,6 +399,7 @@ fun ReceiptOcrContent(
                     onProjectionSelected = onCanonicalJsonProjectionSelected,
                     onSubmit = onCanonicalJsonSubmit,
                     onRetry = onCanonicalJsonRetry,
+                    onArchiveRetry = onCanonicalBundleArchiveRetry,
                 )
                 AppScreen.MERCHANT_REVIEW -> uiState.merchantCandidate?.let { candidate ->
                     MerchantCandidateReviewScreen(
@@ -446,6 +452,12 @@ fun ReceiptOcrContent(
                     isCashOsSigningIn = uiState.isCashOsSigningIn,
                     onSaveCashOsConnection = onSaveCashOsConnection,
                     onSignInCashOs = onSignInCashOs,
+                    evidenceUrl = uiState.evidenceSupabaseUrl,
+                    isEvidencePublishableKeyConfigured = uiState.isEvidencePublishableKeyConfigured,
+                    evidenceSignedInEmail = uiState.evidenceSignedInEmail,
+                    isEvidenceSigningIn = uiState.isEvidenceSigningIn,
+                    onSaveEvidenceConnection = onSaveEvidenceConnection,
+                    onSignInEvidence = onSignInEvidence,
                 )
                 AppScreen.IMAGE_CONFIRM -> ImageConfirmationScreen(
                     workflow = uiState.selectedWorkflow,
@@ -772,6 +784,7 @@ private fun SessionListScreen(
     onPickImages: () -> Unit,
     onPickJson: () -> Unit,
     onPickCanonicalJson: () -> Unit,
+    onPickCanonicalBundle: () -> Unit,
     onWorkflowSelected: (OcrWorkflowType) -> Unit,
     onSelectSession: (String) -> Unit,
     onDeleteSession: (String) -> Unit,
@@ -871,12 +884,21 @@ private fun SessionListScreen(
             }
         }
         item {
+            Button(
+                onClick = onPickCanonicalBundle,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth().testTag("pick_canonical_bundle_button"),
+            ) {
+                Text(".yeonsik 열기")
+            }
+        }
+        item {
             OutlinedButton(
                 onClick = onPickCanonicalJson,
                 enabled = !isBusy,
                 modifier = Modifier.fillMaxWidth().testTag("pick_canonical_json_button"),
             ) {
-                Text("올인원 JSON 검증기")
+                Text("올인원 JSON 검증기 (별도 ingestion)")
             }
         }
         item {
@@ -1037,10 +1059,12 @@ private fun CanonicalJsonValidatorScreen(
     onProjectionSelected: (IngestionProjection, Boolean) -> Unit,
     onSubmit: () -> Unit,
     onRetry: () -> Unit,
+    onArchiveRetry: () -> Unit,
 ) {
     val plan = state.plan
     val eligible = plan?.eligible.orEmpty().sortedBy(IngestionProjection::wireValue)
     val disabled = plan?.disabled.orEmpty().sortedBy(IngestionProjection::wireValue)
+    val bundleActive = state.bundle != null || state.bundleValidationStatus != null
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("canonical_json_validator"),
         contentPadding = PaddingValues(20.dp),
@@ -1066,11 +1090,13 @@ private fun CanonicalJsonValidatorScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MaterialOutlinedButton(
-                            onClick = { onBasisChanged(VerificationBasis.MANUAL_CANONICAL_REVIEW) },
-                            enabled = !state.busy,
-                            modifier = Modifier.weight(1f),
-                        ) { Text("수동 canonical") }
+                        if (state.bundle == null) {
+                            MaterialOutlinedButton(
+                                onClick = { onBasisChanged(VerificationBasis.MANUAL_CANONICAL_REVIEW) },
+                                enabled = !state.busy,
+                                modifier = Modifier.weight(1f),
+                            ) { Text("수동 canonical") }
+                        }
                         MaterialOutlinedButton(
                             onClick = { onBasisChanged(VerificationBasis.SOURCE_EVIDENCE) },
                             enabled = !state.busy,
@@ -1080,12 +1106,35 @@ private fun CanonicalJsonValidatorScreen(
                 }
             }
         }
+        val bundle = state.bundle
+        if (bundle != null || state.bundleValidationStatus == AndroidBundleValidationStatus.INVALID) {
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Bundle / Evidence archive", style = MaterialTheme.typography.titleMedium)
+                        Text("Bundle · ${state.bundleValidationStatus?.name ?: bundle!!.validationStatus.name}")
+                        if (bundle != null) {
+                            Text("Evidence archive · ${bundle.archiveStatus.name}")
+                            bundle.archiveError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                        }
+                        if (bundle?.archiveStatus == AndroidEvidenceArchiveStatus.FAILED) {
+                            MaterialOutlinedButton(
+                                onClick = onArchiveRetry,
+                                enabled = !state.busy,
+                                modifier = Modifier.fillMaxWidth().testTag("canonical_bundle_archive_retry"),
+                            ) { Text("Archive / Retry") }
+                        }
+                    }
+                }
+            }
+        }
         item {
             OutlinedTextField(
                 value = state.rawJson,
                 onValueChange = onJsonChanged,
-                enabled = !state.busy,
-                label = { Text("JSON") },
+                enabled = !state.busy && !bundleActive,
+                readOnly = bundleActive,
+                label = { Text(if (bundleActive) "Bundle canonical JSON (읽기 전용)" else "JSON") },
                 minLines = 12,
                 maxLines = 24,
                 modifier = Modifier.fillMaxWidth().testTag("canonical_json_input"),
@@ -1096,12 +1145,14 @@ private fun CanonicalJsonValidatorScreen(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MaterialOutlinedButton(
                     onClick = onParse,
-                    enabled = !state.busy && state.rawJson.isNotBlank(),
+                    enabled = !state.busy && !bundleActive && state.rawJson.isNotBlank(),
                     modifier = Modifier.weight(1f).testTag("canonical_json_parse_button"),
                 ) { Text("파싱·저장") }
                 MaterialButton(
                     onClick = onConfirm,
-                    enabled = !state.busy && state.envelope != null && state.session != null,
+                    enabled = !state.busy && state.envelope != null && state.session != null &&
+                        state.bundleValidationStatus != AndroidBundleValidationStatus.INVALID &&
+                        (state.bundle == null || state.bundle.archiveStatus == AndroidEvidenceArchiveStatus.ARCHIVED),
                     modifier = Modifier.weight(1f).testTag("canonical_json_confirm_button"),
                 ) { Text("검수 확정") }
             }
@@ -1163,12 +1214,17 @@ private fun CanonicalJsonValidatorScreen(
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     MaterialButton(
                         onClick = onSubmit,
-                        enabled = !state.busy && state.session != null && state.selectedProjections.isNotEmpty(),
+                        enabled = !state.busy && state.session != null && state.selectedProjections.isNotEmpty() &&
+                            state.bundleValidationStatus != AndroidBundleValidationStatus.INVALID &&
+                            state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint &&
+                            (state.bundle == null || state.bundle.verificationEventRecorded),
                         modifier = Modifier.weight(1f).testTag("canonical_json_submit_button"),
                     ) { Text("선택 제출") }
                     MaterialOutlinedButton(
                         onClick = onRetry,
-                        enabled = !state.busy && state.session != null && state.selectedProjections.isNotEmpty(),
+                        enabled = !state.busy && state.session != null && state.selectedProjections.isNotEmpty() &&
+                            state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint &&
+                            (state.bundle == null || state.bundle.verificationEventRecorded),
                         modifier = Modifier.weight(1f).testTag("canonical_json_retry_button"),
                     ) { Text("재시도") }
                 }
@@ -1485,6 +1541,12 @@ private fun ApiSettingsScreen(
     isCashOsSigningIn: Boolean,
     onSaveCashOsConnection: (String, String) -> Unit,
     onSignInCashOs: (String, String) -> Unit,
+    evidenceUrl: String,
+    isEvidencePublishableKeyConfigured: Boolean,
+    evidenceSignedInEmail: String?,
+    isEvidenceSigningIn: Boolean,
+    onSaveEvidenceConnection: (String, String) -> Unit,
+    onSignInEvidence: (String, String) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("api_settings"),
@@ -1494,7 +1556,7 @@ private fun ApiSettingsScreen(
         item {
             ScreenHeader(
                 "연결 설정",
-                "AI 교정과 두 서비스의 로그인 세션을 각각 관리합니다.",
+                "AI 교정과 분리된 서비스 로그인 세션을 각각 관리합니다.",
                 onBack,
             )
         }
@@ -1504,6 +1566,16 @@ private fun ApiSettingsScreen(
                 isBusy = isSigningIn,
                 onSaveApiKey = onSaveGeminiApiKey,
                 onClearApiKey = onClearGeminiApiKey,
+            )
+        }
+        item {
+            EvidenceConnectionCard(
+                supabaseUrl = evidenceUrl,
+                isPublishableKeyConfigured = isEvidencePublishableKeyConfigured,
+                signedInEmail = evidenceSignedInEmail,
+                isSigningIn = isEvidenceSigningIn,
+                onSaveConnection = onSaveEvidenceConnection,
+                onSignIn = onSignInEvidence,
             )
         }
         item {
@@ -1604,6 +1676,81 @@ private fun GeminiApiSettingsCard(
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
+        }
+    }
+}
+
+@Composable
+private fun EvidenceConnectionCard(
+    supabaseUrl: String,
+    isPublishableKeyConfigured: Boolean,
+    signedInEmail: String?,
+    isSigningIn: Boolean,
+    onSaveConnection: (String, String) -> Unit,
+    onSignIn: (String, String) -> Unit,
+) {
+    var connectionUrl by remember(supabaseUrl) { mutableStateOf(supabaseUrl) }
+    var publishableKey by remember { mutableStateOf(BuildConfig.DEFAULT_EVIDENCE_SUPABASE_PUBLISHABLE_KEY) }
+    var email by remember(signedInEmail) { mutableStateOf(signedInEmail.orEmpty()) }
+    var password by remember { mutableStateOf("") }
+    Card {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Evidence 원본 보존 연결", fontWeight = FontWeight.SemiBold)
+            Text(
+                "Downstream DB와 분리된 private bucket입니다. publishable key와 로그인 세션만 사용하고 비밀번호는 저장하지 않습니다.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = connectionUrl,
+                onValueChange = { connectionUrl = it },
+                label = { Text("Evidence Supabase URL") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("evidence_supabase_url"),
+            )
+            OutlinedTextField(
+                value = publishableKey,
+                onValueChange = { publishableKey = it },
+                label = { Text("Evidence publishable key") },
+                placeholder = { Text(if (isPublishableKeyConfigured) "저장됨 — 변경할 때만 입력" else "publishable key 입력") },
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("evidence_publishable_key"),
+            )
+            OutlinedButton(
+                onClick = { onSaveConnection(connectionUrl, publishableKey) },
+                enabled = connectionUrl.isNotBlank() &&
+                    (publishableKey.isNotBlank() || isPublishableKeyConfigured) && !isSigningIn,
+                modifier = Modifier.fillMaxWidth().testTag("save_evidence_connection"),
+            ) { Text("Evidence 연결 정보 저장") }
+            if (signedInEmail == null) {
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    label = { Text("Evidence 계정 이메일") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("evidence_email"),
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("비밀번호 (저장하지 않음)") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("evidence_password"),
+                )
+                Button(
+                    onClick = { onSignIn(email, password) },
+                    enabled = isPublishableKeyConfigured && email.isNotBlank() && password.isNotBlank() && !isSigningIn,
+                    modifier = Modifier.fillMaxWidth().testTag("evidence_sign_in"),
+                ) {
+                    if (isSigningIn) BusyIndicator()
+                    Text("Evidence 계정 로그인")
+                }
+            } else {
+                Text("로그인됨 · $signedInEmail", fontWeight = FontWeight.SemiBold)
+            }
         }
     }
 }

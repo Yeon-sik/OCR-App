@@ -16,7 +16,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 
-@Entity(tableName = "ingestion_sessions", indices = [Index("local_document_id"), Index("canonical_fingerprint"), Index("import_fingerprint")])
+@Entity(tableName = "ingestion_sessions", indices = [Index("local_document_id"), Index("canonical_fingerprint"), Index("import_fingerprint"), Index("bundle_fingerprint")])
 internal data class IngestionSessionEntity(
     @PrimaryKey @ColumnInfo(name = "ingestion_id") val ingestionId: String,
     @ColumnInfo(name = "local_document_id") val localDocumentId: String,
@@ -30,6 +30,7 @@ internal data class IngestionSessionEntity(
     @ColumnInfo(name = "verified_at") val verifiedAt: String?,
     @ColumnInfo(name = "verified_artifact_fingerprints_json") val verifiedArtifactFingerprintsJson: String = "{}",
     @ColumnInfo(name = "import_fingerprint") val importFingerprint: String?,
+    @ColumnInfo(name = "bundle_fingerprint") val bundleFingerprint: String? = null,
 )
 
 @Entity(tableName = "ingestion_projections", primaryKeys = ["ingestion_id", "projection"], indices = [Index("status")])
@@ -74,6 +75,7 @@ internal fun IngestionSessionEntity.toDomain(
     verifiedAt = verifiedAt,
     verifiedArtifactFingerprints = decodeArtifactFingerprints(verifiedArtifactFingerprintsJson),
     importFingerprint = importFingerprint ?: canonicalFingerprint,
+    bundleFingerprint = bundleFingerprint,
 )
 
 internal fun IngestionProjectionEntity.toDomain() = ProjectionState(
@@ -118,6 +120,7 @@ internal fun IngestionSession.toEntity() = IngestionSessionEntity(
     verifiedAt = verifiedAt,
     verifiedArtifactFingerprintsJson = encodeArtifactFingerprints(verifiedArtifactFingerprints),
     importFingerprint = importFingerprint,
+    bundleFingerprint = bundleFingerprint,
 )
 
 private fun encodeArtifactFingerprints(value: Map<String, String>): String =

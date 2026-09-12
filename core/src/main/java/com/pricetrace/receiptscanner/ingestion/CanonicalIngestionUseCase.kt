@@ -53,6 +53,7 @@ class CanonicalIngestionUseCase(
         ingestionId: String? = null,
         evidence: List<LocalEvidence> = emptyList(),
         inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+        bundleFingerprint: String? = null,
     ): CanonicalImportResult {
         val imported = when (val outcome = importer.import(value, localDocumentId)) {
             is ExternalJsonImportOutcome.Failure -> return CanonicalImportResult.Failure(outcome.error)
@@ -61,6 +62,21 @@ class CanonicalIngestionUseCase(
         val envelope = imported.canonicalEnvelope
         val actualIngestionId = ingestionId ?: "ingestion-${localDocumentId}"
         val current = store.get(actualIngestionId)
+        if (current?.bundleFingerprint != null) {
+            return if (bundleFingerprint == current.bundleFingerprint) {
+                CanonicalImportResult.Success(
+                    imported = imported,
+                    envelope = envelope,
+                    session = current,
+                    startResult = IngestionStartResult.Duplicate(current),
+                )
+            } else {
+                CanonicalImportResult.Failure(issues = listOf("bundle_legacy_transition_forbidden"))
+            }
+        }
+        if (current != null && bundleFingerprint != null) {
+            return CanonicalImportResult.Failure(issues = listOf("legacy_bundle_transition_forbidden"))
+        }
         val startResult = if (current == null) {
             orchestrator.start(
                 ingestionId = actualIngestionId,
@@ -68,6 +84,7 @@ class CanonicalIngestionUseCase(
                 envelope = envelope,
                 evidence = evidence,
                 inputOrigin = inputOrigin,
+                bundleFingerprint = bundleFingerprint,
             )
         } else {
             orchestrator.reviseCanonicalDraft(actualIngestionId, envelope)
@@ -116,7 +133,15 @@ class CanonicalIngestionUseCase(
         evidence: List<LocalEvidence> = emptyList(),
         inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
         verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+        requireArchivedEvidence: Boolean = false,
+        evidenceArchiveComplete: Boolean = false,
     ): CanonicalConfirmationResult {
+        if (requireArchivedEvidence && verificationBasis == VerificationBasis.SOURCE_EVIDENCE && !evidenceArchiveComplete) {
+            return CanonicalConfirmationResult(
+                IngestionStartResult.Failure(listOf("evidence_archive_required")),
+                envelope,
+            )
+        }
         val validation = validate(
             envelope = envelope,
             evidence = evidence,

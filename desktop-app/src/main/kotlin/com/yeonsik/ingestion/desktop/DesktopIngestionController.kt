@@ -15,6 +15,12 @@ import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveRequest
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveResult
+import com.pricetrace.receiptscanner.ingestion.EvidenceVerificationEventResult
+import com.pricetrace.receiptscanner.ingestion.YeonsikBundle
+import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
+import com.pricetrace.receiptscanner.ingestion.YeonsikBundleReader
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,6 +50,9 @@ data class DesktopUiState(
     val session: IngestionSession? = null,
     val evidence: List<DesktopEvidenceAttachment> = emptyList(),
     val artifacts: List<DesktopArtifactState> = emptyList(),
+    val bundleMetadata: DesktopBundleMetadata? = null,
+    /** Keeps a rejected bundle visible even when no trusted manifest metadata exists. */
+    val bundleValidationStatus: DesktopBundleValidationStatus? = null,
     val error: String? = null,
     val notice: String? = null,
     val busy: Boolean = false,
@@ -65,18 +74,203 @@ class DesktopIngestionController(
     )
 
     fun updateRawJson(value: String) {
-        _state.value = _state.value.copy(rawJson = value, error = null)
+        if (_state.value.bundleMetadata != null || _state.value.bundleValidationStatus != null) {
+            _state.value = _state.value.copy(
+                error = "Bundle canonical JSON is read-only. Open JSON to start a separate ingestion.",
+                notice = null,
+            )
+        } else {
+            _state.value = _state.value.copy(rawJson = value, error = null)
+        }
     }
 
-    suspend fun importJson(value: String = _state.value.rawJson) {
+    suspend fun importBundle(path: Path) {
+        beginBusy()
+        var archiveAfterImport = false
+        try {
+            val localDocumentId = newLocalDocumentId()
+            val ingestionId = newIngestionId()
+            val materializer = store.bundleMaterializer(ingestionId)
+            val importedBundle = Files.newInputStream(path).use { input ->
+                YeonsikBundleReader.read(input, localDocumentId, materializer)
+            }
+            val evidence = importedBundle.manifest.evidence.map { item ->
+                DesktopEvidenceAttachment(
+                    attachmentId = item.sourceFileId,
+                    type = item.type,
+                    path = materializer.pathFor(item.path),
+                )
+            }
+            val result = useCase.importJson(
+                value = importedBundle.canonicalJson,
+                localDocumentId = localDocumentId,
+                ingestionId = ingestionId,
+                evidence = localEvidence(evidence),
+                inputOrigin = InputOrigin.EXTERNAL_JSON,
+                bundleFingerprint = importedBundle.bundleFingerprint,
+            )
+            when (result) {
+                is CanonicalImportResult.Failure -> error(
+                    result.error?.let { "${it.code}: ${it.detail.orEmpty()}" }
+                        ?: result.issues.joinToString(", "),
+                )
+                is CanonicalImportResult.Success -> {
+                    if (result.startResult is IngestionStartResult.Duplicate) {
+                        materializer.abort()
+                        val existing = store.loadRecord(result.session.ingestionId)
+                            ?: error("Duplicate bundle session is missing its durable record.")
+                        loadRecord(existing, "Duplicate bundle fingerprint: loaded existing immutable session.")
+                        archiveAfterImport = existing.bundle?.let {
+                            it.archiveStatus != DesktopEvidenceArchiveStatus.ARCHIVED
+                        } == true
+                    } else {
+                        val metadata = DesktopBundleMetadata(
+                        sourcePath = path.toAbsolutePath().normalize().toString(),
+                        canonicalSha256 = importedBundle.manifest.canonicalSha256,
+                        manifestJson = importedBundle.manifestJson,
+                        validationStatus = DesktopBundleValidationStatus.VALID,
+                        archiveStatus = DesktopEvidenceArchiveStatus.NOT_STARTED,
+                        )
+                        val canonicalJson = YeonsikOcrEnvelopeCodec.encode(result.envelope)
+                        persistRecord(result.session, importedBundle.canonicalJson, canonicalJson, evidence, metadata)
+                        publish(
+                            result.session,
+                            result.envelope,
+                            importedBundle.canonicalJson,
+                            canonicalJson,
+                            evidence,
+                            "Bundle validated and evidence bound. Starting archive.",
+                            null,
+                            metadata,
+                        )
+                        archiveAfterImport = true
+                    }
+                }
+            }
+        } catch (error: Exception) {
+            _state.value = _state.value.copy(
+                canonicalJson = "",
+                schema = null,
+                ingestionId = null,
+                localDocumentId = null,
+                session = null,
+                evidence = emptyList(),
+                artifacts = emptyList(),
+                error = "Bundle invalid: ${error.message ?: error.javaClass.simpleName}",
+                notice = null,
+                bundleMetadata = null,
+                bundleValidationStatus = DesktopBundleValidationStatus.INVALID,
+            )
+        } finally {
+            endBusy()
+        }
+        if (archiveAfterImport) archiveEvidence()
+    }
+
+    suspend fun archiveEvidence() {
         beginBusy()
         try {
-            val localDocumentId = _state.value.localDocumentId ?: newLocalDocumentId()
+            val current = _state.value
+            val session = current.session ?: error("Import a .yeonsik bundle before archiving.")
+            val metadata = current.bundleMetadata ?: error("No bundle archive is available.")
+            val archiving = metadata.copy(archiveStatus = DesktopEvidenceArchiveStatus.ARCHIVING, archiveError = null)
+            persistRecord(session, current.rawJson, current.canonicalJson, current.evidence, archiving)
+            _state.value = current.copy(bundleMetadata = archiving, busy = true, error = null)
+            val envelope = currentEnvelope()
+            val importedBundle = YeonsikBundle(
+                manifest = YeonsikBundleManifestCodec.decode(metadata.manifestJson),
+                manifestJson = metadata.manifestJson,
+                canonicalJson = current.rawJson,
+                envelope = envelope,
+                manifestSha256 = metadata.manifestSha256,
+            )
+            val result = bundle.evidenceArchivePort.archive(
+                EvidenceArchiveRequest(importedBundle) { sourceFileId ->
+                    val attachment = current.evidence.singleOrNull { it.attachmentId == sourceFileId }
+                        ?: error("Bundle evidence is missing locally: $sourceFileId")
+                    Files.newInputStream(attachment.path)
+                },
+                metadata.archiveCheckpoint,
+            )
+            val updated = when (result) {
+                is EvidenceArchiveResult.Success -> metadata.copy(
+                    archiveStatus = DesktopEvidenceArchiveStatus.ARCHIVED,
+                    archiveCheckpoint = result.checkpoint,
+                    archiveError = null,
+                )
+                is EvidenceArchiveResult.Failure -> metadata.copy(
+                    archiveStatus = DesktopEvidenceArchiveStatus.FAILED,
+                    archiveCheckpoint = result.checkpoint,
+                    archiveError = result.issue,
+                )
+            }
+            persistRecord(session, current.rawJson, current.canonicalJson, current.evidence, updated)
+            publish(
+                session, envelope, current.rawJson, current.canonicalJson, current.evidence,
+                if (updated.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED) "Evidence archive completed."
+                else null,
+                updated.archiveError,
+                updated,
+            )
+        } catch (error: Exception) {
+            val current = _state.value
+            val failed = current.bundleMetadata?.copy(
+                archiveStatus = DesktopEvidenceArchiveStatus.FAILED,
+                archiveError = error.message ?: error.javaClass.simpleName,
+            )
+            if (failed != null && current.session != null) {
+                persistRecord(current.session, current.rawJson, current.canonicalJson, current.evidence, failed)
+            }
+            _state.value = current.copy(bundleMetadata = failed, error = failed?.archiveError, notice = null)
+        } finally {
+            endBusy()
+        }
+    }
+
+    /** Opens a standalone JSON import and always gives it a new ingestion identity. */
+    suspend fun importJson(value: String = _state.value.rawJson) = importJsonInternal(value, startNewIngestion = true)
+
+    /** Parses the editor draft in-place; a bundle can never be converted through this path. */
+    suspend fun parseJson() = importJsonInternal(_state.value.rawJson, startNewIngestion = false)
+
+    private suspend fun importJsonInternal(value: String, startNewIngestion: Boolean) {
+        beginBusy()
+        try {
+            val current = _state.value
+            val bundleActive = current.bundleMetadata != null || current.bundleValidationStatus != null
+            if (!startNewIngestion && bundleActive) {
+                _state.value = current.copy(
+                    error = "Bundle canonical JSON is read-only. Open JSON to start a separate ingestion.",
+                    notice = null,
+                )
+                return
+            }
+            if (startNewIngestion) {
+                _state.value = current.copy(
+                    rawJson = value,
+                    canonicalJson = "",
+                    schema = null,
+                    ingestionId = null,
+                    localDocumentId = null,
+                    session = null,
+                    evidence = emptyList(),
+                    artifacts = emptyList(),
+                    bundleMetadata = null,
+                    bundleValidationStatus = null,
+                    error = null,
+                    notice = null,
+                )
+            }
+            val state = _state.value
+            val localDocumentId = if (startNewIngestion) newLocalDocumentId()
+            else state.localDocumentId ?: newLocalDocumentId()
+            val ingestionId = if (startNewIngestion) newIngestionId()
+            else state.ingestionId ?: newIngestionId()
             val result = useCase.importJson(
                 value = value,
                 localDocumentId = localDocumentId,
-                ingestionId = _state.value.ingestionId ?: newIngestionId(),
-                evidence = localEvidence(_state.value.evidence),
+                ingestionId = ingestionId,
+                evidence = if (startNewIngestion) emptyList() else localEvidence(state.evidence),
                 inputOrigin = InputOrigin.EXTERNAL_JSON,
             )
             when (result) {
@@ -171,6 +365,8 @@ class DesktopIngestionController(
                 evidence = localEvidence(currentState.evidence),
                 inputOrigin = InputOrigin.EXTERNAL_JSON,
                 verificationBasis = verificationBasis,
+                requireArchivedEvidence = currentState.bundleMetadata != null,
+                evidenceArchiveComplete = currentState.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED,
             )
             val latest = when (val result = confirmation.result) {
                 is IngestionStartResult.Success -> result.session
@@ -192,19 +388,43 @@ class DesktopIngestionController(
                 }
             }
             val canonicalJson = YeonsikOcrEnvelopeCodec.encodePersisted(confirmation.envelope)
-            persistRecord(latest, currentState.rawJson, canonicalJson, currentState.evidence)
+            var bundleMetadata = currentState.bundleMetadata
+            if (bundleMetadata != null) {
+                val artifactId = bundleMetadata.archiveCheckpoint.canonicalArtifactId
+                    ?: error("Evidence archive is missing the canonical artifact id.")
+                when (val event = bundle.evidenceArchivePort.recordVerification(
+                    artifactId,
+                    verificationBasis,
+                    "verified",
+                    emptyList(),
+                )) {
+                    EvidenceVerificationEventResult.Success -> {
+                        bundleMetadata = bundleMetadata.copy(verificationEventRecorded = true)
+                    }
+                    is EvidenceVerificationEventResult.Failure -> {
+                        bundleMetadata = bundleMetadata.copy(
+                            verificationEventRecorded = false,
+                            archiveError = event.issue,
+                        )
+                    }
+                }
+            }
+            persistRecord(latest, currentState.rawJson, canonicalJson, currentState.evidence, bundleMetadata)
             publish(
                 session = latest,
                 envelope = confirmation.envelope,
                 rawJson = currentState.rawJson,
                 canonicalJson = canonicalJson,
                 evidence = currentState.evidence,
-                notice = if (latest.verifiedCanonicalFingerprint != null) {
+                notice = if (latest.verifiedCanonicalFingerprint != null &&
+                    (bundleMetadata == null || bundleMetadata.verificationEventRecorded)
+                ) {
                     "Verified. Projections are ready for Submit."
                 } else {
-                    "Some artifacts remain unverified."
+                    "Verification event is not archived; Submit remains blocked."
                 },
-                error = null,
+                error = bundleMetadata?.archiveError,
+                bundleMetadata = bundleMetadata,
             )
         } catch (error: Exception) {
             _state.value = _state.value.copy(error = error.message ?: error.javaClass.simpleName, notice = null)
@@ -217,8 +437,16 @@ class DesktopIngestionController(
         beginBusy()
         try {
             val currentState = _state.value
+            require(currentState.bundleValidationStatus != DesktopBundleValidationStatus.INVALID) { "Bundle is invalid." }
             val session = currentState.session ?: error("Import JSON before submitting.")
             val envelope = currentEnvelope()
+            currentState.bundleMetadata?.let { metadata ->
+                require(metadata.validationStatus == DesktopBundleValidationStatus.VALID) { "Bundle is invalid." }
+                require(metadata.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED) {
+                    "Archive / Retry must complete before Submit."
+                }
+                require(metadata.verificationEventRecorded) { "Verification event must be archived before Submit." }
+            }
             if (session.verifiedCanonicalFingerprint != session.canonicalFingerprint) {
                 error("Verify the reviewed artifacts before submitting.")
             }
@@ -340,6 +568,7 @@ class DesktopIngestionController(
             evidence = record.evidence,
             notice = notice,
             error = null,
+            bundleMetadata = record.bundle,
         )
     }
 
@@ -348,6 +577,7 @@ class DesktopIngestionController(
         rawJson: String,
         canonicalJson: String,
         evidence: List<DesktopEvidenceAttachment>,
+        bundleMetadata: DesktopBundleMetadata? = _state.value.bundleMetadata,
     ) {
         store.saveRecord(
             DesktopSessionRecord(
@@ -355,6 +585,7 @@ class DesktopIngestionController(
                 rawJson = rawJson,
                 canonicalJson = canonicalJson,
                 evidence = evidence,
+                bundle = bundleMetadata,
             ),
         )
     }
@@ -367,6 +598,7 @@ class DesktopIngestionController(
         evidence: List<DesktopEvidenceAttachment>,
         notice: String?,
         error: String?,
+        bundleMetadata: DesktopBundleMetadata? = _state.value.bundleMetadata,
     ) {
         _state.value = DesktopUiState(
             rawJson = rawJson,
@@ -377,6 +609,8 @@ class DesktopIngestionController(
             session = session,
             evidence = evidence,
             artifacts = artifactStates(envelope, session, localEvidence(evidence)),
+            bundleMetadata = bundleMetadata,
+            bundleValidationStatus = bundleMetadata?.validationStatus,
             error = error,
             notice = notice,
             busy = true,

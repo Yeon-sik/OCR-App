@@ -23,8 +23,216 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.security.MessageDigest
+import java.nio.file.Files
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveCheckpoint
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchivePort
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveRequest
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveResult
+import com.pricetrace.receiptscanner.ingestion.EvidenceVerificationEventResult
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_BUNDLE_VERSION
+import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifest
+import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
 
 class AndroidCanonicalJsonValidatorTest {
+    @Test
+    fun `invalid Android bundle clears active canonical state and blocks confirmation`() = runBlocking {
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(InMemoryIngestionSessionStore()),
+            bundleRoot = Files.createTempDirectory("android-invalid-bundle-test").toFile(),
+        )
+        val state = validator.importBundle(
+            ByteArrayInputStream("not-a-zip".toByteArray()),
+            "broken.yeonsik",
+            AndroidCanonicalJsonValidatorState(),
+        )
+        assertEquals(AndroidBundleValidationStatus.INVALID, state.bundleValidationStatus)
+        assertTrue(state.envelope == null)
+        assertTrue(runCatching { validator.confirm(state) }.exceptionOrNull()?.message?.contains("Bundle is invalid.") == true)
+    }
+
+    @Test
+    fun `android bundle import defaults to source evidence and archives before confirm`() = runBlocking {
+        val archive = SuccessfulArchivePort()
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(InMemoryIngestionSessionStore()),
+            evidenceArchivePort = archive,
+            bundleRoot = Files.createTempDirectory("android-bundle-test").toFile(),
+            newLocalDocumentId = { "android-bundle-document" },
+            newIngestionId = { "android-bundle-ingestion" },
+        )
+        val canonical = readExample("yeonsik-ocr.v4.purchase.text-only.example.json")
+        var state = validator.importBundle(
+            ByteArrayInputStream(textOnlyBundle(canonical)),
+            "purchase.yeonsik",
+            AndroidCanonicalJsonValidatorState(),
+        )
+        assertEquals(VerificationBasis.SOURCE_EVIDENCE, state.verificationBasis)
+        assertEquals(AndroidBundleValidationStatus.VALID, state.bundle?.validationStatus)
+        assertEquals(AndroidEvidenceArchiveStatus.ARCHIVED, state.bundle?.archiveStatus)
+        assertFalse(state.bundle?.verificationEventRecorded ?: true)
+
+        state = validator.confirm(state)
+        assertTrue(state.bundle?.verificationEventRecorded == true)
+        assertEquals(IngestionReviewStatus.READY, state.envelope?.review?.status)
+    }
+
+    @Test
+    fun `android bundle recovery restores manifest paths checkpoint and verification event`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        val archive = SuccessfulArchivePort()
+        val bundleRoot = Files.createTempDirectory("android-bundle-recovery").toFile()
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = archive,
+            bundleRoot = bundleRoot,
+            newLocalDocumentId = { "android-recovery-document" },
+            newIngestionId = { "android-recovery-ingestion" },
+            bundleStateStore = recoveryStore,
+        )
+        var state = validator.importBundle(
+            ByteArrayInputStream(evidenceBundle(readExample("yeonsik-ocr.v3.restaurant.example.json"))),
+            "recovery.yeonsik",
+            AndroidCanonicalJsonValidatorState(),
+        )
+        state = validator.confirm(state)
+        assertTrue(state.bundle?.verificationEventRecorded == true)
+
+        val restarted = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = archive,
+            bundleRoot = bundleRoot,
+            bundleStateStore = recoveryStore,
+        ).restoreBundleState()
+
+        assertNotNull(restarted)
+        assertEquals(state.bundle?.manifestJson, restarted?.bundle?.manifestJson)
+        assertEquals(state.bundle?.evidencePaths, restarted?.bundle?.evidencePaths)
+        assertTrue(restarted?.bundle?.evidencePaths?.values?.all { File(it).isFile } == true)
+        assertEquals(state.bundle?.archiveCheckpoint, restarted?.bundle?.archiveCheckpoint)
+        assertTrue(restarted?.bundle?.verificationEventRecorded == true)
+        assertEquals(state.ingestionId, restarted?.ingestionId)
+    }
+
+    @Test
+    fun `duplicate bundle restores its durable record instead of the active record`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        val bundleRoot = Files.createTempDirectory("android-bundle-duplicate-recovery").toFile()
+        var sequence = 0
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = SuccessfulArchivePort(),
+            bundleRoot = bundleRoot,
+            newLocalDocumentId = { "android-duplicate-document-${++sequence}" },
+            newIngestionId = { "android-duplicate-ingestion-$sequence" },
+            bundleStateStore = recoveryStore,
+        )
+        val canonical = readExample("yeonsik-ocr.v3.restaurant.example.json")
+        val first = validator.importBundle(
+            ByteArrayInputStream(evidenceBundle(canonical)),
+            "first.yeonsik",
+            AndroidCanonicalJsonValidatorState(),
+        )
+        val second = validator.importBundle(
+            ByteArrayInputStream(evidenceBundle(canonical, "alternate")),
+            "second.yeonsik",
+            first,
+        )
+        val firstIngestionId = requireNotNull(first.ingestionId) { "first import failed: ${first.error}" }
+        val secondIngestionId = requireNotNull(second.ingestionId) { "second import failed: ${second.error}" }
+        assertTrue(firstIngestionId != secondIngestionId)
+        assertEquals(secondIngestionId, recoveryStore.loadActive()?.ingestionId)
+
+        val duplicate = validator.importBundle(
+            ByteArrayInputStream(evidenceBundle(canonical)),
+            "duplicate.yeonsik",
+            second,
+        )
+
+        assertEquals(firstIngestionId, duplicate.ingestionId)
+        assertEquals("first.yeonsik", duplicate.bundle?.sourceName)
+        assertEquals(first.bundle?.evidencePaths, duplicate.bundle?.evidencePaths)
+        assertEquals(firstIngestionId, recoveryStore.load(firstIngestionId)?.ingestionId)
+    }
+
+    @Test
+    fun `completed bundle keeps its durable record but is removed from active recovery`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        val archive = SuccessfulArchivePort()
+        val useCase = CanonicalIngestionUseCase(
+            store = sessionStore,
+            submitters = mapOf(
+                IngestionProjection.CASHOS_TRANSACTION to RecordingSubmitter(mutableListOf()),
+            ),
+        )
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = useCase,
+            evidenceArchivePort = archive,
+            bundleRoot = Files.createTempDirectory("android-bundle-completed").toFile(),
+            newLocalDocumentId = { "android-completed-document" },
+            newIngestionId = { "android-completed-ingestion" },
+            bundleStateStore = recoveryStore,
+        )
+        var state = validator.importBundle(
+            ByteArrayInputStream(textOnlyBundle(readExample("yeonsik-ocr.v4.purchase.text-only.example.json"))),
+            "completed.yeonsik",
+            AndroidCanonicalJsonValidatorState(),
+        )
+        state = validator.confirm(state)
+        state = validator.submit(state)
+
+        val ingestionId = requireNotNull(state.ingestionId)
+        assertEquals(null, recoveryStore.loadActive())
+        assertNotNull(recoveryStore.load(ingestionId))
+        assertEquals(
+            com.pricetrace.receiptscanner.ingestion.ProjectionStatus.UPLOADED,
+            state.session?.projections?.single { it.projection == IngestionProjection.CASHOS_TRANSACTION }?.status,
+        )
+    }
+
+    @Test
+    fun `bundle parse stays locked while standalone JSON starts a new ingestion`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        var ingestionSequence = 0
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = SuccessfulArchivePort(),
+            bundleRoot = Files.createTempDirectory("android-bundle-isolation").toFile(),
+            newLocalDocumentId = { "android-isolation-document-${++ingestionSequence}" },
+            newIngestionId = { "android-isolation-ingestion-${ingestionSequence}" },
+            bundleStateStore = recoveryStore,
+        )
+        val bundleState = validator.importBundle(
+            ByteArrayInputStream(textOnlyBundle(readExample("yeonsik-ocr.v4.purchase.text-only.example.json"))),
+            "isolation.yeonsik",
+            AndroidCanonicalJsonValidatorState(),
+        )
+        val blocked = validator.importJson(
+            bundleState.rawJson,
+            bundleState,
+        )
+        assertEquals(bundleState.ingestionId, blocked.ingestionId)
+        assertNotNull(blocked.bundle)
+        assertTrue(blocked.error.orEmpty().contains("read-only"))
+
+        val standalone = validator.importJson(
+            bundleState.rawJson,
+            blocked,
+            startNewIngestion = true,
+        )
+        assertEquals(null, standalone.bundle)
+        assertTrue(standalone.ingestionId != bundleState.ingestionId)
+        assertEquals(null, standalone.session?.bundleFingerprint)
+        assertNotNull(sessionStore.get(bundleState.ingestionId!!))
+    }
     @Test
     fun `android validator uses the same core plan and confirms a no image manual review`() = runBlocking {
         val useCase = CanonicalIngestionUseCase(
@@ -166,6 +374,79 @@ class AndroidCanonicalJsonValidatorTest {
             order += request.projection
             return ProjectionSubmission.Success("android-" + request.projection.wireValue)
         }
+    }
+
+    private class SuccessfulArchivePort : EvidenceArchivePort {
+        override suspend fun archive(
+            request: EvidenceArchiveRequest,
+            checkpoint: EvidenceArchiveCheckpoint,
+        ): EvidenceArchiveResult = EvidenceArchiveResult.Success(
+            checkpoint.copy(
+                canonicalArtifactId = checkpoint.canonicalArtifactId ?: "artifact-1",
+                bundleFingerprint = request.bundle.bundleFingerprint,
+            ),
+        )
+
+        override suspend fun recordVerification(
+            canonicalArtifactId: String,
+            basis: VerificationBasis,
+            result: String,
+            issues: List<String>,
+        ): EvidenceVerificationEventResult = EvidenceVerificationEventResult.Success
+    }
+
+    private fun textOnlyBundle(canonical: String): ByteArray {
+        val canonicalBytes = canonical.toByteArray()
+        val hash = MessageDigest.getInstance("SHA-256").digest(canonicalBytes)
+            .joinToString("") { "%02x".format(it) }
+        val manifest = YeonsikBundleManifest(YEONSIK_BUNDLE_VERSION, "canonical.json", hash, emptyList())
+        val output = ByteArrayOutputStream()
+        ZipOutputStream(output).use { zip ->
+            zip.putNextEntry(ZipEntry("canonical.json"))
+            zip.write(canonicalBytes)
+            zip.closeEntry()
+            zip.putNextEntry(ZipEntry("manifest.json"))
+            zip.write(YeonsikBundleManifestCodec.encode(manifest).toByteArray())
+            zip.closeEntry()
+        }
+        return output.toByteArray()
+    }
+
+    private fun evidenceBundle(canonical: String, variant: String = ""): ByteArray {
+        val canonicalBytes = canonical.toByteArray()
+        val evidenceBytes = "menu evidence$variant".toByteArray()
+        val evidencePath = if (variant.isBlank()) "evidence/menu.jpg" else "evidence/menu-$variant.jpg"
+        val originalFilename = evidencePath.substringAfterLast('/')
+        val evidence = com.pricetrace.receiptscanner.ingestion.YeonsikBundleEvidence(
+            sourceFileId = "menu-photo-1",
+            type = com.pricetrace.receiptscanner.ingestion.SourceAttachmentType.MENU_PHOTO,
+            path = evidencePath,
+            sha256 = MessageDigest.getInstance("SHA-256").digest(evidenceBytes)
+                .joinToString("") { "%02x".format(it) },
+            mimeType = "image/jpeg",
+            byteSize = evidenceBytes.size.toLong(),
+            originalFilename = originalFilename,
+        )
+        val manifest = YeonsikBundleManifest(
+            YEONSIK_BUNDLE_VERSION,
+            "canonical.json",
+            MessageDigest.getInstance("SHA-256").digest(canonicalBytes)
+                .joinToString("") { "%02x".format(it) },
+            listOf(evidence),
+        )
+        val output = ByteArrayOutputStream()
+        ZipOutputStream(output).use { zip ->
+            zip.putNextEntry(ZipEntry("canonical.json"))
+            zip.write(canonicalBytes)
+            zip.closeEntry()
+            zip.putNextEntry(ZipEntry("manifest.json"))
+            zip.write(YeonsikBundleManifestCodec.encode(manifest).toByteArray())
+            zip.closeEntry()
+            zip.putNextEntry(ZipEntry(evidencePath))
+            zip.write(evidenceBytes)
+            zip.closeEntry()
+        }
+        return output.toByteArray()
     }
 
     private fun readExample(name: String): String {

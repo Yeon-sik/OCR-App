@@ -1131,4 +1131,6 @@ data class IngestionSession(
     val verifiedArtifactFingerprints: Map<String, String> = emptyMap(),
     /** Immutable import identity; it does not change when the user edits the draft. */
     val importFingerprint: String = canonicalFingerprint,
+    /** Non-null only for a .yeonsik bundle; separates identical canonical JSON with different evidence. */
+    val bundleFingerprint: String? = null,
 )

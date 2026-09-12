@@ -85,7 +85,7 @@ object YeonsikOcrV2Json {
             targets = targets,
             review = IngestionReview(
                 status = IngestionReviewStatus.NEEDS_REVIEW,
-                blockingIssues = listOf("source_image_required"),
+                blockingIssues = emptyList(),
                 warnings = externalReview.warnings,
             ),
             productCandidates = productCandidates,

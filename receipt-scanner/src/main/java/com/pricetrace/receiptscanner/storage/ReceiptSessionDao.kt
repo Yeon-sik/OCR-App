@@ -81,6 +81,9 @@ internal interface ReceiptSessionDao {
     @Query("SELECT * FROM ingestion_sessions WHERE import_fingerprint = :fingerprint ORDER BY created_at LIMIT 1")
     suspend fun getIngestionSessionByImportFingerprint(fingerprint: String): IngestionSessionEntity?
 
+    @Query("SELECT * FROM ingestion_sessions WHERE bundle_fingerprint = :fingerprint ORDER BY created_at LIMIT 1")
+    suspend fun getIngestionSessionByBundleFingerprint(fingerprint: String): IngestionSessionEntity?
+
     @Query("SELECT * FROM ingestion_sessions WHERE ingestion_id = :ingestionId")
     suspend fun getIngestionSession(ingestionId: String): IngestionSessionEntity?
 

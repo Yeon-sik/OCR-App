@@ -44,6 +44,12 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        val bundlePickerLauncher = registerForActivityResult(
+            ActivityResultContracts.OpenDocument(),
+        ) { uri ->
+            uri?.let(viewModel::importCanonicalBundle)
+        }
+
         setContent {
             ReceiptOcrTheme {
                 ReceiptOcrApp(
@@ -64,6 +70,12 @@ class MainActivity : ComponentActivity() {
                         viewModel.showCanonicalJsonValidator()
                         pickJsonForCanonicalValidator = true
                         jsonPickerLauncher.launch(arrayOf("application/json", "text/json"))
+                    },
+                    onLaunchCanonicalBundlePicker = {
+                        viewModel.showCanonicalJsonValidator()
+                        bundlePickerLauncher.launch(
+                            arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream"),
+                        )
                     },
                 )
             }

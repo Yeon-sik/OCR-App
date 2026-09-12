@@ -205,6 +205,7 @@ data class ReceiptAppUiState(
     val isNutritionPublishing: Boolean = false,
     val isPriceTraceSigningIn: Boolean = false,
     val isCashOsSigningIn: Boolean = false,
+    val isEvidenceSigningIn: Boolean = false,
     val message: String? = null,
     val possibleDuplicatePageIds: List<String> = emptyList(),
     val currentDocumentId: String? = null,
@@ -252,6 +253,9 @@ data class ReceiptAppUiState(
     val cashOsSupabaseUrl: String = "",
     val isCashOsPublishableKeyConfigured: Boolean = false,
     val cashOsSignedInEmail: String? = null,
+    val evidenceSupabaseUrl: String = "",
+    val isEvidencePublishableKeyConfigured: Boolean = false,
+    val evidenceSignedInEmail: String? = null,
     val priceObservationSources: List<PriceObservationSource> = emptyList(),
     val priceObservationProducts: List<PriceObservationProduct> = emptyList(),
     val priceObservationQuery: String = "",
@@ -318,7 +322,12 @@ class ReceiptAppViewModel(
     private val externalJsonImporter = ExternalJsonImporter()
     private val ingestionOrchestrator = container.ingestionOrchestrator
     private val ingestionSessionStore = container.ingestionSessionStore
-    private val canonicalJsonValidator = AndroidCanonicalJsonValidator(container.canonicalIngestionUseCase)
+    private val canonicalJsonValidator = AndroidCanonicalJsonValidator(
+        container.canonicalIngestionUseCase,
+        container.evidenceArchivePort,
+        container.bundleDirectory,
+        bundleStateStore = container.bundleStateStore,
+    )
 
     private val mutableUiState = MutableStateFlow(ReceiptAppUiState())
     val uiState: StateFlow<ReceiptAppUiState> = mutableUiState.asStateFlow()
@@ -359,7 +368,25 @@ class ReceiptAppViewModel(
         refreshNutritionConnectionState()
         refreshPriceTraceConnectionState()
         refreshCashOsConnectionState()
+        refreshEvidenceConnectionState()
         autoSignInFromBuildEnvironment()
+        viewModelScope.launch {
+            try {
+                val restored = canonicalJsonValidator.restoreBundleState()
+                if (restored != null) {
+                    mutableCanonicalJsonValidatorState.value = restored
+                    mutableUiState.value = mutableUiState.value.copy(
+                        screen = AppScreen.CANONICAL_JSON_VALIDATOR,
+                        message = null,
+                    )
+                }
+            } catch (error: Exception) {
+                mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(
+                    error = "저장된 bundle을 복구하지 못했습니다: ${error.message ?: error.javaClass.simpleName}",
+                    notice = null,
+                )
+            }
+        }
     }
 
     private fun autoSignInFromBuildEnvironment() {
@@ -568,10 +595,15 @@ class ReceiptAppViewModel(
     }
 
     fun updateCanonicalJsonValidatorRawJson(value: String) {
-        mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(
-            rawJson = value,
-            error = null,
-        )
+        val current = mutableCanonicalJsonValidatorState.value
+        if (current.bundle != null || current.bundleValidationStatus != null) {
+            mutableCanonicalJsonValidatorState.value = current.copy(
+                error = "Bundle canonical JSON은 읽기 전용입니다. JSON 가져오기는 별도 ingestion으로 시작합니다.",
+                notice = null,
+            )
+        } else {
+            mutableCanonicalJsonValidatorState.value = current.copy(rawJson = value, error = null)
+        }
     }
 
     fun setCanonicalJsonValidatorBasis(value: VerificationBasis) {
@@ -610,9 +642,29 @@ class ReceiptAppViewModel(
                 )
                 return@launch
             }
-            runCanonicalJsonValidator { state -> canonicalJsonValidator.importJson(text, state) }
+            runCanonicalJsonValidator { state ->
+                canonicalJsonValidator.importJson(text, state, startNewIngestion = true)
+            }
         }
     }
+
+    fun importCanonicalBundle(uri: Uri) {
+        val current = mutableCanonicalJsonValidatorState.value
+        if (current.busy) return
+        viewModelScope.launch {
+            mutableCanonicalJsonValidatorState.value = current.copy(busy = true, error = null, notice = null)
+            val updated = try {
+                val input = getApplication<Application>().contentResolver.openInputStream(uri)
+                    ?: error("Bundle 파일을 열 수 없습니다.")
+                input.use { canonicalJsonValidator.importBundle(it, uri.lastPathSegment ?: "bundle.yeonsik", current) }
+            } catch (error: Exception) {
+                current.copy(error = error.message ?: "Bundle 파일을 읽지 못했습니다.", notice = null)
+            }
+            mutableCanonicalJsonValidatorState.value = updated.copy(busy = false)
+        }
+    }
+
+    fun retryCanonicalBundleArchive() = runCanonicalJsonValidator(canonicalJsonValidator::archiveBundle)
 
     fun parseCanonicalJsonValidator() =
         runCanonicalJsonValidator { state -> canonicalJsonValidator.importJson(state.rawJson, state) }
@@ -1403,6 +1455,34 @@ class ReceiptAppViewModel(
                     message = priceObservationFailureMessage(outcome.kind),
                 )
             }
+        }
+    }
+
+    fun saveEvidenceConnection(url: String, publishableKey: String) {
+        val existing = container.evidenceSupabaseStore.read()
+        val effectiveKey = publishableKey.trim().ifEmpty { existing.publishableKey }
+        container.evidenceSupabaseStore.saveConnection(url, effectiveKey)
+            .onSuccess { refreshEvidenceConnectionState("Evidence Supabase 연결 정보를 저장했습니다.") }
+            .onFailure { error ->
+                mutableUiState.value = mutableUiState.value.copy(
+                    message = error.message ?: "Evidence Supabase 연결 정보를 저장하지 못했습니다.",
+                )
+            }
+    }
+
+    fun signInEvidence(email: String, password: String) {
+        val state = mutableUiState.value
+        if (state.isEvidenceSigningIn) return
+        viewModelScope.launch {
+            mutableUiState.value = state.copy(isEvidenceSigningIn = true, message = null)
+            container.evidenceArchivePort.signIn(email, password)
+                .onSuccess { refreshEvidenceConnectionState("$email 계정으로 Evidence 저장소에 로그인했습니다.") }
+                .onFailure { error ->
+                    mutableUiState.value = mutableUiState.value.copy(
+                        isEvidenceSigningIn = false,
+                        message = error.message ?: "Evidence 로그인에 실패했습니다.",
+                    )
+                }
         }
     }
 
@@ -4737,6 +4817,17 @@ class ReceiptAppViewModel(
             cashOsSupabaseUrl = config.url,
             isCashOsPublishableKeyConfigured = config.publishableKey.isNotBlank(),
             cashOsSignedInEmail = config.email.takeIf { config.isSignedIn },
+            message = message,
+        )
+    }
+
+    private fun refreshEvidenceConnectionState(message: String? = mutableUiState.value.message) {
+        val config = container.evidenceSupabaseStore.read()
+        mutableUiState.value = mutableUiState.value.copy(
+            isEvidenceSigningIn = false,
+            evidenceSupabaseUrl = config.url,
+            isEvidencePublishableKeyConfigured = config.isConnectionConfigured,
+            evidenceSignedInEmail = config.email.takeIf { config.isSignedIn },
             message = message,
         )
     }

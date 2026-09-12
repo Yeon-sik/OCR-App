@@ -29,6 +29,11 @@ class RoomIngestionSessionStore internal constructor(
         return entity.toDomain(dao.getIngestionProjections(entity.ingestionId), dao.getIngestionAttachments(entity.ingestionId))
     }
 
+    override suspend fun findByBundleFingerprint(fingerprint: String): IngestionSession? {
+        val entity = dao.getIngestionSessionByBundleFingerprint(fingerprint) ?: return null
+        return entity.toDomain(dao.getIngestionProjections(entity.ingestionId), dao.getIngestionAttachments(entity.ingestionId))
+    }
+
     override suspend fun delete(ingestionId: String) {
         dao.deleteIngestionSnapshot(ingestionId)
     }

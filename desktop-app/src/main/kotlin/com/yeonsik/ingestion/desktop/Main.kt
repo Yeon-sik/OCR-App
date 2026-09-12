@@ -75,6 +75,7 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
         .map { it.projection }
         .toSet()
     val effectiveSelectedProjections = selectedProjections?.intersect(activeProjections) ?: activeProjections
+    val bundleActive = state.bundleMetadata != null || state.bundleValidationStatus != null
     LaunchedEffect(state.ingestionId) {
         selectedProjections = null
     }
@@ -98,14 +99,22 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                         Button(
                             enabled = !state.busy,
                             onClick = {
+                                chooseBundleFile()?.let { file ->
+                                    launchIo { controller.importBundle(file) }
+                                }
+                            },
+                        ) { Text("Open .yeonsik") }
+                        OutlinedButton(
+                            enabled = !state.busy,
+                            onClick = {
                                 chooseJsonFile()?.let { file ->
                                     launchIo { controller.importJson(Files.readString(file)) }
                                 }
                             },
-                        ) { Text("Open JSON") }
+                        ) { Text("Open JSON (new ingestion)") }
                         Button(
-                            enabled = !state.busy && state.rawJson.isNotBlank(),
-                            onClick = { launchIo { controller.importJson() } },
+                            enabled = !state.busy && !bundleActive && state.rawJson.isNotBlank(),
+                            onClick = { launchIo { controller.parseJson() } },
                         ) { Text("Parse & Validate") }
                         OutlinedButton(
                             enabled = !state.busy,
@@ -119,8 +128,10 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                     TextField(
                         value = state.rawJson,
                         onValueChange = controller::updateRawJson,
+                        enabled = !state.busy && !bundleActive,
+                        readOnly = bundleActive,
                         modifier = Modifier.fillMaxWidth().weight(1f),
-                        label = { Text("External JSON (editable)") },
+                        label = { Text(if (bundleActive) "Bundle canonical JSON (read-only)" else "External JSON (editable)") },
                         placeholder = { Text("Open or drop a yeonsik-ocr.v1/v2/v3 JSON file") },
                         minLines = 14,
                         maxLines = 40,
@@ -143,6 +154,12 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                         },
                         onDrop = { files -> launchIo { controller.attachEvidence(files, evidenceType) } },
                     )
+                    if (state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.FAILED) {
+                        Button(
+                            enabled = !state.busy,
+                            onClick = { launchIo { controller.archiveEvidence() } },
+                        ) { Text("Archive / Retry") }
+                    }
                     ReviewCard(state)
                     ProjectionCard(
                         state = state,
@@ -155,7 +172,9 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                     )
                     Text("Verification basis", style = MaterialTheme.typography.titleMedium)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        VerificationBasis.entries.forEach { basis ->
+                        val availableBases = if (state.bundleMetadata == null) VerificationBasis.entries
+                        else listOf(VerificationBasis.SOURCE_EVIDENCE)
+                        availableBases.forEach { basis ->
                             if (basis == verificationBasis) {
                                 Button(onClick = { verificationBasis = basis }) {
                                     Text(basis.wireValue)
@@ -169,11 +188,24 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
-                            enabled = !state.busy && state.session != null,
-                            onClick = { launchIo { controller.verify(verificationBasis) } },
+                            enabled = !state.busy && state.session != null &&
+                                (state.bundleMetadata == null ||
+                                    state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED),
+                            onClick = {
+                                launchIo {
+                                    controller.verify(
+                                        if (state.bundleMetadata == null) verificationBasis
+                                        else VerificationBasis.SOURCE_EVIDENCE,
+                                    )
+                                }
+                            },
                         ) { Text("Verify") }
                         Button(
-                            enabled = !state.busy && state.session != null,
+                            enabled = !state.busy && state.session != null &&
+                                state.session?.verifiedCanonicalFingerprint == state.session?.canonicalFingerprint &&
+                                (state.bundleMetadata == null ||
+                                    state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED &&
+                                        state.bundleMetadata?.verificationEventRecorded == true),
                             onClick = {
                                 launchIo { controller.submit(effectiveSelectedProjections) }
                             },
@@ -197,6 +229,8 @@ private fun SummaryCard(state: DesktopUiState) {
             Text("Ingestion: ${state.ingestionId ?: "—"}")
             Text("Local document: ${state.localDocumentId ?: "—"}")
             Text("Session: ${state.session?.reviewStatus?.wireValue ?: "not imported"}")
+            Text("Bundle: ${state.bundleValidationStatus?.name ?: "LEGACY / NONE"}")
+            Text("Evidence archive: ${state.bundleMetadata?.archiveStatus?.name ?: "NOT_STARTED"}")
         }
     }
 }
@@ -212,18 +246,23 @@ private fun EvidenceCard(
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Source evidence", style = MaterialTheme.typography.titleMedium)
-            Text("Evidence is local-only and the existing core gate remains mandatory.")
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                SourceAttachmentType.entries.forEach { type ->
-                    if (type == selectedType) {
-                        Button(onClick = { onTypeSelected(type) }) { Text(type.wireValue) }
-                    } else {
-                        OutlinedButton(onClick = { onTypeSelected(type) }) { Text(type.wireValue) }
+            Text(
+                if (state.bundleMetadata == null) "Legacy evidence remains local until explicitly archived by a bundle flow."
+                else "Bundle evidence is bound by manifest id/type and archived before verification.",
+            )
+            if (state.bundleMetadata == null) {
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    SourceAttachmentType.entries.forEach { type ->
+                        if (type == selectedType) {
+                            Button(onClick = { onTypeSelected(type) }) { Text(type.wireValue) }
+                        } else {
+                            OutlinedButton(onClick = { onTypeSelected(type) }) { Text(type.wireValue) }
+                        }
                     }
                 }
+                Button(enabled = state.session != null && !state.busy, onClick = onChoose) { Text("Choose evidence files") }
+                EvidenceDropZone(enabled = state.session != null && !state.busy, onFiles = onDrop)
             }
-            Button(enabled = state.session != null && !state.busy, onClick = onChoose) { Text("Choose evidence files") }
-            EvidenceDropZone(enabled = state.session != null && !state.busy, onFiles = onDrop)
             state.evidence.forEach { evidence ->
                 Text("${evidence.type.wireValue}: ${evidence.path.fileName} (${if (Files.isReadable(evidence.path)) "readable" else "missing"})")
             }
@@ -342,6 +381,12 @@ private fun DropZone(enabled: Boolean, label: String, onFiles: (List<Path>) -> U
 
 private fun chooseJsonFile(): Path? = JFileChooser().run {
     fileFilter = FileNameExtensionFilter("JSON files", "json")
+    isMultiSelectionEnabled = false
+    if (showOpenDialog(null) == JFileChooser.APPROVE_OPTION) selectedFile?.toPath() else null
+}
+
+private fun chooseBundleFile(): Path? = JFileChooser().run {
+    fileFilter = FileNameExtensionFilter("Yeonsik bundles", "yeonsik")
     isMultiSelectionEnabled = false
     if (showOpenDialog(null) == JFileChooser.APPROVE_OPTION) selectedFile?.toPath() else null
 }

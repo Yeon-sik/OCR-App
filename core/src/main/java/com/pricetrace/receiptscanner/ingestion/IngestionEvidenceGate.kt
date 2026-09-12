@@ -76,7 +76,7 @@ object IngestionEvidenceGate {
         evidenceResults.firstOrNull { !it.isAllowed }?.let { return it }
         evidenceResults.firstOrNull()?.let { return it }
         val requiredTypes = requiredEvidenceTypes(envelope, artifactKeys)
-        val scopedEvidence = if (artifactKeys == null) {
+        val scopedEvidence = if (artifactKeys == null || requiredTypes.isEmpty()) {
             evidence
         } else {
             evidence.filter { it.type in requiredTypes }

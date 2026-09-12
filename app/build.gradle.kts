@@ -108,6 +108,8 @@ val configuredPriceTraceUrl = dotEnv["PRICETRACE_SUPABASE_URL"].orEmpty().trim()
 val configuredPriceTraceKey = dotEnv["PRICETRACE_SUPABASE_PUBLISHABLE_KEY"].orEmpty().trim()
 val configuredCashOsUrl = dotEnv["CASHOS_SUPABASE_URL"].orEmpty().trim().trimEnd('/')
 val configuredCashOsKey = dotEnv["CASHOS_SUPABASE_PUBLISHABLE_KEY"].orEmpty().trim()
+val configuredEvidenceUrl = dotEnv["EVIDENCE_SUPABASE_URL"].orEmpty().trim().trimEnd('/')
+val configuredEvidenceKey = dotEnv["EVIDENCE_SUPABASE_PUBLISHABLE_KEY"].orEmpty().trim()
 val configuredGeminiApiKey = dotEnv["GEMINI_API_KEY"].orEmpty().trim()
 val configuredGeminiModel = dotEnv["GEMINI_MODEL"].orEmpty().trim()
 
@@ -174,6 +176,25 @@ val defaultCashOsUrl = if (!hasCashOsPair) {
     configuredCashOsUrl
 }
 val defaultCashOsKey = if (defaultCashOsUrl.isBlank()) "" else configuredCashOsKey
+val hasEvidencePair = configuredEvidenceUrl.isNotBlank() && configuredEvidenceKey.isNotBlank()
+val defaultEvidenceUrl = if (!hasEvidencePair) {
+    if (configuredEvidenceUrl.isNotBlank() || configuredEvidenceKey.isNotBlank()) {
+        logger.warn("PriceTrace: EVIDENCE_SUPABASE_URL and EVIDENCE_SUPABASE_PUBLISHABLE_KEY must be provided together; ignoring both")
+    }
+    ""
+} else {
+    require(validNutritionUrl(configuredEvidenceUrl)) {
+        "EVIDENCE_SUPABASE_URL must be an HTTPS URL without query, fragment, or user info"
+    }
+    require(configuredEvidenceKey.length in 20..4096 && configuredEvidenceKey.none(Char::isWhitespace)) {
+        "EVIDENCE_SUPABASE_PUBLISHABLE_KEY must be a non-whitespace publishable key"
+    }
+    require(!looksLikeServiceRoleKey(configuredEvidenceKey)) {
+        "EVIDENCE_SUPABASE_PUBLISHABLE_KEY must not be a service_role/secret key"
+    }
+    configuredEvidenceUrl
+}
+val defaultEvidenceKey = if (defaultEvidenceUrl.isBlank()) "" else configuredEvidenceKey
 val defaultGeminiModel = configuredGeminiModel
     .takeIf { it.matches(Regex("[A-Za-z0-9._:-]{1,128}")) }
     ?: fallbackGeminiModel
@@ -205,6 +226,8 @@ android {
         buildConfigField("String", "DEFAULT_PRICETRACE_SUPABASE_PUBLISHABLE_KEY", buildConfigString(defaultPriceTraceKey))
         buildConfigField("String", "DEFAULT_CASHOS_SUPABASE_URL", buildConfigString(defaultCashOsUrl))
         buildConfigField("String", "DEFAULT_CASHOS_SUPABASE_PUBLISHABLE_KEY", buildConfigString(defaultCashOsKey))
+        buildConfigField("String", "DEFAULT_EVIDENCE_SUPABASE_URL", buildConfigString(defaultEvidenceUrl))
+        buildConfigField("String", "DEFAULT_EVIDENCE_SUPABASE_PUBLISHABLE_KEY", buildConfigString(defaultEvidenceKey))
         buildConfigField("String", "DEFAULT_GEMINI_MODEL", buildConfigString(defaultGeminiModel))
         buildConfigField("String", "DEFAULT_GEMINI_API_KEY", buildConfigString(configuredGeminiApiKey))
         buildConfigField("String", "DEFAULT_NUTRITION_EMAIL", buildConfigString(configuredNutritionEmail))

@@ -8,6 +8,9 @@ import com.pricetrace.receiptscanner.ingestion.LocalEvidence
 import com.pricetrace.receiptscanner.ingestion.ProjectionState
 import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveCheckpoint
+import com.pricetrace.receiptscanner.ingestion.bundleFingerprintFor
+import com.pricetrace.receiptscanner.ingestion.YeonsikBundleMaterializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -24,6 +27,10 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
+import java.io.OutputStream
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.util.Comparator
 import java.util.UUID
 import kotlin.io.path.extension
 import kotlin.io.path.isRegularFile
@@ -40,7 +47,29 @@ data class DesktopSessionRecord(
     val rawJson: String,
     val canonicalJson: String,
     val evidence: List<DesktopEvidenceAttachment>,
+    val bundle: DesktopBundleMetadata? = null,
 )
+
+enum class DesktopBundleValidationStatus { VALID, INVALID }
+enum class DesktopEvidenceArchiveStatus { NOT_STARTED, ARCHIVING, ARCHIVED, FAILED }
+
+data class DesktopBundleMetadata(
+    val sourcePath: String,
+    val canonicalSha256: String,
+    val manifestJson: String,
+    val validationStatus: DesktopBundleValidationStatus,
+    val archiveStatus: DesktopEvidenceArchiveStatus,
+    val archiveCheckpoint: EvidenceArchiveCheckpoint = EvidenceArchiveCheckpoint(),
+    val verificationEventRecorded: Boolean = false,
+    val archiveError: String? = null,
+) {
+    val manifestSha256: String
+        get() = MessageDigest.getInstance("SHA-256")
+            .digest(manifestJson.toByteArray(StandardCharsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    val bundleFingerprint: String
+        get() = bundleFingerprintFor(canonicalSha256, manifestSha256)
+}
 
 /** JSON files only; no database and no remote state is treated as local session truth. */
 class DesktopSessionStore(
@@ -63,6 +92,9 @@ class DesktopSessionStore(
 
     override suspend fun findByImportFingerprint(fingerprint: String): IngestionSession? =
         allRecords().firstOrNull { it.session.importFingerprint == fingerprint }?.session
+
+    override suspend fun findByBundleFingerprint(fingerprint: String): IngestionSession? =
+        allRecords().firstOrNull { it.session.bundleFingerprint == fingerprint }?.session
 
     override suspend fun delete(ingestionId: String) {
         val file = sessionFile(ingestionId)
@@ -127,6 +159,11 @@ class DesktopSessionStore(
         return DesktopEvidenceAttachment(resolvedAttachmentId, type, destination, pageId)
     }
 
+    fun bundleMaterializer(ingestionId: String): DesktopBundleMaterializer {
+        val root = directory.resolve("evidence").resolve(safeId(ingestionId)).resolve("bundle")
+        return DesktopBundleMaterializer(root)
+    }
+
     private fun allRecords(): List<DesktopSessionRecord> = Files.list(directory).use { stream ->
         stream.filter { it.fileName.toString().endsWith(".json") }
             .toList()
@@ -143,18 +180,20 @@ class DesktopSessionStore(
     private fun encode(record: DesktopSessionRecord): String = json.encodeToString(
         JsonElement.serializer(),
         buildJsonObject {
-            put("schema_version", JsonPrimitive("desktop-ingestion-session.v1"))
+            put("schema_version", JsonPrimitive("desktop-ingestion-session.v3"))
             put("raw_json", JsonPrimitive(record.rawJson))
             put("canonical_json", JsonPrimitive(record.canonicalJson))
             put("session", encodeSession(record.session))
             put("evidence", record.evidence.attachmentsToJson())
+            put("bundle", record.bundle?.let(::encodeBundle) ?: JsonNull)
         },
     )
 
     private fun readJson(path: Path): DesktopSessionRecord {
         require(Files.isRegularFile(path)) { "session record not found" }
         val root = json.parseToJsonElement(Files.readString(path)).jsonObject
-        require(root.string("schema_version") == "desktop-ingestion-session.v1") {
+        val schemaVersion = root.string("schema_version")
+        require(schemaVersion in setOf("desktop-ingestion-session.v1", "desktop-ingestion-session.v2", "desktop-ingestion-session.v3")) {
             "unsupported desktop session record"
         }
         return DesktopSessionRecord(
@@ -162,7 +201,54 @@ class DesktopSessionStore(
             rawJson = root.string("raw_json"),
             canonicalJson = root.string("canonical_json"),
             evidence = root.arrayValue("evidence").map { decodeEvidence(it.jsonObject) },
+            bundle = if (schemaVersion in setOf("desktop-ingestion-session.v2", "desktop-ingestion-session.v3")) {
+                root["bundle"]?.takeUnless { it == JsonNull }?.jsonObject?.let(::decodeBundle)
+            } else null,
         )
+    }
+
+    private fun encodeBundle(bundle: DesktopBundleMetadata): JsonObject = buildJsonObject {
+        put("source_path", JsonPrimitive(bundle.sourcePath))
+        put("canonical_sha256", JsonPrimitive(bundle.canonicalSha256))
+        put("manifest_json", JsonPrimitive(bundle.manifestJson))
+        put("manifest_sha256", JsonPrimitive(bundle.manifestSha256))
+        put("bundle_fingerprint", JsonPrimitive(bundle.bundleFingerprint))
+        put("validation_status", JsonPrimitive(bundle.validationStatus.name))
+        put("archive_status", JsonPrimitive(bundle.archiveStatus.name))
+        putNullable("canonical_artifact_id", bundle.archiveCheckpoint.canonicalArtifactId)
+        put(
+            "evidence_object_ids_by_sha256",
+            JsonObject(bundle.archiveCheckpoint.evidenceObjectIdsBySha256.mapValues { JsonPrimitive(it.value) }),
+        )
+        put(
+            "bound_source_file_ids",
+            kotlinx.serialization.json.JsonArray(bundle.archiveCheckpoint.boundSourceFileIds.sorted().map(::JsonPrimitive)),
+        )
+        putNullable("checkpoint_bundle_fingerprint", bundle.archiveCheckpoint.bundleFingerprint)
+        put("verification_event_recorded", JsonPrimitive(bundle.verificationEventRecorded))
+        putNullable("archive_error", bundle.archiveError)
+    }
+
+    private fun decodeBundle(root: JsonObject): DesktopBundleMetadata {
+        val bundle = DesktopBundleMetadata(
+            sourcePath = root.string("source_path"),
+            canonicalSha256 = root.string("canonical_sha256"),
+            manifestJson = root.string("manifest_json"),
+            validationStatus = DesktopBundleValidationStatus.valueOf(root.string("validation_status")),
+            archiveStatus = DesktopEvidenceArchiveStatus.valueOf(root.string("archive_status")),
+            archiveCheckpoint = EvidenceArchiveCheckpoint(
+                canonicalArtifactId = root.nullableString("canonical_artifact_id"),
+                evidenceObjectIdsBySha256 = root.objectValue("evidence_object_ids_by_sha256")
+                    .mapValues { (_, value) -> value.jsonPrimitive.content },
+                boundSourceFileIds = root.arrayValue("bound_source_file_ids").map { it.jsonPrimitive.content }.toSet(),
+                bundleFingerprint = root.nullableString("checkpoint_bundle_fingerprint"),
+            ),
+            verificationEventRecorded = root.boolean("verification_event_recorded"),
+            archiveError = root.nullableString("archive_error"),
+        )
+        root.nullableString("manifest_sha256")?.let { require(it == bundle.manifestSha256) { "manifest hash mismatch" } }
+        root.nullableString("bundle_fingerprint")?.let { require(it == bundle.bundleFingerprint) { "bundle fingerprint mismatch" } }
+        return bundle
     }
 
     private fun encodeSession(session: IngestionSession): JsonObject = buildJsonObject {
@@ -177,6 +263,7 @@ class DesktopSessionStore(
         putNullable("verified_canonical_fingerprint", session.verifiedCanonicalFingerprint)
         putNullable("verified_at", session.verifiedAt)
         put("import_fingerprint", JsonPrimitive(session.importFingerprint))
+        putNullable("bundle_fingerprint", session.bundleFingerprint)
         put(
             "verified_artifact_fingerprints",
             JsonObject(session.verifiedArtifactFingerprints.mapValues { JsonPrimitive(it.value) }),
@@ -201,6 +288,7 @@ class DesktopSessionStore(
         verifiedArtifactFingerprints = root.objectValue("verified_artifact_fingerprints")
             .mapValues { (_, value) -> value.jsonPrimitive.content },
         importFingerprint = root.string("import_fingerprint"),
+        bundleFingerprint = root.nullableString("bundle_fingerprint"),
     )
 
     private fun decodeProjection(root: JsonObject): ProjectionState = ProjectionState(
@@ -292,5 +380,30 @@ class DesktopSessionStore(
         }
 
         private val SAFE_ID_PATTERN = Regex("[A-Za-z0-9._-]{1,160}")
+    }
+}
+
+class DesktopBundleMaterializer(private val root: Path) : YeonsikBundleMaterializer {
+    override fun open(relativePath: String): OutputStream {
+        val target = pathFor(relativePath)
+        Files.createDirectories(target.parent)
+        return Files.newOutputStream(target)
+    }
+
+    fun pathFor(relativePath: String): Path {
+        require(relativePath.startsWith("evidence/") && ".." !in relativePath && '\\' !in relativePath) {
+            "unsafe bundle evidence path"
+        }
+        val normalizedRoot = root.toAbsolutePath().normalize()
+        val target = normalizedRoot.resolve(relativePath.removePrefix("evidence/")).normalize()
+        require(target.startsWith(normalizedRoot)) { "bundle evidence escapes session directory" }
+        return target
+    }
+
+    override fun abort() {
+        if (!Files.exists(root)) return
+        Files.walk(root).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+        }
     }
 }

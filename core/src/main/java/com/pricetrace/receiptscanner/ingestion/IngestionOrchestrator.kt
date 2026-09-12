@@ -59,6 +59,7 @@ interface IngestionSessionStore {
     suspend fun get(ingestionId: String): IngestionSession?
     suspend fun findByCanonicalFingerprint(fingerprint: String): IngestionSession?
     suspend fun findByImportFingerprint(fingerprint: String): IngestionSession? = findByCanonicalFingerprint(fingerprint)
+    suspend fun findByBundleFingerprint(fingerprint: String): IngestionSession? = null
     suspend fun delete(ingestionId: String)
     suspend fun save(session: IngestionSession)
 }
@@ -70,6 +71,8 @@ class InMemoryIngestionSessionStore : IngestionSessionStore {
         values.values.firstOrNull { it.canonicalFingerprint == fingerprint }
     override suspend fun findByImportFingerprint(fingerprint: String): IngestionSession? =
         values.values.firstOrNull { it.importFingerprint == fingerprint }
+    override suspend fun findByBundleFingerprint(fingerprint: String): IngestionSession? =
+        values.values.firstOrNull { it.bundleFingerprint == fingerprint }
     override suspend fun delete(ingestionId: String) { values.remove(ingestionId) }
     override suspend fun save(session: IngestionSession) { values[session.ingestionId] = session }
 }
@@ -94,12 +97,21 @@ class IngestionOrchestrator(
         envelope: YeonsikOcrEnvelope,
         evidence: List<LocalEvidence> = emptyList(),
         inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
+        bundleFingerprint: String? = null,
     ): IngestionStartResult {
         require(ingestionId.isNotBlank() && localDocumentId.isNotBlank())
+        require(bundleFingerprint == null || bundleFingerprint.matches(Regex("^[a-f0-9]{64}$"))) {
+            "bundleFingerprint must be lowercase 64 hex"
+        }
         val evidenceResult = IngestionEvidenceGate.evaluate(envelope, evidence, inputOrigin)
         val fingerprint = fingerprint(envelope)
-        store.findByImportFingerprint(fingerprint)?.let { existing ->
-            return IngestionStartResult.Duplicate(existing)
+        val existing = if (bundleFingerprint == null) {
+            store.findByImportFingerprint(fingerprint)
+        } else {
+            store.findByBundleFingerprint(bundleFingerprint)
+        }
+        existing?.let { session ->
+            return IngestionStartResult.Duplicate(session)
         }
         val nowValue = now()
         val enabled = enabledProjections(envelope)
@@ -113,7 +125,8 @@ class IngestionOrchestrator(
             updatedAt = nowValue,
             attachments = evidence,
             revisionSeq = 1,
-            importFingerprint = fingerprint,
+            importFingerprint = bundleFingerprint ?: fingerprint,
+            bundleFingerprint = bundleFingerprint,
             projections = enabled.map { projection ->
                 ProjectionState(
                     projection = projection,

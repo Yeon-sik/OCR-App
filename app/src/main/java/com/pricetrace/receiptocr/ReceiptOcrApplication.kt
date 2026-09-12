@@ -39,6 +39,8 @@ import com.pricetrace.receiptscanner.ingestion.IngestionOrchestrator
 import com.pricetrace.receiptscanner.ingestion.CanonicalIngestionUseCase
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
+import com.pricetrace.receiptocr.evidence.AndroidEvidenceSupabaseStore
+import com.pricetrace.receiptscanner.ingestion.EvidenceSupabaseArchivePort
 
 class ReceiptOcrApplication : Application() {
     val container: AppContainer by lazy { AppContainer(this) }
@@ -48,6 +50,10 @@ class AppContainer(application: Application) {
     val fileStore = ReceiptFileStore(application)
     val sessionRepository = RoomReceiptSessionRepository.create(application, fileStore)
     val ingestionSessionStore = RoomIngestionSessionStore.create(application)
+    internal val evidenceSupabaseStore = AndroidEvidenceSupabaseStore(application)
+    internal val evidenceArchivePort = EvidenceSupabaseArchivePort(evidenceSupabaseStore)
+    internal val bundleDirectory = application.filesDir.resolve("yeonsik-bundles")
+    internal val bundleStateStore: AndroidBundleStateStore = SharedPreferencesAndroidBundleStateStore(application)
     /**
      * The app keeps payload construction in the existing gateways. This coordinator owns
      * durable lifecycle state and refuses implicit cross-service identity inference.
