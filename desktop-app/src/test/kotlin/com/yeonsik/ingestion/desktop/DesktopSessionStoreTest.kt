@@ -7,7 +7,13 @@ import com.pricetrace.receiptscanner.ingestion.LocalEvidence
 import com.pricetrace.receiptscanner.ingestion.ProjectionState
 import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveCheckpoint
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -43,6 +49,51 @@ class DesktopSessionStoreTest {
         assertFalse(persisted.contains("refresh_token"))
         assertFalse(persisted.contains("password"))
         assertTrue(Files.list(directory.resolve("sessions")).use { stream -> stream.noneMatch { it.fileName.toString().contains(".tmp-") } })
+    }
+
+    @Test
+    fun `bundle metadata round trips`() = runBlocking {
+        val directory = Files.createTempDirectory("yeonsik-desktop-session-v2")
+        val store = DesktopSessionStore(directory)
+        val session = sampleSession()
+        val metadata = DesktopBundleMetadata(
+            sourcePath = "C:\\incoming\\receipt.yeonsik",
+            canonicalSha256 = "a".repeat(64),
+            manifestJson = "{\"bundle_version\":\"yeonsik-bundle.v1\"}",
+            validationStatus = DesktopBundleValidationStatus.VALID,
+            archiveStatus = DesktopEvidenceArchiveStatus.ARCHIVED,
+            archiveCheckpoint = EvidenceArchiveCheckpoint(
+                canonicalArtifactId = "artifact-id",
+                evidenceObjectIdsBySha256 = mapOf("b".repeat(64) to "object-id"),
+                boundSourceFileIds = setOf("receipt-1"),
+            ),
+            verificationEventRecorded = true,
+        )
+        store.saveRecord(DesktopSessionRecord(session, "{}", "{}", emptyList(), metadata))
+        assertEquals(metadata, store.loadRecord(session.ingestionId)?.bundle)
+        val persisted = Files.readString(directory.resolve("desktop-test.json"))
+        assertFalse(persisted.contains("access_token"))
+        assertFalse(persisted.contains("refresh_token"))
+        assertFalse(persisted.contains("password"))
+    }
+
+    @Test
+    fun `v1 session records remain readable`() = runBlocking {
+        val directory = Files.createTempDirectory("yeonsik-desktop-session-v1")
+        val store = DesktopSessionStore(directory)
+        val session = sampleSession()
+        store.saveRecord(DesktopSessionRecord(session, "{}", "{}", emptyList()))
+        val path = directory.resolve("desktop-test.json")
+        val root = Json.parseToJsonElement(Files.readString(path)).jsonObject
+        val legacy = JsonObject(root.toMutableMap().apply {
+            put("schema_version", JsonPrimitive("desktop-ingestion-session.v1"))
+            remove("bundle")
+        })
+        Files.writeString(path, Json.encodeToString(JsonElement.serializer(), legacy))
+
+        val loaded = requireNotNull(store.loadRecord(session.ingestionId))
+        assertEquals(session, loaded.session)
+        assertEquals(null, loaded.bundle)
     }
 
     private fun sampleSession(): IngestionSession = IngestionSession(

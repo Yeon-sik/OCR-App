@@ -10,6 +10,18 @@ import com.pricetrace.receiptscanner.ingestion.LocalEvidence
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveCheckpoint
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchivePort
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveRequest
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveResult
+import com.pricetrace.receiptscanner.ingestion.EvidenceVerificationEventResult
+import com.pricetrace.receiptscanner.ingestion.YeonsikBundle
+import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
+import com.pricetrace.receiptscanner.ingestion.YeonsikBundleMaterializer
+import com.pricetrace.receiptscanner.ingestion.YeonsikBundleReader
+import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.UUID
 
 data class AndroidCanonicalJsonValidatorState(
@@ -24,17 +36,161 @@ data class AndroidCanonicalJsonValidatorState(
     val evidence: List<LocalEvidence> = emptyList(),
     val selectedProjections: Set<IngestionProjection> = emptySet(),
     val verificationBasis: VerificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+    val bundle: AndroidBundleState? = null,
+    /** Keeps a rejected bundle visible even when no trusted manifest metadata exists. */
+    val bundleValidationStatus: AndroidBundleValidationStatus? = null,
     val busy: Boolean = false,
     val error: String? = null,
     val notice: String? = null,
 )
 
+enum class AndroidBundleValidationStatus { VALID, INVALID }
+enum class AndroidEvidenceArchiveStatus { NOT_STARTED, ARCHIVING, ARCHIVED, FAILED }
+
+data class AndroidBundleState(
+    val sourceName: String,
+    val canonicalSha256: String,
+    val manifestJson: String,
+    val evidencePaths: Map<String, String>,
+    val validationStatus: AndroidBundleValidationStatus = AndroidBundleValidationStatus.VALID,
+    val archiveStatus: AndroidEvidenceArchiveStatus = AndroidEvidenceArchiveStatus.NOT_STARTED,
+    val archiveCheckpoint: EvidenceArchiveCheckpoint = EvidenceArchiveCheckpoint(),
+    val verificationEventRecorded: Boolean = false,
+    val archiveError: String? = null,
+)
+
 /** Android-only adapter; validation, confirmation, routing, retry, and idempotency stay in Core. */
 class AndroidCanonicalJsonValidator(
     private val useCase: CanonicalIngestionUseCase,
+    private val evidenceArchivePort: EvidenceArchivePort? = null,
+    private val bundleRoot: File? = null,
     private val newLocalDocumentId: () -> String = { "android-json-${UUID.randomUUID()}" },
     private val newIngestionId: () -> String = { "android-ingestion-${UUID.randomUUID()}" },
 ) {
+    suspend fun importBundle(
+        input: InputStream,
+        sourceName: String,
+        previous: AndroidCanonicalJsonValidatorState,
+    ): AndroidCanonicalJsonValidatorState {
+        val localDocumentId = newLocalDocumentId().replace("android-json-", "android-bundle-")
+        val ingestionId = newIngestionId()
+        val root = requireNotNull(bundleRoot) { "Android bundle storage is not configured." }.resolve(ingestionId)
+        val materializer = AndroidBundleMaterializer(root)
+        return try {
+            val importedBundle = YeonsikBundleReader.read(input, localDocumentId, materializer)
+            val evidence = importedBundle.manifest.evidence.map { item ->
+                LocalEvidence(item.sourceFileId, item.type, materializer.fileFor(item.path).canRead())
+            }
+            when (val result = useCase.importJson(
+                value = importedBundle.canonicalJson,
+                localDocumentId = localDocumentId,
+                ingestionId = ingestionId,
+                evidence = evidence,
+            )) {
+                is CanonicalImportResult.Failure -> {
+                    materializer.abort()
+                    previous.copy(
+                        rawJson = importedBundle.canonicalJson,
+                        canonicalJson = "",
+                        localDocumentId = null,
+                        ingestionId = null,
+                        envelope = null,
+                        session = null,
+                        plan = null,
+                        evidence = emptyList(),
+                        selectedProjections = emptySet(),
+                        bundle = null,
+                        bundleValidationStatus = AndroidBundleValidationStatus.INVALID,
+                        error = result.error?.detail ?: result.issues.joinToString(", "),
+                        notice = null,
+                    )
+                }
+                is CanonicalImportResult.Success -> {
+                    val plan = useCase.plan(result.envelope)
+                    val state = previous.copy(
+                        rawJson = importedBundle.canonicalJson,
+                        canonicalJson = YeonsikOcrEnvelopeCodec.encode(result.envelope),
+                        localDocumentId = localDocumentId,
+                        ingestionId = result.session.ingestionId,
+                        envelope = result.envelope,
+                        session = result.session,
+                        plan = plan,
+                        evidence = evidence,
+                        selectedProjections = plan.eligible,
+                        verificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+                        bundle = AndroidBundleState(
+                            sourceName = sourceName,
+                            canonicalSha256 = importedBundle.manifest.canonicalSha256,
+                            manifestJson = importedBundle.manifestJson,
+                            evidencePaths = importedBundle.manifest.evidence.associate {
+                                it.sourceFileId to materializer.fileFor(it.path).absolutePath
+                            },
+                        ),
+                        bundleValidationStatus = AndroidBundleValidationStatus.VALID,
+                        error = null,
+                        notice = "Bundle 검증 및 evidence 자동 binding 완료. archive를 시작합니다.",
+                    )
+                    archiveBundle(state)
+                }
+            }
+        } catch (error: Exception) {
+            materializer.abort()
+            previous.copy(
+                canonicalJson = "",
+                localDocumentId = null,
+                ingestionId = null,
+                envelope = null,
+                session = null,
+                plan = null,
+                evidence = emptyList(),
+                selectedProjections = emptySet(),
+                bundle = null,
+                bundleValidationStatus = AndroidBundleValidationStatus.INVALID,
+                error = "Bundle invalid: ${error.message ?: error.javaClass.simpleName}",
+                notice = null,
+            )
+        }
+    }
+
+    suspend fun archiveBundle(state: AndroidCanonicalJsonValidatorState): AndroidCanonicalJsonValidatorState {
+        val bundleState = requireNotNull(state.bundle) { "Import a .yeonsik bundle first." }
+        val port = requireNotNull(evidenceArchivePort) { "Evidence archive is not configured." }
+        val envelope = requireNotNull(state.envelope)
+        val request = EvidenceArchiveRequest(
+            bundle = YeonsikBundle(
+                YeonsikBundleManifestCodec.decode(bundleState.manifestJson),
+                bundleState.manifestJson,
+                state.rawJson,
+                envelope,
+            ),
+            openEvidence = { sourceFileId ->
+                val path = bundleState.evidencePaths[sourceFileId]
+                    ?: error("Bundle evidence is missing locally: $sourceFileId")
+                File(path).inputStream()
+            },
+        )
+        val archiving = bundleState.copy(archiveStatus = AndroidEvidenceArchiveStatus.ARCHIVING, archiveError = null)
+        return when (val result = port.archive(request, archiving.archiveCheckpoint)) {
+            is EvidenceArchiveResult.Success -> state.copy(
+                bundle = archiving.copy(
+                    archiveStatus = AndroidEvidenceArchiveStatus.ARCHIVED,
+                    archiveCheckpoint = result.checkpoint,
+                ),
+                error = null,
+                notice = "Evidence archive 완료. 내용을 검수한 뒤 확정하세요.",
+            )
+            is EvidenceArchiveResult.Failure -> state.copy(
+                bundle = archiving.copy(
+                    archiveStatus = AndroidEvidenceArchiveStatus.FAILED,
+                    archiveCheckpoint = result.checkpoint,
+                    archiveError = result.issue,
+                ),
+                error = "Evidence archive 실패: ${result.issue}",
+                notice = "로컬 bundle은 보존되었습니다. Archive / Retry만 다시 실행하세요.",
+            )
+        }
+    }
+
     suspend fun importJson(
         rawJson: String,
         previous: AndroidCanonicalJsonValidatorState,
@@ -48,6 +204,8 @@ class AndroidCanonicalJsonValidator(
         )) {
             is CanonicalImportResult.Failure -> previous.copy(
                 rawJson = rawJson,
+                bundle = null,
+                bundleValidationStatus = null,
                 error = result.error?.let { "${it.code}: ${it.detail.orEmpty()}" }
                     ?: result.issues.joinToString(", "),
                 notice = null,
@@ -64,6 +222,8 @@ class AndroidCanonicalJsonValidator(
                     session = result.session,
                     plan = plan,
                     evidence = previous.evidence,
+                    bundle = null,
+                    bundleValidationStatus = null,
                     selectedProjections = selected,
                     error = null,
                     notice = "JSON을 파싱하고 canonical 초안을 저장했습니다. 내용을 확인한 뒤 확정하세요.",
@@ -75,6 +235,7 @@ class AndroidCanonicalJsonValidator(
     suspend fun confirm(
         state: AndroidCanonicalJsonValidatorState,
     ): AndroidCanonicalJsonValidatorState {
+        require(state.bundleValidationStatus != AndroidBundleValidationStatus.INVALID) { "Bundle is invalid." }
         val envelope = requireNotNull(state.envelope) { "Import JSON before confirmation." }
         val ingestionId = requireNotNull(state.ingestionId) { "Ingestion id is missing." }
         val confirmation = useCase.confirm(
@@ -82,6 +243,8 @@ class AndroidCanonicalJsonValidator(
             envelope = envelope,
             evidence = state.evidence,
             verificationBasis = state.verificationBasis,
+            requireArchivedEvidence = state.bundle != null,
+            evidenceArchiveComplete = state.bundle?.archiveStatus == AndroidEvidenceArchiveStatus.ARCHIVED,
         )
         val result = confirmation.result
         val session = when (result) {
@@ -90,14 +253,38 @@ class AndroidCanonicalJsonValidator(
             is IngestionStartResult.Failure -> state.session
         }
         val plan = useCase.plan(confirmation.envelope)
+        var bundleState = state.bundle
+        var eventError: String? = null
+        if (result !is IngestionStartResult.Failure && bundleState != null) {
+            val artifactId = bundleState.archiveCheckpoint.canonicalArtifactId
+            if (artifactId == null) {
+                eventError = "Evidence canonical artifact id is missing."
+            } else {
+                when (val event = requireNotNull(evidenceArchivePort).recordVerification(
+                    artifactId,
+                    state.verificationBasis,
+                    "verified",
+                    emptyList(),
+                )) {
+                    EvidenceVerificationEventResult.Success -> {
+                        bundleState = bundleState.copy(verificationEventRecorded = true, archiveError = null)
+                    }
+                    is EvidenceVerificationEventResult.Failure -> {
+                        eventError = event.issue
+                        bundleState = bundleState.copy(verificationEventRecorded = false, archiveError = event.issue)
+                    }
+                }
+            }
+        }
         return state.copy(
             canonicalJson = YeonsikOcrEnvelopeCodec.encodePersisted(confirmation.envelope),
             envelope = confirmation.envelope,
             session = session,
             plan = plan,
+            bundle = bundleState,
             selectedProjections = state.selectedProjections.intersect(plan.eligible),
-            error = (result as? IngestionStartResult.Failure)?.issues?.joinToString(", "),
-            notice = if (result is IngestionStartResult.Failure) null else {
+            error = (result as? IngestionStartResult.Failure)?.issues?.joinToString(", ") ?: eventError,
+            notice = if (result is IngestionStartResult.Failure || eventError != null) null else {
                 "확정 완료(${state.verificationBasis.name}). 제출할 projection을 선택하세요."
             },
         )
@@ -114,7 +301,15 @@ class AndroidCanonicalJsonValidator(
     private suspend fun submitInternal(
         state: AndroidCanonicalJsonValidatorState,
     ): AndroidCanonicalJsonValidatorState {
+        require(state.bundleValidationStatus != AndroidBundleValidationStatus.INVALID) { "Bundle is invalid." }
         val envelope = requireNotNull(state.envelope) { "Import JSON before submitting." }
+        state.bundle?.let { bundle ->
+            require(bundle.validationStatus == AndroidBundleValidationStatus.VALID) { "Bundle is invalid." }
+            require(bundle.archiveStatus == AndroidEvidenceArchiveStatus.ARCHIVED) {
+                "Archive / Retry must complete before Submit."
+            }
+            require(bundle.verificationEventRecorded) { "Verification event must be archived before Submit." }
+        }
         val ingestionId = requireNotNull(state.ingestionId) { "Ingestion id is missing." }
         val plan = useCase.plan(envelope)
         val selected = state.selectedProjections.intersect(plan.eligible)
@@ -129,5 +324,28 @@ class AndroidCanonicalJsonValidator(
                 .filter { it.projection in selected }
                 .joinToString(", ") { "${it.projection.wireValue}=${it.status.wireValue}" },
         )
+    }
+}
+
+private class AndroidBundleMaterializer(private val root: File) : YeonsikBundleMaterializer {
+    override fun open(relativePath: String): OutputStream {
+        val target = fileFor(relativePath)
+        target.parentFile?.mkdirs()
+        return target.outputStream()
+    }
+
+    fun fileFor(relativePath: String): File {
+        require(relativePath.startsWith("evidence/") && ".." !in relativePath && '\\' !in relativePath) {
+            "unsafe bundle evidence path"
+        }
+        val target = root.resolve(relativePath.removePrefix("evidence/")).canonicalFile
+        require(target.path.startsWith(root.canonicalFile.path + File.separator)) {
+            "bundle evidence escapes app-private storage"
+        }
+        return target
+    }
+
+    override fun abort() {
+        if (root.exists()) root.deleteRecursively()
     }
 }

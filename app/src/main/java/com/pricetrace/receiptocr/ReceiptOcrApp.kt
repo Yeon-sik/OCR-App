@@ -21,6 +21,7 @@ fun ReceiptOcrApp(
     onLaunchImagePicker: (Boolean) -> Unit,
     onLaunchJsonPicker: () -> Unit,
     onLaunchCanonicalJsonPicker: () -> Unit,
+    onLaunchCanonicalBundlePicker: () -> Unit,
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -75,6 +76,7 @@ fun ReceiptOcrApp(
         onPickImages = { onLaunchImagePicker(false) },
         onPickJson = onLaunchJsonPicker,
         onPickCanonicalJson = onLaunchCanonicalJsonPicker,
+        onPickCanonicalBundle = onLaunchCanonicalBundlePicker,
         onWorkflowSelected = viewModel::selectWorkflow,
         onAppendScan = {
             activity?.let { viewModel.prepareScanner(it, onLaunchScanner, appendToCurrent = true) }
@@ -91,6 +93,7 @@ fun ReceiptOcrApp(
         onCanonicalJsonProjectionSelected = viewModel::selectCanonicalJsonProjection,
         onCanonicalJsonSubmit = viewModel::submitCanonicalJsonValidator,
         onCanonicalJsonRetry = viewModel::retryCanonicalJsonValidator,
+        onCanonicalBundleArchiveRetry = viewModel::retryCanonicalBundleArchive,
         onSelectSession = viewModel::selectSession,
         onDeleteSession = viewModel::deleteSession,
         onShowApiSettings = viewModel::showApiSettings,
@@ -111,6 +114,8 @@ fun ReceiptOcrApp(
         onSignInPriceTrace = viewModel::signInPriceTrace,
         onSaveCashOsConnection = viewModel::saveCashOsConnection,
         onSignInCashOs = viewModel::signInCashOs,
+        onSaveEvidenceConnection = viewModel::saveEvidenceConnection,
+        onSignInEvidence = viewModel::signInEvidence,
         onLoadCashOsLedgerCandidates = viewModel::loadCashOsLedgerCandidates,
         onSelectCashOsLedgerEntry = viewModel::selectCashOsLedgerEntry,
         onSubmitCashOsReceipt = viewModel::submitCashOsReceipt,

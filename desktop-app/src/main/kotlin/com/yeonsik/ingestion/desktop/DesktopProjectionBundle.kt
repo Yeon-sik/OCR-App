@@ -20,12 +20,20 @@ import com.pricetrace.receiptocr.pricetrace.PriceTraceProductReadOutcome
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchivePort
+import com.pricetrace.receiptscanner.ingestion.EvidenceSupabaseArchivePort
 import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
 
 /** Shared core gateway wiring for the Desktop console. No Desktop-specific submitter is added. */
 class DesktopProjectionBundle(
     private val config: DesktopRuntimeConfig = DesktopRuntimeConfig.load(),
 ) {
+    val evidenceStore = DesktopEvidenceSupabaseStore(config.evidence)
+    val evidenceArchivePort: EvidenceArchivePort = EvidenceSupabaseArchivePort(
+        store = evidenceStore,
+        email = config.evidence.email,
+        password = config.evidence.password,
+    )
     val priceTraceStore = DesktopPriceTraceSupabaseStore(config.priceTrace)
     val nutritionStore = DesktopNutritionSupabaseStore(config.nutrition)
     val cashOsStore = DesktopCashOsSupabaseStore(config.cashOs)

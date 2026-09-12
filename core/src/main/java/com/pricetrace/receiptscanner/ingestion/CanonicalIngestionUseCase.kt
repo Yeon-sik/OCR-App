@@ -116,7 +116,15 @@ class CanonicalIngestionUseCase(
         evidence: List<LocalEvidence> = emptyList(),
         inputOrigin: InputOrigin = InputOrigin.EXTERNAL_JSON,
         verificationBasis: VerificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+        requireArchivedEvidence: Boolean = false,
+        evidenceArchiveComplete: Boolean = false,
     ): CanonicalConfirmationResult {
+        if (requireArchivedEvidence && verificationBasis == VerificationBasis.SOURCE_EVIDENCE && !evidenceArchiveComplete) {
+            return CanonicalConfirmationResult(
+                IngestionStartResult.Failure(listOf("evidence_archive_required")),
+                envelope,
+            )
+        }
         val validation = validate(
             envelope = envelope,
             evidence = evidence,

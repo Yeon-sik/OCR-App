@@ -18,6 +18,7 @@ class DesktopServiceConfig(
 }
 
 class DesktopRuntimeConfig(
+    val evidence: DesktopServiceConfig,
     val priceTrace: DesktopServiceConfig,
     val nutrition: DesktopServiceConfig,
     val cashOs: DesktopServiceConfig,
@@ -34,6 +35,15 @@ class DesktopRuntimeConfig(
             fun value(name: String): String = environment[name] ?: fileValues[name].orEmpty()
 
             return DesktopRuntimeConfig(
+                evidence = DesktopServiceConfig(
+                    url = value("EVIDENCE_SUPABASE_URL"),
+                    publishableKey = value("EVIDENCE_SUPABASE_PUBLISHABLE_KEY"),
+                    email = value("EVIDENCE_EMAIL"),
+                    password = value("EVIDENCE_PASSWORD"),
+                    userId = value("EVIDENCE_USER_ID"),
+                    accessToken = value("EVIDENCE_ACCESS_TOKEN"),
+                    refreshToken = value("EVIDENCE_REFRESH_TOKEN"),
+                ),
                 priceTrace = DesktopServiceConfig(
                     url = value("PRICETRACE_SUPABASE_URL"),
                     publishableKey = value("PRICETRACE_SUPABASE_PUBLISHABLE_KEY"),
