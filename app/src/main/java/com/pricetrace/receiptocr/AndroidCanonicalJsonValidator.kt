@@ -7,6 +7,7 @@ import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionSession
 import com.pricetrace.receiptscanner.ingestion.IngestionStartResult
 import com.pricetrace.receiptscanner.ingestion.LocalEvidence
+import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec
@@ -120,11 +121,8 @@ class AndroidCanonicalJsonValidator(
                 is CanonicalImportResult.Success -> {
                     if (result.startResult is IngestionStartResult.Duplicate) {
                         materializer.abort()
-                        val restored = if (previous.ingestionId == result.session.ingestionId && previous.bundle != null) {
-                            previous
-                        } else {
-                            restoreBundleState()
-                        }
+                        val restored = restoreBundleState(result.session.ingestionId)
+                            ?: previous.takeIf { bundleStateStore == null && it.ingestionId == result.session.ingestionId && it.bundle != null }
                         return restored?.copy(
                             notice = "Duplicate bundle fingerprint: 기존 immutable session을 복구했습니다.",
                             error = null,
@@ -298,8 +296,12 @@ class AndroidCanonicalJsonValidator(
     }
 
     /** Restores durable bundle metadata and re-validates all paths before exposing the bundle again. */
-    suspend fun restoreBundleState(): AndroidCanonicalJsonValidatorState? {
-        val recovery = bundleStateStore?.loadActive() ?: return null
+    suspend fun restoreBundleState(ingestionId: String? = null): AndroidCanonicalJsonValidatorState? {
+        val recovery = if (ingestionId == null) {
+            bundleStateStore?.loadActive()
+        } else {
+            bundleStateStore?.load(ingestionId)
+        } ?: return null
         require(recovery.ingestionId.matches(Regex("[A-Za-z0-9._-]{1,160}"))) { "unsafe recovery ingestion id" }
         val root = requireNotNull(bundleRoot) { "Android bundle storage is not configured." }
             .resolve(recovery.ingestionId).canonicalFile
@@ -468,6 +470,11 @@ class AndroidCanonicalJsonValidator(
                 .joinToString(", ") { "${it.projection.wireValue}=${it.status.wireValue}" },
         )
         persistBundleState(submitted)
+        if (state.bundle != null && selected.all { projection ->
+                session?.projections?.firstOrNull { it.projection == projection }?.status == ProjectionStatus.UPLOADED
+            }) {
+            check(bundleStateStore?.clearActive() != false) { "Completed Android bundle could not be cleared from active recovery" }
+        }
         return submitted
     }
 }

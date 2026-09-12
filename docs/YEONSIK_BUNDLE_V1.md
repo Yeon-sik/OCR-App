@@ -57,4 +57,6 @@ Canonical artifacts, evidence objects, and evidence bindings use immutable inser
 
 Archive failure never triggers a downstream projection. The local bundle/session remains retryable; successful object uploads are reused by hash. Evidence archive retry and projection retry are separate operations.
 
-Android persists the imported manifest, materialized evidence paths, archive checkpoint/status, and verification-event status with synchronous commits. On process recovery, an interrupted archive is surfaced as retryable after paths and hashes are revalidated.
+Android persists the imported manifest, materialized evidence paths, archive checkpoint/status, and verification-event status with synchronous commits. On process recovery, an interrupted archive is surfaced as retryable after paths and hashes are revalidated. A duplicate import restores the durable record for the returned ingestion id, not whichever record is currently active. After every selected projection succeeds, the durable record and files remain available while `clearActive()` prevents automatic restore of the completed bundle.
+
+`20260912_evidence_store.sql` is the fresh/base schema. Existing Evidence DBs must apply the repeatable `20260912_evidence_store_followup.sql`, which backfills bundle fingerprints, moves legacy filenames into binding metadata, and recreates all affected RLS/storage policies safely.
