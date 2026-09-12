@@ -12,12 +12,14 @@ create table if not exists public.canonical_artifacts (
     id uuid primary key default gen_random_uuid(),
     owner_id uuid not null references auth.users(id) on delete cascade,
     canonical_sha256 text not null check (canonical_sha256 ~ '^[a-f0-9]{64}$'),
+    manifest_sha256 text not null check (manifest_sha256 ~ '^[a-f0-9]{64}$'),
+    bundle_fingerprint text not null check (bundle_fingerprint ~ '^[a-f0-9]{64}$'),
     schema_version text not null,
     mode text not null,
     canonical_json jsonb not null,
     manifest_json jsonb not null,
     created_at timestamptz not null default now(),
-    unique (owner_id, canonical_sha256)
+    unique (owner_id, bundle_fingerprint)
 );
 
 create table if not exists public.evidence_objects (
@@ -26,7 +28,6 @@ create table if not exists public.evidence_objects (
     sha256 text not null check (sha256 ~ '^[a-f0-9]{64}$'),
     mime_type text not null,
     byte_size bigint not null check (byte_size >= 0 and byte_size <= 52428800),
-    original_filename text not null,
     bucket text not null check (bucket = 'yeonsik-evidence'),
     storage_path text not null,
     created_at timestamptz not null default now(),
@@ -42,9 +43,34 @@ create table if not exists public.evidence_bindings (
     source_file_id text not null,
     source_type text not null,
     evidence_object_id uuid not null references public.evidence_objects(id) on delete restrict,
+    metadata jsonb not null default '{}'::jsonb check (jsonb_typeof(metadata) = 'object'),
     created_at timestamptz not null default now(),
     unique (canonical_artifact_id, source_file_id)
 );
+
+-- This file is also safe to apply after the first evidence-store revision. Old rows are
+-- retained, while new imports are keyed by the canonical+manifest bundle fingerprint.
+alter table public.canonical_artifacts add column if not exists manifest_sha256 text;
+alter table public.canonical_artifacts add column if not exists bundle_fingerprint text;
+alter table public.evidence_bindings add column if not exists metadata jsonb not null default '{}'::jsonb;
+alter table public.canonical_artifacts drop constraint if exists canonical_artifacts_owner_id_canonical_sha256_key;
+create unique index if not exists canonical_artifacts_owner_bundle_fingerprint_key
+    on public.canonical_artifacts (owner_id, bundle_fingerprint);
+
+do $$
+begin
+    if exists (
+        select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = 'evidence_objects' and column_name = 'original_filename'
+    ) then
+        update public.evidence_bindings b
+        set metadata = jsonb_build_object('original_filename', o.original_filename)
+        from public.evidence_objects o
+        where b.evidence_object_id = o.id
+          and (b.metadata is null or b.metadata = '{}'::jsonb);
+        alter table public.evidence_objects drop column original_filename;
+    end if;
+end $$;
 
 create table if not exists public.verification_events (
     id uuid primary key default gen_random_uuid(),
@@ -61,30 +87,52 @@ alter table public.evidence_objects enable row level security;
 alter table public.evidence_bindings enable row level security;
 alter table public.verification_events enable row level security;
 
-grant select, insert, update on public.canonical_artifacts to authenticated;
-grant select, insert, update on public.evidence_objects to authenticated;
-grant select, insert, update on public.evidence_bindings to authenticated;
+grant select, insert on public.canonical_artifacts to authenticated;
+grant select, insert on public.evidence_objects to authenticated;
+grant select, insert on public.evidence_bindings to authenticated;
 grant select, insert on public.verification_events to authenticated;
+revoke update, delete on public.canonical_artifacts, public.evidence_objects, public.evidence_bindings from authenticated;
 
-create policy canonical_artifacts_owner_all on public.canonical_artifacts
-for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
-create policy evidence_objects_owner_all on public.evidence_objects
-for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
-create policy evidence_bindings_owner_all on public.evidence_bindings
-for all using (
-    owner_id = auth.uid()
-    and exists (select 1 from public.canonical_artifacts a where a.id = canonical_artifact_id and a.owner_id = auth.uid())
-    and exists (select 1 from public.evidence_objects o where o.id = evidence_object_id and o.owner_id = auth.uid())
-) with check (
+drop policy if exists canonical_artifacts_owner_all on public.canonical_artifacts;
+drop policy if exists evidence_objects_owner_all on public.evidence_objects;
+drop policy if exists evidence_bindings_owner_all on public.evidence_bindings;
+drop policy if exists verification_events_owner_all on public.verification_events;
+drop policy if exists canonical_artifacts_owner_select on public.canonical_artifacts;
+drop policy if exists canonical_artifacts_owner_insert on public.canonical_artifacts;
+drop policy if exists evidence_objects_owner_select on public.evidence_objects;
+drop policy if exists evidence_objects_owner_insert on public.evidence_objects;
+drop policy if exists evidence_bindings_owner_select on public.evidence_bindings;
+drop policy if exists evidence_bindings_owner_insert on public.evidence_bindings;
+drop policy if exists verification_events_owner_select on public.verification_events;
+drop policy if exists verification_events_owner_insert on public.verification_events;
+
+create policy canonical_artifacts_owner_select on public.canonical_artifacts
+for select using (owner_id = auth.uid());
+create policy canonical_artifacts_owner_insert on public.canonical_artifacts
+for insert with check (owner_id = auth.uid());
+create policy evidence_objects_owner_select on public.evidence_objects
+for select using (owner_id = auth.uid());
+create policy evidence_objects_owner_insert on public.evidence_objects
+for insert with check (owner_id = auth.uid());
+create policy evidence_bindings_owner_select on public.evidence_bindings
+for select using (
     owner_id = auth.uid()
     and exists (select 1 from public.canonical_artifacts a where a.id = canonical_artifact_id and a.owner_id = auth.uid())
     and exists (select 1 from public.evidence_objects o where o.id = evidence_object_id and o.owner_id = auth.uid())
 );
-create policy verification_events_owner_all on public.verification_events
-for all using (
+create policy evidence_bindings_owner_insert on public.evidence_bindings
+for insert with check (
     owner_id = auth.uid()
     and exists (select 1 from public.canonical_artifacts a where a.id = canonical_artifact_id and a.owner_id = auth.uid())
-) with check (
+    and exists (select 1 from public.evidence_objects o where o.id = evidence_object_id and o.owner_id = auth.uid())
+);
+create policy verification_events_owner_select on public.verification_events
+for select using (
+    owner_id = auth.uid()
+    and exists (select 1 from public.canonical_artifacts a where a.id = canonical_artifact_id and a.owner_id = auth.uid())
+);
+create policy verification_events_owner_insert on public.verification_events
+for insert with check (
     owner_id = auth.uid()
     and exists (select 1 from public.canonical_artifacts a where a.id = canonical_artifact_id and a.owner_id = auth.uid())
 );

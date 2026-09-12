@@ -48,6 +48,26 @@ data class YeonsikBundle(
     val manifestJson: String,
     val canonicalJson: String,
     val envelope: YeonsikOcrEnvelope,
+    /** SHA-256 of the exact UTF-8 manifest.json bytes that were imported. */
+    val manifestSha256: String = sha256(manifestJson.toByteArray(StandardCharsets.UTF_8)),
+) {
+    init {
+        require(manifestSha256 == sha256(manifestJson.toByteArray(StandardCharsets.UTF_8))) {
+            "manifest hash does not match manifest.json bytes"
+        }
+        require(manifest.canonicalSha256 == sha256(canonicalJson.toByteArray(StandardCharsets.UTF_8))) {
+            "canonical hash does not match canonical.json bytes"
+        }
+    }
+
+    /** Import identity: canonical content plus the evidence manifest, never canonical content alone. */
+    val bundleFingerprint: String
+        get() = bundleFingerprintFor(manifest.canonicalSha256, manifestSha256)
+}
+
+fun bundleFingerprintFor(canonicalSha256: String, manifestSha256: String): String = sha256(
+    "yeonsik-bundle.v1\ncanonical_sha256=$canonicalSha256\nmanifest_sha256=$manifestSha256"
+        .toByteArray(StandardCharsets.UTF_8),
 )
 
 /** Platform adapters provide app-private staging. abort() must remove partial materialization. */
@@ -240,7 +260,13 @@ object YeonsikBundleReader {
                     require(digest.hex() == item.sha256) { "evidence hash mismatch: ${item.path}" }
                 }
                 materializer.complete()
-                return YeonsikBundle(manifest, manifestJson, canonicalJson, envelope)
+                return YeonsikBundle(
+                    manifest = manifest,
+                    manifestJson = manifestJson,
+                    canonicalJson = canonicalJson,
+                    envelope = envelope,
+                    manifestSha256 = sha256(manifestBytes),
+                )
             }
         } catch (error: Exception) {
             runCatching { materializer.abort() }

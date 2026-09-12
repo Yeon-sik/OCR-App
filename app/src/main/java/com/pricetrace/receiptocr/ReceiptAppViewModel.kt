@@ -326,6 +326,7 @@ class ReceiptAppViewModel(
         container.canonicalIngestionUseCase,
         container.evidenceArchivePort,
         container.bundleDirectory,
+        bundleStateStore = container.bundleStateStore,
     )
 
     private val mutableUiState = MutableStateFlow(ReceiptAppUiState())
@@ -369,6 +370,23 @@ class ReceiptAppViewModel(
         refreshCashOsConnectionState()
         refreshEvidenceConnectionState()
         autoSignInFromBuildEnvironment()
+        viewModelScope.launch {
+            try {
+                val restored = canonicalJsonValidator.restoreBundleState()
+                if (restored != null) {
+                    mutableCanonicalJsonValidatorState.value = restored
+                    mutableUiState.value = mutableUiState.value.copy(
+                        screen = AppScreen.CANONICAL_JSON_VALIDATOR,
+                        message = null,
+                    )
+                }
+            } catch (error: Exception) {
+                mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(
+                    error = "저장된 bundle을 복구하지 못했습니다: ${error.message ?: error.javaClass.simpleName}",
+                    notice = null,
+                )
+            }
+        }
     }
 
     private fun autoSignInFromBuildEnvironment() {
@@ -577,10 +595,15 @@ class ReceiptAppViewModel(
     }
 
     fun updateCanonicalJsonValidatorRawJson(value: String) {
-        mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(
-            rawJson = value,
-            error = null,
-        )
+        val current = mutableCanonicalJsonValidatorState.value
+        if (current.bundle != null || current.bundleValidationStatus != null) {
+            mutableCanonicalJsonValidatorState.value = current.copy(
+                error = "Bundle canonical JSON은 읽기 전용입니다. JSON 가져오기는 별도 ingestion으로 시작합니다.",
+                notice = null,
+            )
+        } else {
+            mutableCanonicalJsonValidatorState.value = current.copy(rawJson = value, error = null)
+        }
     }
 
     fun setCanonicalJsonValidatorBasis(value: VerificationBasis) {
@@ -619,7 +642,9 @@ class ReceiptAppViewModel(
                 )
                 return@launch
             }
-            runCanonicalJsonValidator { state -> canonicalJsonValidator.importJson(text, state) }
+            runCanonicalJsonValidator { state ->
+                canonicalJsonValidator.importJson(text, state, startNewIngestion = true)
+            }
         }
     }
 

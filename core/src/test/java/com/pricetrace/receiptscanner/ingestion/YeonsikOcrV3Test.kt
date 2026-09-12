@@ -434,7 +434,7 @@ class YeonsikOcrV3Test {
         val envelope = YeonsikOcrV3Json.decode(retailJson(), "v3-external-review")
         assertEquals(IngestionReviewStatus.NEEDS_REVIEW, envelope.review.status)
         assertEquals(VerificationBasis.SOURCE_EVIDENCE, envelope.review.verificationBasis)
-        assertTrue(envelope.review.blockingIssues.isNotEmpty())
+        assertTrue(envelope.review.blockingIssues.none { it == "source_image_required" })
 
         val persistedInput = JsonObject(parse(retailJson()).toMutableMap().apply {
             put("review", reviewJson(includeAuthorityFields = true))

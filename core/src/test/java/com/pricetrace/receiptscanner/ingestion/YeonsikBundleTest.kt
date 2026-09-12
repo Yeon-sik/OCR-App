@@ -1,6 +1,7 @@
 package com.pricetrace.receiptscanner.ingestion
 
 import com.pricetrace.receiptscanner.input.InputOrigin
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -60,6 +61,78 @@ class YeonsikBundleTest {
         val result = readBundle(bundle(example("yeonsik-ocr.v4.purchase.text-only.example.json"), emptyMap())).bundle
         assertTrue(result.manifest.evidence.isEmpty())
         assertTrue(result.envelope.source.sourceFiles.isEmpty())
+    }
+
+    @Test
+    fun sameCanonicalWithDifferentEvidenceGetsDifferentBundleIdentityAndStaysIsolatedFromLegacy() = runBlocking {
+        val canonical = example("yeonsik-ocr.v3.restaurant.example.json")
+        val first = readBundle(
+            bundle(
+                canonical,
+                mapOf("menu-photo-1" to Evidence(SourceAttachmentType.MENU_PHOTO, "menu-a.jpg", "menu-a".toByteArray())),
+            ),
+        ).bundle
+        val second = readBundle(
+            bundle(
+                canonical,
+                mapOf("menu-photo-1" to Evidence(SourceAttachmentType.MENU_PHOTO, "menu-b.jpg", "menu-b".toByteArray())),
+            ),
+        ).bundle
+        assertEquals(first.manifest.canonicalSha256, second.manifest.canonicalSha256)
+        assertTrue(first.manifestSha256 != second.manifestSha256)
+        assertTrue(first.bundleFingerprint != second.bundleFingerprint)
+
+        val store = InMemoryIngestionSessionStore()
+        val orchestrator = IngestionOrchestrator(store, submitters = emptyMap())
+        val firstEvidence = first.manifest.evidence.map { LocalEvidence(it.sourceFileId, it.type, true) }
+        val secondEvidence = second.manifest.evidence.map { LocalEvidence(it.sourceFileId, it.type, true) }
+        assertTrue(
+            orchestrator.start(
+                "bundle-a",
+                "document-a",
+                first.envelope,
+                firstEvidence,
+                InputOrigin.EXTERNAL_JSON,
+                first.bundleFingerprint,
+            ) is IngestionStartResult.Success,
+        )
+        assertTrue(
+            orchestrator.start(
+                "bundle-b",
+                "document-b",
+                second.envelope,
+                secondEvidence,
+                InputOrigin.EXTERNAL_JSON,
+                second.bundleFingerprint,
+            ) is IngestionStartResult.Success,
+        )
+        assertTrue(
+            orchestrator.start(
+                "legacy-json",
+                "document-legacy",
+                first.envelope,
+                firstEvidence,
+                InputOrigin.EXTERNAL_JSON,
+            ) is IngestionStartResult.Success,
+        )
+
+        val useCaseStore = InMemoryIngestionSessionStore()
+        val useCase = CanonicalIngestionUseCase(useCaseStore)
+        val imported = useCase.importJson(
+            value = first.canonicalJson,
+            localDocumentId = "document-use-case",
+            ingestionId = "bundle-use-case",
+            evidence = firstEvidence,
+            bundleFingerprint = first.bundleFingerprint,
+        )
+        assertTrue(imported is CanonicalImportResult.Success)
+        val legacyTransition = useCase.importJson(
+            value = first.canonicalJson,
+            localDocumentId = "document-use-case",
+            ingestionId = "bundle-use-case",
+        )
+        assertTrue(legacyTransition is CanonicalImportResult.Failure)
+        assertEquals(listOf("bundle_legacy_transition_forbidden"), (legacyTransition as CanonicalImportResult.Failure).issues)
     }
 
     @Test

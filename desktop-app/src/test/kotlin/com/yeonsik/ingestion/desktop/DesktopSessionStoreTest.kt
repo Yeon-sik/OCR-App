@@ -69,8 +69,13 @@ class DesktopSessionStoreTest {
             ),
             verificationEventRecorded = true,
         )
-        store.saveRecord(DesktopSessionRecord(session, "{}", "{}", emptyList(), metadata))
-        assertEquals(metadata, store.loadRecord(session.ingestionId)?.bundle)
+        val bundleSession = session.copy(
+            importFingerprint = metadata.bundleFingerprint,
+            bundleFingerprint = metadata.bundleFingerprint,
+        )
+        store.saveRecord(DesktopSessionRecord(bundleSession, "{}", "{}", emptyList(), metadata))
+        assertEquals(metadata, store.loadRecord(bundleSession.ingestionId)?.bundle)
+        assertEquals(bundleSession, store.findByBundleFingerprint(metadata.bundleFingerprint))
         val persisted = Files.readString(directory.resolve("desktop-test.json"))
         assertFalse(persisted.contains("access_token"))
         assertFalse(persisted.contains("refresh_token"))

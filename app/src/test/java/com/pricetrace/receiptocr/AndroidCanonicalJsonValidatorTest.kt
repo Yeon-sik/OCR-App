@@ -80,6 +80,81 @@ class AndroidCanonicalJsonValidatorTest {
         assertTrue(state.bundle?.verificationEventRecorded == true)
         assertEquals(IngestionReviewStatus.READY, state.envelope?.review?.status)
     }
+
+    @Test
+    fun `android bundle recovery restores manifest paths checkpoint and verification event`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        val archive = SuccessfulArchivePort()
+        val bundleRoot = Files.createTempDirectory("android-bundle-recovery").toFile()
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = archive,
+            bundleRoot = bundleRoot,
+            newLocalDocumentId = { "android-recovery-document" },
+            newIngestionId = { "android-recovery-ingestion" },
+            bundleStateStore = recoveryStore,
+        )
+        var state = validator.importBundle(
+            ByteArrayInputStream(evidenceBundle(readExample("yeonsik-ocr.v3.restaurant.example.json"))),
+            "recovery.yeonsik",
+            AndroidCanonicalJsonValidatorState(),
+        )
+        state = validator.confirm(state)
+        assertTrue(state.bundle?.verificationEventRecorded == true)
+
+        val restarted = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = archive,
+            bundleRoot = bundleRoot,
+            bundleStateStore = recoveryStore,
+        ).restoreBundleState()
+
+        assertNotNull(restarted)
+        assertEquals(state.bundle?.manifestJson, restarted?.bundle?.manifestJson)
+        assertEquals(state.bundle?.evidencePaths, restarted?.bundle?.evidencePaths)
+        assertTrue(restarted?.bundle?.evidencePaths?.values?.all { File(it).isFile } == true)
+        assertEquals(state.bundle?.archiveCheckpoint, restarted?.bundle?.archiveCheckpoint)
+        assertTrue(restarted?.bundle?.verificationEventRecorded == true)
+        assertEquals(state.ingestionId, restarted?.ingestionId)
+    }
+
+    @Test
+    fun `bundle parse stays locked while standalone JSON starts a new ingestion`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        var ingestionSequence = 0
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = SuccessfulArchivePort(),
+            bundleRoot = Files.createTempDirectory("android-bundle-isolation").toFile(),
+            newLocalDocumentId = { "android-isolation-document-${++ingestionSequence}" },
+            newIngestionId = { "android-isolation-ingestion-${ingestionSequence}" },
+            bundleStateStore = recoveryStore,
+        )
+        val bundleState = validator.importBundle(
+            ByteArrayInputStream(textOnlyBundle(readExample("yeonsik-ocr.v4.purchase.text-only.example.json"))),
+            "isolation.yeonsik",
+            AndroidCanonicalJsonValidatorState(),
+        )
+        val blocked = validator.importJson(
+            bundleState.rawJson,
+            bundleState,
+        )
+        assertEquals(bundleState.ingestionId, blocked.ingestionId)
+        assertNotNull(blocked.bundle)
+        assertTrue(blocked.error.orEmpty().contains("read-only"))
+
+        val standalone = validator.importJson(
+            bundleState.rawJson,
+            blocked,
+            startNewIngestion = true,
+        )
+        assertEquals(null, standalone.bundle)
+        assertTrue(standalone.ingestionId != bundleState.ingestionId)
+        assertEquals(null, standalone.session?.bundleFingerprint)
+        assertNotNull(sessionStore.get(bundleState.ingestionId!!))
+    }
     @Test
     fun `android validator uses the same core plan and confirms a no image manual review`() = runBlocking {
         val useCase = CanonicalIngestionUseCase(
@@ -228,7 +303,10 @@ class AndroidCanonicalJsonValidatorTest {
             request: EvidenceArchiveRequest,
             checkpoint: EvidenceArchiveCheckpoint,
         ): EvidenceArchiveResult = EvidenceArchiveResult.Success(
-            checkpoint.copy(canonicalArtifactId = checkpoint.canonicalArtifactId ?: "artifact-1"),
+            checkpoint.copy(
+                canonicalArtifactId = checkpoint.canonicalArtifactId ?: "artifact-1",
+                bundleFingerprint = request.bundle.bundleFingerprint,
+            ),
         )
 
         override suspend fun recordVerification(
@@ -251,6 +329,41 @@ class AndroidCanonicalJsonValidatorTest {
             zip.closeEntry()
             zip.putNextEntry(ZipEntry("manifest.json"))
             zip.write(YeonsikBundleManifestCodec.encode(manifest).toByteArray())
+            zip.closeEntry()
+        }
+        return output.toByteArray()
+    }
+
+    private fun evidenceBundle(canonical: String): ByteArray {
+        val canonicalBytes = canonical.toByteArray()
+        val evidenceBytes = "menu evidence".toByteArray()
+        val evidence = com.pricetrace.receiptscanner.ingestion.YeonsikBundleEvidence(
+            sourceFileId = "menu-photo-1",
+            type = com.pricetrace.receiptscanner.ingestion.SourceAttachmentType.MENU_PHOTO,
+            path = "evidence/menu.jpg",
+            sha256 = MessageDigest.getInstance("SHA-256").digest(evidenceBytes)
+                .joinToString("") { "%02x".format(it) },
+            mimeType = "image/jpeg",
+            byteSize = evidenceBytes.size.toLong(),
+            originalFilename = "menu.jpg",
+        )
+        val manifest = YeonsikBundleManifest(
+            YEONSIK_BUNDLE_VERSION,
+            "canonical.json",
+            MessageDigest.getInstance("SHA-256").digest(canonicalBytes)
+                .joinToString("") { "%02x".format(it) },
+            listOf(evidence),
+        )
+        val output = ByteArrayOutputStream()
+        ZipOutputStream(output).use { zip ->
+            zip.putNextEntry(ZipEntry("canonical.json"))
+            zip.write(canonicalBytes)
+            zip.closeEntry()
+            zip.putNextEntry(ZipEntry("manifest.json"))
+            zip.write(YeonsikBundleManifestCodec.encode(manifest).toByteArray())
+            zip.closeEntry()
+            zip.putNextEntry(ZipEntry("evidence/menu.jpg"))
+            zip.write(evidenceBytes)
             zip.closeEntry()
         }
         return output.toByteArray()

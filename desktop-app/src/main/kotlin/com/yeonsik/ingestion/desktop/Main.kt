@@ -75,6 +75,7 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
         .map { it.projection }
         .toSet()
     val effectiveSelectedProjections = selectedProjections?.intersect(activeProjections) ?: activeProjections
+    val bundleActive = state.bundleMetadata != null || state.bundleValidationStatus != null
     LaunchedEffect(state.ingestionId) {
         selectedProjections = null
     }
@@ -110,10 +111,10 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                                     launchIo { controller.importJson(Files.readString(file)) }
                                 }
                             },
-                        ) { Text("Open JSON (legacy)") }
+                        ) { Text("Open JSON (new ingestion)") }
                         Button(
-                            enabled = !state.busy && state.rawJson.isNotBlank(),
-                            onClick = { launchIo { controller.importJson() } },
+                            enabled = !state.busy && !bundleActive && state.rawJson.isNotBlank(),
+                            onClick = { launchIo { controller.parseJson() } },
                         ) { Text("Parse & Validate") }
                         OutlinedButton(
                             enabled = !state.busy,
@@ -127,8 +128,10 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                     TextField(
                         value = state.rawJson,
                         onValueChange = controller::updateRawJson,
+                        enabled = !state.busy && !bundleActive,
+                        readOnly = bundleActive,
                         modifier = Modifier.fillMaxWidth().weight(1f),
-                        label = { Text("External JSON (editable)") },
+                        label = { Text(if (bundleActive) "Bundle canonical JSON (read-only)" else "External JSON (editable)") },
                         placeholder = { Text("Open or drop a yeonsik-ocr.v1/v2/v3 JSON file") },
                         minLines = 14,
                         maxLines = 40,

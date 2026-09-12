@@ -74,7 +74,14 @@ class DesktopIngestionController(
     )
 
     fun updateRawJson(value: String) {
-        _state.value = _state.value.copy(rawJson = value, error = null)
+        if (_state.value.bundleMetadata != null || _state.value.bundleValidationStatus != null) {
+            _state.value = _state.value.copy(
+                error = "Bundle canonical JSON is read-only. Open JSON to start a separate ingestion.",
+                notice = null,
+            )
+        } else {
+            _state.value = _state.value.copy(rawJson = value, error = null)
+        }
     }
 
     suspend fun importBundle(path: Path) {
@@ -100,6 +107,7 @@ class DesktopIngestionController(
                 ingestionId = ingestionId,
                 evidence = localEvidence(evidence),
                 inputOrigin = InputOrigin.EXTERNAL_JSON,
+                bundleFingerprint = importedBundle.bundleFingerprint,
             )
             when (result) {
                 is CanonicalImportResult.Failure -> error(
@@ -107,26 +115,36 @@ class DesktopIngestionController(
                         ?: result.issues.joinToString(", "),
                 )
                 is CanonicalImportResult.Success -> {
-                    val metadata = DesktopBundleMetadata(
+                    if (result.startResult is IngestionStartResult.Duplicate) {
+                        materializer.abort()
+                        val existing = store.loadRecord(result.session.ingestionId)
+                            ?: error("Duplicate bundle session is missing its durable record.")
+                        loadRecord(existing, "Duplicate bundle fingerprint: loaded existing immutable session.")
+                        archiveAfterImport = existing.bundle?.let {
+                            it.archiveStatus != DesktopEvidenceArchiveStatus.ARCHIVED
+                        } == true
+                    } else {
+                        val metadata = DesktopBundleMetadata(
                         sourcePath = path.toAbsolutePath().normalize().toString(),
                         canonicalSha256 = importedBundle.manifest.canonicalSha256,
                         manifestJson = importedBundle.manifestJson,
                         validationStatus = DesktopBundleValidationStatus.VALID,
                         archiveStatus = DesktopEvidenceArchiveStatus.NOT_STARTED,
-                    )
-                    val canonicalJson = YeonsikOcrEnvelopeCodec.encode(result.envelope)
-                    persistRecord(result.session, importedBundle.canonicalJson, canonicalJson, evidence, metadata)
-                    publish(
-                        result.session,
-                        result.envelope,
-                        importedBundle.canonicalJson,
-                        canonicalJson,
-                        evidence,
-                        "Bundle validated and evidence bound. Starting archive.",
-                        null,
-                        metadata,
-                    )
-                    archiveAfterImport = true
+                        )
+                        val canonicalJson = YeonsikOcrEnvelopeCodec.encode(result.envelope)
+                        persistRecord(result.session, importedBundle.canonicalJson, canonicalJson, evidence, metadata)
+                        publish(
+                            result.session,
+                            result.envelope,
+                            importedBundle.canonicalJson,
+                            canonicalJson,
+                            evidence,
+                            "Bundle validated and evidence bound. Starting archive.",
+                            null,
+                            metadata,
+                        )
+                        archiveAfterImport = true
+                    }
                 }
             }
         } catch (error: Exception) {
@@ -164,6 +182,7 @@ class DesktopIngestionController(
                 manifestJson = metadata.manifestJson,
                 canonicalJson = current.rawJson,
                 envelope = envelope,
+                manifestSha256 = metadata.manifestSha256,
             )
             val result = bundle.evidenceArchivePort.archive(
                 EvidenceArchiveRequest(importedBundle) { sourceFileId ->
@@ -208,22 +227,50 @@ class DesktopIngestionController(
         }
     }
 
-    suspend fun importJson(value: String = _state.value.rawJson) {
+    /** Opens a standalone JSON import and always gives it a new ingestion identity. */
+    suspend fun importJson(value: String = _state.value.rawJson) = importJsonInternal(value, startNewIngestion = true)
+
+    /** Parses the editor draft in-place; a bundle can never be converted through this path. */
+    suspend fun parseJson() = importJsonInternal(_state.value.rawJson, startNewIngestion = false)
+
+    private suspend fun importJsonInternal(value: String, startNewIngestion: Boolean) {
         beginBusy()
         try {
-            if (_state.value.bundleMetadata != null || _state.value.bundleValidationStatus != null) {
-                _state.value = _state.value.copy(
+            val current = _state.value
+            val bundleActive = current.bundleMetadata != null || current.bundleValidationStatus != null
+            if (!startNewIngestion && bundleActive) {
+                _state.value = current.copy(
+                    error = "Bundle canonical JSON is read-only. Open JSON to start a separate ingestion.",
+                    notice = null,
+                )
+                return
+            }
+            if (startNewIngestion) {
+                _state.value = current.copy(
+                    rawJson = value,
+                    canonicalJson = "",
+                    schema = null,
+                    ingestionId = null,
+                    localDocumentId = null,
+                    session = null,
+                    evidence = emptyList(),
+                    artifacts = emptyList(),
                     bundleMetadata = null,
                     bundleValidationStatus = null,
-                    evidence = emptyList(),
+                    error = null,
+                    notice = null,
                 )
             }
-            val localDocumentId = _state.value.localDocumentId ?: newLocalDocumentId()
+            val state = _state.value
+            val localDocumentId = if (startNewIngestion) newLocalDocumentId()
+            else state.localDocumentId ?: newLocalDocumentId()
+            val ingestionId = if (startNewIngestion) newIngestionId()
+            else state.ingestionId ?: newIngestionId()
             val result = useCase.importJson(
                 value = value,
                 localDocumentId = localDocumentId,
-                ingestionId = _state.value.ingestionId ?: newIngestionId(),
-                evidence = localEvidence(_state.value.evidence),
+                ingestionId = ingestionId,
+                evidence = if (startNewIngestion) emptyList() else localEvidence(state.evidence),
                 inputOrigin = InputOrigin.EXTERNAL_JSON,
             )
             when (result) {

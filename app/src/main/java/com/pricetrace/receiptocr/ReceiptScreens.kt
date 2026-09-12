@@ -898,7 +898,7 @@ private fun SessionListScreen(
                 enabled = !isBusy,
                 modifier = Modifier.fillMaxWidth().testTag("pick_canonical_json_button"),
             ) {
-                Text("올인원 JSON 검증기 (legacy)")
+                Text("올인원 JSON 검증기 (별도 ingestion)")
             }
         }
         item {
@@ -1064,6 +1064,7 @@ private fun CanonicalJsonValidatorScreen(
     val plan = state.plan
     val eligible = plan?.eligible.orEmpty().sortedBy(IngestionProjection::wireValue)
     val disabled = plan?.disabled.orEmpty().sortedBy(IngestionProjection::wireValue)
+    val bundleActive = state.bundle != null || state.bundleValidationStatus != null
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("canonical_json_validator"),
         contentPadding = PaddingValues(20.dp),
@@ -1131,8 +1132,9 @@ private fun CanonicalJsonValidatorScreen(
             OutlinedTextField(
                 value = state.rawJson,
                 onValueChange = onJsonChanged,
-                enabled = !state.busy,
-                label = { Text("JSON") },
+                enabled = !state.busy && !bundleActive,
+                readOnly = bundleActive,
+                label = { Text(if (bundleActive) "Bundle canonical JSON (읽기 전용)" else "JSON") },
                 minLines = 12,
                 maxLines = 24,
                 modifier = Modifier.fillMaxWidth().testTag("canonical_json_input"),
@@ -1143,7 +1145,7 @@ private fun CanonicalJsonValidatorScreen(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MaterialOutlinedButton(
                     onClick = onParse,
-                    enabled = !state.busy && state.rawJson.isNotBlank(),
+                    enabled = !state.busy && !bundleActive && state.rawJson.isNotBlank(),
                     modifier = Modifier.weight(1f).testTag("canonical_json_parse_button"),
                 ) { Text("파싱·저장") }
                 MaterialButton(

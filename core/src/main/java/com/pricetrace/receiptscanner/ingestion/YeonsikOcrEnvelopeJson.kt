@@ -88,7 +88,7 @@ object YeonsikOcrEnvelopeJson {
             targets = targets,
             review = IngestionReview(
                 status = IngestionReviewStatus.NEEDS_REVIEW,
-                blockingIssues = listOf("source_image_required"),
+                blockingIssues = emptyList(),
                 warnings = root.objectValue("review").arrayValue("warnings").strings(),
             ),
         )

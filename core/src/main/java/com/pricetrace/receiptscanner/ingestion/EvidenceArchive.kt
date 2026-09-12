@@ -5,7 +5,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -74,6 +73,8 @@ data class EvidenceArchiveCheckpoint(
     val canonicalArtifactId: String? = null,
     val evidenceObjectIdsBySha256: Map<String, String> = emptyMap(),
     val boundSourceFileIds: Set<String> = emptySet(),
+    /** Prevents a checkpoint from being replayed against a different evidence manifest. */
+    val bundleFingerprint: String? = null,
 )
 
 data class EvidenceArchiveRequest(
@@ -110,6 +111,9 @@ data class EvidenceHttpRequest(
     val url: String,
     val headers: Map<String, String>,
     val body: ByteArray? = null,
+    /** Re-openable body source used by streaming uploads and one-shot 401 retries. */
+    val bodyStream: (() -> InputStream)? = null,
+    val contentLength: Long? = body?.size?.toLong(),
 )
 
 data class EvidenceHttpResponse(val statusCode: Int, val body: String)
@@ -127,13 +131,19 @@ class HttpsEvidenceHttpTransport : EvidenceHttpTransport {
             readTimeout = 30_000
             instanceFollowRedirects = false
             request.headers.forEach(::setRequestProperty)
-            request.body?.let { bytes ->
+            if (request.body != null || request.bodyStream != null) {
                 doOutput = true
-                setFixedLengthStreamingMode(bytes.size)
+                request.contentLength?.let(::setFixedLengthStreamingMode)
+                    ?: setChunkedStreamingMode(DEFAULT_BUFFER_SIZE)
             }
         }
         try {
-            request.body?.let { bytes -> connection.outputStream.use { it.write(bytes) } }
+            if (request.body != null || request.bodyStream != null) {
+                connection.outputStream.use { output ->
+                    request.body?.let(output::write)
+                    request.bodyStream?.invoke()?.use { input -> input.copyTo(output) }
+                }
+            }
             val status = connection.responseCode
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
             EvidenceHttpResponse(status, stream?.use(::readLimited).orEmpty())
@@ -166,6 +176,11 @@ class EvidenceSupabaseArchivePort(
 ) : EvidenceArchivePort {
     private val json = Json { ignoreUnknownKeys = false; explicitNulls = true }
 
+    private data class AuthContext(
+        var config: EvidenceSupabaseConfig,
+        var refreshAttempted: Boolean = false,
+    )
+
     suspend fun signIn(email: String, password: String): Result<EvidenceSupabaseConfig> = runCatching {
         ensureAuthenticated(email.trim(), password, force = true)
     }
@@ -176,20 +191,24 @@ class EvidenceSupabaseArchivePort(
     ): EvidenceArchiveResult {
         var progress = checkpoint
         return try {
-            val config = ensureAuthenticated()
-            val artifactId = progress.canonicalArtifactId ?: upsertCanonical(config, request.bundle)
+            require(checkpoint.bundleFingerprint == null || checkpoint.bundleFingerprint == request.bundle.bundleFingerprint) {
+                "archive checkpoint belongs to a different bundle"
+            }
+            progress = checkpoint.copy(bundleFingerprint = request.bundle.bundleFingerprint)
+            val auth = AuthContext(ensureAuthenticated())
+            val artifactId = progress.canonicalArtifactId ?: insertOrReuseCanonical(auth, request.bundle)
             progress = progress.copy(canonicalArtifactId = artifactId)
             request.bundle.manifest.evidence.forEach { item ->
                 val objectId = progress.evidenceObjectIdsBySha256[item.sha256] ?: run {
-                    uploadBlob(config, item, request.openEvidence(item.sourceFileId))
-                    upsertEvidenceObject(config, item).also { id ->
+                    uploadBlob(auth, item) { request.openEvidence(item.sourceFileId) }
+                    insertOrReuseEvidenceObject(auth, item).also { id ->
                         progress = progress.copy(
                             evidenceObjectIdsBySha256 = progress.evidenceObjectIdsBySha256 + (item.sha256 to id),
                         )
                     }
                 }
                 if (item.sourceFileId !in progress.boundSourceFileIds) {
-                    upsertBinding(config, artifactId, item, objectId)
+                    insertOrReuseBinding(auth, artifactId, item, objectId)
                     progress = progress.copy(boundSourceFileIds = progress.boundSourceFileIds + item.sourceFileId)
                 }
             }
@@ -205,15 +224,15 @@ class EvidenceSupabaseArchivePort(
         result: String,
         issues: List<String>,
     ): EvidenceVerificationEventResult = try {
-        val config = ensureAuthenticated()
+        val auth = AuthContext(ensureAuthenticated())
         val body = buildJsonObject {
-            put("owner_id", config.userId)
+            put("owner_id", auth.config.userId)
             put("canonical_artifact_id", canonicalArtifactId)
             put("basis", basis.wireValue)
             put("result", result)
             put("issues", JsonArray(issues.map(::JsonPrimitive)))
         }.encoded()
-        executeJson(config, "POST", "/rest/v1/verification_events", body, prefer = "return=minimal")
+        executeJson(auth, "POST", "/rest/v1/verification_events", body, prefer = "return=minimal")
             .requireSuccess("verification event")
         EvidenceVerificationEventResult.Success
     } catch (error: Exception) {
@@ -245,114 +264,210 @@ class EvidenceSupabaseArchivePort(
         return store.saveSession(userId, providedEmail, accessToken, refreshToken).getOrThrow()
     }
 
-    private suspend fun upsertCanonical(config: EvidenceSupabaseConfig, bundle: YeonsikBundle): String {
+    private suspend fun insertOrReuseCanonical(auth: AuthContext, bundle: YeonsikBundle): String {
+        val config = auth.config
         val body = buildJsonObject {
             put("owner_id", config.userId)
             put("canonical_sha256", bundle.manifest.canonicalSha256)
+            put("manifest_sha256", bundle.manifestSha256)
+            put("bundle_fingerprint", bundle.bundleFingerprint)
             put("schema_version", bundle.envelope.schemaVersion)
             put("mode", bundle.envelope.mode.wireValue)
             put("canonical_json", json.parseToJsonElement(bundle.canonicalJson))
             put("manifest_json", json.parseToJsonElement(bundle.manifestJson))
         }.encoded()
         val response = executeJson(
-            config,
+            auth,
             "POST",
-            "/rest/v1/canonical_artifacts?on_conflict=owner_id%2Ccanonical_sha256&select=id",
+            "/rest/v1/canonical_artifacts?on_conflict=owner_id%2Cbundle_fingerprint&select=id",
             body,
-            "resolution=merge-duplicates,return=representation",
-        ).requireSuccess("canonical artifact upsert")
-        return response.firstId()
+            "resolution=ignore-duplicates,return=representation",
+        ).requireSuccess("canonical artifact insert-or-reuse")
+        return response.firstIdOrNull() ?: findCanonical(auth, bundle)
     }
 
     private suspend fun uploadBlob(
-        config: EvidenceSupabaseConfig,
+        auth: AuthContext,
         item: YeonsikBundleEvidence,
-        input: InputStream,
+        openEvidence: () -> InputStream,
     ) {
-        val bytes = input.use { source ->
-            val output = ByteArrayOutputStream()
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            var total = 0L
-            while (true) {
-                val count = source.read(buffer)
-                if (count < 0) break
-                total += count
-                require(total <= YeonsikBundleReader.MAX_SINGLE_EVIDENCE_BYTES) { "evidence upload exceeds limit" }
-                output.write(buffer, 0, count)
-            }
-            require(total == item.byteSize) { "local evidence size changed before archive" }
-            output.toByteArray()
-        }
-        require(sha256(bytes) == item.sha256) { "local evidence hash changed before archive" }
-        val response = transport.execute(
+        validateEvidence(openEvidence, item)
+        val config = auth.config
+        val response = executeAuthenticated(auth) { refreshed ->
             EvidenceHttpRequest(
-                "POST",
-                config.url.trimEnd('/') + "/storage/v1/object/yeonsik-evidence/${storagePath(config, item)}",
-                authHeaders(config) + mapOf("Content-Type" to item.mimeType, "x-upsert" to "false"),
-                bytes,
-            ),
-        )
+                method = "POST",
+                url = refreshed.url.trimEnd('/') + "/storage/v1/object/yeonsik-evidence/${storagePath(refreshed, item)}",
+                headers = authHeaders(refreshed) + mapOf("Content-Type" to item.mimeType, "x-upsert" to "false"),
+                bodyStream = openEvidence,
+                contentLength = item.byteSize,
+            )
+        }
         require(response.statusCode in 200..299 || response.statusCode == 409) {
             "evidence blob archive failed (${response.statusCode})"
         }
     }
 
-    private suspend fun upsertEvidenceObject(config: EvidenceSupabaseConfig, item: YeonsikBundleEvidence): String {
+    private fun validateEvidence(openEvidence: () -> InputStream, item: YeonsikBundleEvidence) {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        var total = 0L
+        openEvidence().use { source ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = source.read(buffer)
+                if (count < 0) break
+                total += count
+                require(total <= YeonsikBundleReader.MAX_SINGLE_EVIDENCE_BYTES) { "evidence upload exceeds limit" }
+                digest.update(buffer, 0, count)
+            }
+        }
+        require(total == item.byteSize) { "local evidence size changed before archive" }
+        require(digest.digest().joinToString("") { "%02x".format(it) } == item.sha256) {
+            "local evidence hash changed before archive"
+        }
+    }
+
+    private suspend fun insertOrReuseEvidenceObject(auth: AuthContext, item: YeonsikBundleEvidence): String {
+        val config = auth.config
         val body = buildJsonObject {
             put("owner_id", config.userId)
             put("sha256", item.sha256)
             put("mime_type", item.mimeType)
             put("byte_size", item.byteSize)
-            put("original_filename", item.originalFilename)
             put("bucket", BUCKET)
             put("storage_path", storagePath(config, item))
         }.encoded()
         val response = executeJson(
-            config,
+            auth,
             "POST",
             "/rest/v1/evidence_objects?on_conflict=owner_id%2Csha256&select=id",
             body,
-            "resolution=merge-duplicates,return=representation",
-        ).requireSuccess("evidence object upsert")
-        return response.firstId()
+            "resolution=ignore-duplicates,return=representation",
+        ).requireSuccess("evidence object insert-or-reuse")
+        return response.firstIdOrNull() ?: findEvidenceObject(auth, item)
     }
 
-    private suspend fun upsertBinding(
-        config: EvidenceSupabaseConfig,
+    private suspend fun insertOrReuseBinding(
+        auth: AuthContext,
         artifactId: String,
         item: YeonsikBundleEvidence,
         objectId: String,
     ) {
+        val config = auth.config
         val body = buildJsonObject {
             put("owner_id", config.userId)
             put("canonical_artifact_id", artifactId)
             put("source_file_id", item.sourceFileId)
             put("source_type", item.type.wireValue)
             put("evidence_object_id", objectId)
+            put("metadata", buildJsonObject { put("original_filename", item.originalFilename) })
         }.encoded()
-        executeJson(
-            config,
+        val response = executeJson(
+            auth,
             "POST",
-            "/rest/v1/evidence_bindings?on_conflict=canonical_artifact_id%2Csource_file_id",
+            "/rest/v1/evidence_bindings?on_conflict=canonical_artifact_id%2Csource_file_id&select=id",
             body,
-            "resolution=merge-duplicates,return=minimal",
-        ).requireSuccess("evidence binding upsert")
+            "resolution=ignore-duplicates,return=representation",
+        ).requireSuccess("evidence binding insert-or-reuse")
+        if (response.firstIdOrNull() == null) findBinding(auth, artifactId, item, objectId)
     }
 
     private suspend fun executeJson(
-        config: EvidenceSupabaseConfig,
+        auth: AuthContext,
         method: String,
         path: String,
         body: String,
         prefer: String,
-    ): EvidenceHttpResponse = transport.execute(
+    ): EvidenceHttpResponse = executeAuthenticated(auth) { config ->
         EvidenceHttpRequest(
-            method,
-            config.url.trimEnd('/') + path,
-            authHeaders(config) + mapOf("Content-Type" to "application/json", "Prefer" to prefer),
-            body.toByteArray(StandardCharsets.UTF_8),
-        ),
-    )
+            method = method,
+            url = config.url.trimEnd('/') + path,
+            headers = authHeaders(config) + mapOf("Content-Type" to "application/json", "Prefer" to prefer),
+            body = body.toByteArray(StandardCharsets.UTF_8).takeIf { body.isNotEmpty() },
+        )
+    }
+
+    private suspend fun executeAuthenticated(
+        auth: AuthContext,
+        request: (EvidenceSupabaseConfig) -> EvidenceHttpRequest,
+    ): EvidenceHttpResponse {
+        val first = transport.execute(request(auth.config))
+        if (first.statusCode != HttpURLConnection.HTTP_UNAUTHORIZED || auth.refreshAttempted) return first
+        auth.refreshAttempted = true
+        auth.config = refreshSession(auth.config)
+        return transport.execute(request(auth.config))
+    }
+
+    private suspend fun refreshSession(current: EvidenceSupabaseConfig): EvidenceSupabaseConfig {
+        require(current.refreshToken.isNotBlank()) { "Evidence refresh token is missing" }
+        val body = buildJsonObject { put("refresh_token", current.refreshToken) }.encoded()
+        val response = transport.execute(
+            EvidenceHttpRequest(
+                method = "POST",
+                url = current.url.trimEnd('/') + "/auth/v1/token?grant_type=refresh_token",
+                headers = mapOf("apikey" to current.publishableKey, "Content-Type" to "application/json"),
+                body = body.toByteArray(StandardCharsets.UTF_8),
+            ),
+        ).requireSuccess("Evidence token refresh")
+        val root = json.parseToJsonElement(response.body).jsonObject
+        val accessToken = requireNotNull(root.string("access_token")) { "Evidence refresh response missing access token" }
+        val refreshToken = root.string("refresh_token") ?: current.refreshToken
+        val userId = root["user"]?.jsonObject?.string("id") ?: current.userId
+        return store.saveSession(userId, current.email, accessToken, refreshToken).getOrThrow()
+    }
+
+    private suspend fun findCanonical(auth: AuthContext, bundle: YeonsikBundle): String {
+        val response = executeJson(
+            auth,
+            "GET",
+            "/rest/v1/canonical_artifacts?owner_id=eq.${urlEncode(auth.config.userId)}&bundle_fingerprint=eq.${bundle.bundleFingerprint}&select=id,canonical_sha256,manifest_sha256,bundle_fingerprint,schema_version,mode,canonical_json,manifest_json",
+            "",
+            "return=minimal",
+        ).requireSuccess("canonical artifact lookup")
+        val row = response.firstObjectOrNull() ?: error("canonical artifact response missing id")
+        require(row.string("canonical_sha256") == bundle.manifest.canonicalSha256)
+        require(row.string("manifest_sha256") == bundle.manifestSha256)
+        require(row.string("bundle_fingerprint") == bundle.bundleFingerprint)
+        require(row.string("schema_version") == bundle.envelope.schemaVersion)
+        require(row.string("mode") == bundle.envelope.mode.wireValue)
+        require(row["canonical_json"] == json.parseToJsonElement(bundle.canonicalJson))
+        require(row["manifest_json"] == json.parseToJsonElement(bundle.manifestJson))
+        return row.string("id") ?: error("canonical artifact response missing id")
+    }
+
+    private suspend fun findEvidenceObject(auth: AuthContext, item: YeonsikBundleEvidence): String {
+        val response = executeJson(
+            auth,
+            "GET",
+            "/rest/v1/evidence_objects?owner_id=eq.${urlEncode(auth.config.userId)}&sha256=eq.${item.sha256}&select=id,mime_type,byte_size,bucket,storage_path",
+            "",
+            "return=minimal",
+        ).requireSuccess("evidence object lookup")
+        val row = response.firstObjectOrNull() ?: error("evidence object response missing id")
+        require(row.string("mime_type") == item.mimeType)
+        require(row.string("byte_size") == item.byteSize.toString())
+        require(row.string("bucket") == BUCKET)
+        require(row.string("storage_path") == storagePath(auth.config, item))
+        return row.string("id") ?: error("evidence object response missing id")
+    }
+
+    private suspend fun findBinding(
+        auth: AuthContext,
+        artifactId: String,
+        item: YeonsikBundleEvidence,
+        objectId: String,
+    ) {
+        val response = executeJson(
+            auth,
+            "GET",
+            "/rest/v1/evidence_bindings?canonical_artifact_id=eq.${urlEncode(artifactId)}&source_file_id=eq.${urlEncode(item.sourceFileId)}&select=id,source_type,evidence_object_id,metadata",
+            "",
+            "return=minimal",
+        ).requireSuccess("evidence binding lookup")
+        val row = response.firstObjectOrNull() ?: error("evidence binding response missing id")
+        require(row.string("source_type") == item.type.wireValue)
+        require(row.string("evidence_object_id") == objectId)
+        require(row["metadata"] == buildJsonObject { put("original_filename", item.originalFilename) })
+    }
 
     private fun authHeaders(config: EvidenceSupabaseConfig): Map<String, String> = mapOf(
         "apikey" to config.publishableKey,
@@ -360,9 +475,7 @@ class EvidenceSupabaseArchivePort(
     )
 
     private fun storagePath(config: EvidenceSupabaseConfig, item: YeonsikBundleEvidence): String {
-        val extension = item.originalFilename.substringAfterLast('.', "")
-            .lowercase().filter(Char::isLetterOrDigit).take(12).ifBlank { mimeExtension(item.mimeType) }
-        return "${config.userId}/${item.sha256}.$extension"
+        return "${config.userId}/${item.sha256}.${mimeExtension(item.mimeType)}"
     }
 
     private fun mimeExtension(mime: String): String = when (mime.lowercase()) {
@@ -377,10 +490,16 @@ class EvidenceSupabaseArchivePort(
         require(statusCode in 200..299) { "$label failed ($statusCode): ${body.take(240)}" }
     }
 
-    private fun EvidenceHttpResponse.firstId(): String {
-        val values = json.parseToJsonElement(body).jsonArray
-        return values.firstOrNull()?.jsonObject?.string("id") ?: error("Evidence response missing id")
-    }
+    private fun EvidenceHttpResponse.firstIdOrNull(): String? =
+        parseArrayOrNull()?.firstOrNull()?.jsonObject?.string("id")
+
+    private fun EvidenceHttpResponse.firstObjectOrNull(): JsonObject? =
+        parseArrayOrNull()?.firstOrNull()?.jsonObject
+
+    private fun EvidenceHttpResponse.parseArrayOrNull(): JsonArray? =
+        body.takeIf(String::isNotBlank)?.let { json.parseToJsonElement(it).jsonArray }
+
+    private fun urlEncode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
 
     private fun JsonObject.encoded(): String = json.encodeToString(JsonElement.serializer(), this)
     private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull

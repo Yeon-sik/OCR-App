@@ -162,11 +162,12 @@ class ReceiptDatabaseMigrationTest {
             ),
         )
         applyMigration(database, 11, ReceiptDatabase.MIGRATION_10_11)
+        applyMigration(database, 12, ReceiptDatabase.MIGRATION_11_12)
         val migrated = database
 
         migrated.query("PRAGMA user_version").use { cursor ->
             assertTrue(cursor.moveToFirst())
-            assertEquals(11, cursor.getInt(0))
+            assertEquals(12, cursor.getInt(0))
         }
 
         migrated.query(
@@ -208,6 +209,15 @@ class ReceiptDatabaseMigrationTest {
             }
             assertTrue(columns.contains("projection_revision_seq"))
             assertTrue(columns.contains("projection_payload_fingerprint"))
+        }
+
+        migrated.query("PRAGMA table_info(ingestion_sessions)").use { cursor ->
+            val nameIndex = cursor.getColumnIndexOrThrow("name")
+            val columns = mutableSetOf<String>()
+            while (cursor.moveToNext()) {
+                columns += cursor.getString(nameIndex)
+            }
+            assertTrue(columns.contains("bundle_fingerprint"))
         }
 
         migrated.query(

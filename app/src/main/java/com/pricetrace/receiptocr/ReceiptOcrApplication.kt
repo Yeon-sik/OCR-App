@@ -53,6 +53,7 @@ class AppContainer(application: Application) {
     internal val evidenceSupabaseStore = AndroidEvidenceSupabaseStore(application)
     internal val evidenceArchivePort = EvidenceSupabaseArchivePort(evidenceSupabaseStore)
     internal val bundleDirectory = application.filesDir.resolve("yeonsik-bundles")
+    internal val bundleStateStore: AndroidBundleStateStore = SharedPreferencesAndroidBundleStateStore(application)
     /**
      * The app keeps payload construction in the existing gateways. This coordinator owns
      * durable lifecycle state and refuses implicit cross-service identity inference.
