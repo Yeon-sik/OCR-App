@@ -7,6 +7,7 @@ import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.domain.ReceiptV2Totals
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
 import com.pricetrace.receiptscanner.ingestion.IngestionMode
+import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionSource
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import org.junit.Assert.assertEquals
@@ -41,6 +42,33 @@ class ReviewViewModelTest {
         assertEquals(ReviewDestinationStatus.PLANNED, cash.status)
         assertEquals(ReviewDestinationStatus.NOT_APPLICABLE, fitness.status)
         assertTrue(model.rows.any { it.item == "판매처명" })
+    }
+
+    @Test
+    fun rowDestinationsReflectSelectedProjections() {
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.RESTAURANT,
+            source = IngestionSource(producer = "test", sourceFiles = emptyList()),
+            receipt = receipt(),
+        )
+
+        val merchantRow = ReviewViewModel.fromCanonical(
+            envelope,
+            selectedProjections = setOf(IngestionProjection.PRICETRACE_RECEIPT),
+        ).rows.single { it.item == "판매처명" }
+
+        assertEquals(
+            listOf(ReviewDestination.PRICE_TRACE, ReviewDestination.CASH_OS),
+            merchantRow.destinations.map { it.destination },
+        )
+        assertEquals(
+            ReviewDestinationStatus.PLANNED,
+            merchantRow.destinations.single { it.destination == ReviewDestination.PRICE_TRACE }.status,
+        )
+        assertEquals(
+            ReviewDestinationStatus.UNSELECTED,
+            merchantRow.destinations.single { it.destination == ReviewDestination.CASH_OS }.status,
+        )
     }
 
     private fun receipt() = ReceiptV2(

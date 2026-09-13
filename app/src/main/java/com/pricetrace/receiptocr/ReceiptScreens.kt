@@ -1136,7 +1136,7 @@ private fun CanonicalJsonValidatorScreen(
         }
         item { ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it }) }
         if (reviewTab == ReviewTab.STRUCTURED) {
-            item { AppReviewTable(state.envelope, state.session, state.evidence) }
+            item { AppReviewTable(state.envelope, state.session, state.evidence, state.selectedProjections) }
         } else {
             item {
                 OutlinedTextField(
@@ -1277,15 +1277,15 @@ private fun AppReviewTable(
     envelope: com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope?,
     session: com.pricetrace.receiptscanner.ingestion.IngestionSession?,
     evidence: List<LocalEvidence>,
+    selectedProjections: Set<com.pricetrace.receiptscanner.ingestion.IngestionProjection>,
 ) {
-    val model = envelope?.let { ReviewViewModel.fromCanonical(it, session, evidence) }
+    val model = envelope?.let { ReviewViewModel.fromCanonical(it, session, evidence, selectedProjections) }
     if (model == null) {
         Text("JSON을 파싱하면 인식 정보와 전송 계획을 여기에서 확인할 수 있습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         return
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("인식 정보 및 전송 계획 · ${model.schema}", style = MaterialTheme.typography.titleMedium)
-        AppReviewTableHeader()
         if (model.rows.isEmpty()) Text("표시할 인식 정보가 없습니다.")
         else model.rows.forEach { row -> AppReviewTableRow(row) }
     }
@@ -1296,41 +1296,36 @@ private fun AppReceiptReviewTable(receipt: ReceiptV2, verified: Boolean) {
     val model = ReviewViewModel.fromReceipt(receipt, verified)
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("인식 정보 및 전송 계획 · ${model.schema}", style = MaterialTheme.typography.titleMedium)
-        AppReviewTableHeader()
         model.rows.forEach { row -> AppReviewTableRow(row) }
-    }
-}
-
-@Composable
-private fun AppReviewTableHeader() {
-    Row(Modifier.fillMaxWidth().border(BorderStroke(1.dp, MaterialTheme.colorScheme.outline)).padding(8.dp)) {
-        Text("구분", Modifier.weight(0.9f), style = MaterialTheme.typography.labelMedium)
-        Text("항목", Modifier.weight(1.5f), style = MaterialTheme.typography.labelMedium)
-        Text("인식 값", Modifier.weight(2f), style = MaterialTheme.typography.labelMedium)
-        Text("근거", Modifier.weight(1.4f), style = MaterialTheme.typography.labelMedium)
-        Text("전송 대상", Modifier.weight(2.2f), style = MaterialTheme.typography.labelMedium)
     }
 }
 
 @Composable
 private fun AppReviewTableRow(row: ReviewRow) {
     var expanded by remember(row.id) { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth().border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant))) {
-        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Top) {
-            Text(row.section, Modifier.weight(0.9f), style = MaterialTheme.typography.bodySmall)
-            Text(row.item, Modifier.weight(1.5f), style = MaterialTheme.typography.bodySmall)
-            Column(Modifier.weight(2f)) {
-                Text(row.value)
-                row.confidence?.let { Text("confidence $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                if (row.details.isNotEmpty()) {
-                    TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "상세 접기" else "상세 보기") }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("${row.section} · ${row.item}", style = MaterialTheme.typography.labelMedium)
+            Text(row.value, style = MaterialTheme.typography.bodyLarge)
+            row.confidence?.let { Text("confidence $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            if (row.evidence.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    row.evidence.forEach { badge -> ReviewEvidenceBadgeText(badge.kind.label) }
                 }
             }
-            Row(Modifier.weight(1.4f), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                row.evidence.forEach { badge -> ReviewEvidenceBadgeText(badge.kind.label) }
+            if (row.destinations.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    row.destinations.forEach { badge -> AppReviewDestinationBadge(badge) }
+                }
             }
-            Row(Modifier.weight(2.2f), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                row.destinations.forEach { badge -> AppReviewDestinationBadge(badge) }
+            if (row.details.isNotEmpty()) {
+                TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "상세 접기" else "상세 보기") }
             }
         }
         if (expanded) {

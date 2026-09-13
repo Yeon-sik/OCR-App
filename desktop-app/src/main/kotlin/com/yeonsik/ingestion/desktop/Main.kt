@@ -136,7 +136,7 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                         Column(
                             Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
                         ) {
-                            DesktopReviewTable(state)
+                            DesktopReviewTable(state, effectiveSelectedProjections)
                         }
                     } else {
                         TextField(
@@ -248,12 +248,16 @@ private fun ReviewTabs(selected: ReviewTab, onSelected: (ReviewTab) -> Unit) {
 }
 
 @Composable
-private fun DesktopReviewTable(state: DesktopUiState) {
+private fun DesktopReviewTable(
+    state: DesktopUiState,
+    selectedProjections: Set<IngestionProjection>,
+) {
     val model = state.envelope?.let { envelope ->
         ReviewViewModel.fromCanonical(
             envelope = envelope,
             session = state.session,
             evidence = state.evidence.map { LocalEvidence(it.attachmentId, it.type, Files.isReadable(it.path), it.pageId) },
+            selectedProjections = selectedProjections,
         )
     }
     if (model == null) {
