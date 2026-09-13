@@ -254,8 +254,9 @@ data class ReviewViewModel(
             addPurchaseField("총 주문금액", purchase.totals.grandTotalAmountKrw?.let { "$it KRW" }, setOf("grand_total_amount_krw"))
             addPurchaseField("실제 결제금액", purchase.totals.paidAmountKrw?.let { "$it KRW" }, setOf("paid_amount_krw"))
             purchase.orderReference?.let { addPurchaseField("주문번호", it, setOf("order_reference")) }
-            purchase.payment?.method?.let { addPurchaseField("결제수단", it, setOf("payment_method")) }
-            purchase.payment?.status?.let { addPurchaseField("결제상태", it, setOf("payment_status")) }
+            purchase.payment?.method?.let { addPurchaseField("결제수단", it, setOf("payment.method")) }
+            purchase.payment?.provider?.let { addPurchaseField("결제 제공자", it, setOf("payment.provider")) }
+            purchase.payment?.status?.let { addPurchaseField("결제상태", it, setOf("payment.status")) }
             purchase.lineItems.forEachIndexed { index, line ->
                 rows.add(ReviewRow("purchase:${purchase.clientKey}:line:$index", "구매 상품", line.description.orEmpty(), listOfNotNull(line.quantity?.let { "수량 $it" }, line.netAmountKrw?.let { "$it KRW" }).joinToString(" · "), purchaseLineEvidenceFor(sourceFiles, envelope, purchase, line, index), destinations, details = buildList {
                     line.optionText?.let { add(ReviewDetail("옵션", it)) }
@@ -273,7 +274,9 @@ data class ReviewViewModel(
             purchase: PurchaseRecord,
             fields: Set<String>,
         ): List<ReviewEvidenceBadge> {
-            val matching = purchase.evidence.filter { it.field in fields }
+            val matching = purchase.evidence.filter { evidence ->
+                evidence.field in fields && valueMatches(evidence.observedValue, purchaseFieldValue(purchase, evidence.field))
+            }
             return evidenceFor(
                 sourceFiles = sourceFiles,
                 ids = matching.flatMap(PurchaseRecordEvidence::sourceAttachmentIds),
@@ -290,7 +293,10 @@ data class ReviewViewModel(
             index: Int,
         ): List<ReviewEvidenceBadge> {
             val matching = purchase.evidence.filter { evidence ->
-                evidence.field in LINE_EVIDENCE_FIELDS && evidence.sourceRef?.let { ref -> lineReferenceMatches(ref, line.lineKey, index) } == true
+                evidence.field in LINE_EVIDENCE_FIELDS && valueMatches(evidence.observedValue, lineFieldValue(line, evidence.field)) &&
+                    purchase.lineItems.mapIndexedNotNull { candidateIndex, candidate ->
+                        candidateIndex.takeIf { lineEvidenceMatches(evidence, candidate) }
+                    }.singleOrNull() == index
             }
             return evidenceFor(
                 sourceFiles = sourceFiles,
@@ -300,22 +306,48 @@ data class ReviewViewModel(
             )
         }
 
-        private fun lineReferenceMatches(reference: String, lineKey: String?, index: Int): Boolean {
-            val normalized = reference.trim()
-            val candidates = buildSet {
-                lineKey?.let {
-                    add(it)
-                    add("line:$it")
-                    add("line/$it")
-                    add("line_items/$it")
-                    add("line_items.$it")
-                }
-                add("line_items[$index]")
-                add("line_items.$index")
-                add("line_item[$index]")
-                add("line_item.$index")
-            }
-            return normalized in candidates || candidates.any { normalized.endsWith("/$it") || normalized.endsWith("#$it") }
+        private fun purchaseFieldValue(purchase: PurchaseRecord, field: String): String? = when (field) {
+            "platform" -> purchase.platform
+            "seller" -> purchase.seller
+            "ordered_on" -> purchase.orderedOn
+            "ordered_at" -> purchase.orderedAt
+            "paid_on" -> purchase.paidOn
+            "paid_at" -> purchase.paidAt
+            "status" -> purchase.status.wireValue
+            "grand_total_amount_krw" -> purchase.totals.grandTotalAmountKrw?.toString()
+            "paid_amount_krw" -> purchase.totals.paidAmountKrw?.toString()
+            "order_reference" -> purchase.orderReference
+            "payment.method" -> purchase.payment?.method
+            "payment.provider" -> purchase.payment?.provider
+            "payment.status" -> purchase.payment?.status
+            else -> null
+        }
+
+        private fun lineEvidenceMatches(evidence: PurchaseRecordEvidence, line: com.pricetrace.receiptscanner.ingestion.PurchaseRecordLine): Boolean =
+            valueMatches(evidence.observedValue, lineFieldValue(line, evidence.field))
+
+        private fun lineFieldValue(line: com.pricetrace.receiptscanner.ingestion.PurchaseRecordLine, field: String): String? = when (field) {
+            "line_key" -> line.lineKey
+            "product_client_key" -> line.productClientKey
+            "description" -> line.description
+            "seller_override" -> line.sellerOverride
+            "option_text" -> line.optionText
+            "price_status" -> line.priceStatus
+            "merchant_sku" -> line.merchantSku
+            "quantity" -> line.quantity?.toString()
+            "unit_price_amount_krw" -> line.unitPriceAmountKrw?.toString()
+            "gross_amount_krw" -> line.grossAmountKrw?.toString()
+            "discount_amount_krw" -> line.discountAmountKrw?.toString()
+            "net_amount_krw" -> line.netAmountKrw?.toString()
+            else -> null
+        }
+
+        private fun valueMatches(observed: String?, canonical: String?): Boolean {
+            if (observed == null || canonical == null) return false
+            if (observed == canonical) return true
+            val observedNumber = observed.trim().toBigDecimalOrNull() ?: return false
+            val canonicalNumber = canonical.trim().toBigDecimalOrNull() ?: return false
+            return observedNumber.compareTo(canonicalNumber) == 0
         }
 
         private val LINE_EVIDENCE_FIELDS = setOf(
@@ -331,7 +363,6 @@ data class ReviewViewModel(
             "gross_amount_krw",
             "discount_amount_krw",
             "net_amount_krw",
-            "line_item",
         )
 
         private fun addNutritionRow(

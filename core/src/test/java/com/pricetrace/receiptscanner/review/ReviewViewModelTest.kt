@@ -16,6 +16,7 @@ import com.pricetrace.receiptscanner.ingestion.PurchaseKind
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecord
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecordEvidence
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecordLine
+import com.pricetrace.receiptscanner.ingestion.PurchaseRecordPayment
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecordStatus
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecordTotals
 import com.pricetrace.receiptscanner.ingestion.RestaurantNutritionEstimate
@@ -174,17 +175,20 @@ class ReviewViewModelTest {
             paidAt = "2026-09-13T09:01:00+09:00",
             status = PurchaseRecordStatus.PAID,
             totals = PurchaseRecordTotals(grandTotalAmountKrw = 1000, paidAmountKrw = 1000),
-            payment = null,
+            payment = PurchaseRecordPayment(method = "card", provider = "카드사", status = "paid"),
             lineItems = listOf(
                 PurchaseRecordLine(lineKey = "line-1", description = "상품", quantity = 1.0, netAmountKrw = 1000),
             ),
             evidence = listOf(
-                PurchaseRecordEvidence("order_history", listOf("order-1"), field = "platform"),
-                PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "seller"),
-                PurchaseRecordEvidence("order_history", listOf("order-1"), field = "grand_total_amount_krw"),
-                PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "paid_amount_krw"),
-                PurchaseRecordEvidence("order_history", listOf("order-1"), sourceRef = "line-1", field = "description"),
-                PurchaseRecordEvidence("order_history", listOf("order-1"), sourceRef = "line-2", field = "description"),
+                PurchaseRecordEvidence("order_history", listOf("order-1"), field = "platform", observedValue = "플랫폼"),
+                PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "seller", observedValue = "판매자"),
+                PurchaseRecordEvidence("order_history", listOf("order-1"), field = "grand_total_amount_krw", observedValue = "1000"),
+                PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "paid_amount_krw", observedValue = "1000"),
+                PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "payment.method", observedValue = "card"),
+                PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "payment.provider", observedValue = "카드사"),
+                PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "payment.status", observedValue = "paid"),
+                PurchaseRecordEvidence("order_history", listOf("order-1"), sourceRef = "item-a", field = "description", observedValue = "상품"),
+                PurchaseRecordEvidence("user_statement", sourceRef = "screen-region-7", field = "quantity", observedValue = "1.0"),
             ),
             confidence = 0.9,
         )
@@ -193,6 +197,7 @@ class ReviewViewModelTest {
             schemaVersion = YEONSIK_OCR_V4_SCHEMA,
             source = IngestionSource(
                 producer = "test",
+                userText = "상품 1개",
                 sourceFiles = listOf(
                     SourceAttachment("order-1", SourceAttachmentType.ORDER_HISTORY),
                     SourceAttachment("payment-1", SourceAttachmentType.PAYMENT_HISTORY),
@@ -211,9 +216,38 @@ class ReviewViewModelTest {
 
         assertEquals(listOf(ReviewEvidenceKind.ORDER_HISTORY), rows.single { it.item == "플랫폼" }.evidence.map { it.kind })
         assertEquals(listOf(ReviewEvidenceKind.PAYMENT_HISTORY), rows.single { it.item == "판매자" }.evidence.map { it.kind })
+        assertEquals(listOf(ReviewEvidenceKind.PAYMENT_HISTORY), rows.single { it.item == "결제수단" }.evidence.map { it.kind })
+        assertEquals(listOf(ReviewEvidenceKind.PAYMENT_HISTORY), rows.single { it.item == "결제 제공자" }.evidence.map { it.kind })
+        assertEquals(listOf(ReviewEvidenceKind.PAYMENT_HISTORY), rows.single { it.item == "결제상태" }.evidence.map { it.kind })
         assertEquals("1000 KRW", rows.single { it.item == "총 주문금액" }.value)
         assertEquals("1000 KRW", rows.single { it.item == "실제 결제금액" }.value)
-        assertEquals(listOf("order-1"), rows.single { it.item == "상품" }.evidence.single().sourceIds)
+        assertEquals(
+            setOf(ReviewEvidenceKind.ORDER_HISTORY, ReviewEvidenceKind.USER_INPUT),
+            rows.single { it.item == "상품" }.evidence.map { it.kind }.toSet(),
+        )
+
+        val ambiguousPurchase = purchase.copy(
+            lineItems = listOf(
+                purchase.lineItems.single(),
+                PurchaseRecordLine(lineKey = "line-2", description = "상품", quantity = 2.0, netAmountKrw = 2000),
+            ),
+            evidence = listOf(
+                PurchaseRecordEvidence(
+                    "user_statement",
+                    sourceRef = "screen-region-7",
+                    field = "description",
+                    observedValue = "상품",
+                ),
+            ),
+        )
+        val ambiguousRows = ReviewViewModel.fromCanonical(
+            envelope.copy(purchaseRecords = listOf(ambiguousPurchase)),
+            evidence = listOf(
+                LocalEvidence("order-1", SourceAttachmentType.ORDER_HISTORY, fileReadable = true),
+                LocalEvidence("payment-1", SourceAttachmentType.PAYMENT_HISTORY, fileReadable = true),
+            ),
+        ).rows.filter { it.section == "구매 상품" }
+        assertTrue(ambiguousRows.all { it.evidence.isEmpty() })
     }
 
     private fun receipt() = ReceiptV2(
