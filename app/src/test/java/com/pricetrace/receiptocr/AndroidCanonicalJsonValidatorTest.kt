@@ -15,8 +15,13 @@ import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.ingestion.SourceAttachment
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV2Json
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV4Json
+import com.pricetrace.receiptscanner.review.ReviewDestination
+import com.pricetrace.receiptscanner.review.ReviewDestinationStatus
+import com.pricetrace.receiptscanner.review.ReviewViewModel
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -47,6 +52,59 @@ import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifest
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
 
 class AndroidCanonicalJsonValidatorTest {
+    @Test
+    fun `android review derives PriceTrace status and reason per V4 purchase record`() = runBlocking {
+        val source = YeonsikOcrV4Json.decode(
+            readExample("yeonsik-ocr.v4.purchase.example.json"),
+            "android-mixed-review",
+        )
+        val compatible = source.purchaseRecords.single().copy(clientKey = "purchase-compatible")
+        val incompatible = compatible.copy(
+            clientKey = "purchase-incompatible",
+            totals = compatible.totals.copy(
+                subtotalAmountKrw = 500,
+                grandTotalAmountKrw = 500,
+                paidAmountKrw = 500,
+            ),
+            lineItems = compatible.lineItems.map { line ->
+                line.copy(
+                    quantity = 0.5,
+                    unitPriceAmountKrw = 1000,
+                    grossAmountKrw = 500,
+                    netAmountKrw = 500,
+                )
+            },
+        )
+        val canonical = YeonsikOcrV4Json.encode(
+            source.copy(purchaseRecords = listOf(compatible, incompatible)),
+        )
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(InMemoryIngestionSessionStore()),
+            newLocalDocumentId = { "android-mixed-review-document" },
+            newIngestionId = { "android-mixed-review-ingestion" },
+        )
+
+        val state = validator.importJson(canonical, AndroidCanonicalJsonValidatorState())
+        assertTrue(IngestionProjection.PRICETRACE_PRICE_OBSERVATION in requireNotNull(state.plan).eligible)
+        assertTrue(IngestionProjection.CASHOS_TRANSACTION in requireNotNull(state.plan).eligible)
+        assertFalse(canonical.contains("pricetrace_v4_"))
+        val model = ReviewViewModel.fromCanonical(
+            envelope = requireNotNull(state.envelope),
+            selectedProjections = state.selectedProjections,
+        )
+        fun badge(recordKey: String) = model.rows
+            .single { it.id == "purchase:$recordKey:플랫폼" }
+            .destinations.single { it.destination == ReviewDestination.PRICE_TRACE }
+
+        assertEquals(ReviewDestinationStatus.PLANNED, badge("purchase-compatible").status)
+        assertEquals(ReviewDestinationStatus.CONDITION_UNMET, badge("purchase-incompatible").status)
+        assertEquals(
+            "pricetrace_v4_quantity_positive_integer_required",
+            badge("purchase-incompatible").reason,
+        )
+        assertTrue(badge("purchase-incompatible").projectionStatuses.isEmpty())
+    }
+
     @Test
     fun `android v2 merchant bundles distinguish text evidence missing evidence and image evidence`() = runBlocking {
         fun validator() = AndroidCanonicalJsonValidator(

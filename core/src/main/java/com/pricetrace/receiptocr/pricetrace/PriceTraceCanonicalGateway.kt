@@ -14,6 +14,8 @@ import com.pricetrace.receiptscanner.ingestion.ProductCandidateBarcode
 import com.pricetrace.receiptscanner.ingestion.ProductCandidateEvidence
 import com.pricetrace.receiptscanner.ingestion.StandalonePriceObservation
 import com.pricetrace.receiptscanner.ingestion.StandalonePriceObservationKind
+import com.pricetrace.receiptscanner.ingestion.PriceTraceV4SubmissionCompatibility
+import com.pricetrace.receiptscanner.ingestion.PriceTraceV4SubmissionReason
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.ingestion.PriceTraceProductIdentityJson
@@ -108,7 +110,8 @@ class PriceTraceCanonicalGateway(
         ) {
             return PriceTraceCanonicalOutcome.Failure(
                 PriceObservationFailureKind.CONTRACT,
-                "pricetrace_v4_quantity_positive_integer_required",
+                PriceTraceV4SubmissionCompatibility.incompatibilityReason(envelope.purchaseRecords)
+                    ?: PriceTraceV4SubmissionReason.SUBMISSION_INCOMPATIBLE,
             )
         }
         val initial = store.read()
@@ -668,7 +671,8 @@ class PriceTraceCanonicalProjectionSubmitter(
                     }
                     if (envelope.purchaseRecords.none { it.priceTraceSubmissionEligible }) {
                         return ProjectionSubmission.Failure(
-                            "pricetrace_v4_quantity_positive_integer_required",
+                            PriceTraceV4SubmissionCompatibility.incompatibilityReason(envelope.purchaseRecords)
+                                ?: PriceTraceV4SubmissionReason.SUBMISSION_INCOMPATIBLE,
                             retryable = false,
                         )
                     }

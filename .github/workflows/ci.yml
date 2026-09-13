@@ -1,0 +1,66 @@
+name: JVM CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Core tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+      - name: Prepare non-secret build configuration
+        run: cp .env.example .env
+      - name: Run core tests
+        run: ./gradlew :core:test --stacktrace
+
+  app-unit:
+    name: Android app unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+      - name: Prepare non-secret build configuration
+        run: cp .env.example .env
+      - name: Run app unit tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace
+
+  desktop:
+    name: Desktop tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+      - name: Prepare non-secret build configuration
+        run: cp .env.example .env
+      - name: Run desktop tests
+        run: ./gradlew :desktop-app:test --stacktrace

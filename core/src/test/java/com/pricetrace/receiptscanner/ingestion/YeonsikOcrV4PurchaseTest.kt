@@ -28,6 +28,65 @@ import org.junit.Test
 
 class YeonsikOcrV4PurchaseTest {
     @Test
+    fun `PriceTrace V4 compatibility enforces receiver integer ranges without changing CashOS routing`() {
+        val quantityOverflow = orderRecord(
+            lineItems = listOf(
+                PurchaseRecordLine(
+                    productClientKey = "product-client-quantity-overflow",
+                    description = "대량 상품",
+                    quantity = (PRICETRACE_V4_MAX_INTEGER + 1L).toDouble(),
+                    unitPriceAmountKrw = 1,
+                    grossAmountKrw = PRICETRACE_V4_MAX_INTEGER + 1L,
+                    netAmountKrw = PRICETRACE_V4_MAX_INTEGER + 1L,
+                ),
+            ),
+        ).copy(clientKey = "quantity-overflow")
+        assertFalse(quantityOverflow.priceTraceSubmissionEligible)
+        assertEquals(
+            PriceTraceV4SubmissionReason.QUANTITY_INTEGER_RANGE_REQUIRED,
+            quantityOverflow.priceTraceSubmissionReasonCode,
+        )
+        assertTrue(quantityOverflow.cashOsTransactionEligible)
+
+        val lineAmountOverflow = orderRecord(
+            lineItems = listOf(
+                PurchaseRecordLine(
+                    productClientKey = "product-client-line-amount-overflow",
+                    description = "고가 상품",
+                    quantity = 1.0,
+                    unitPriceAmountKrw = PRICETRACE_V4_MAX_INTEGER + 1L,
+                    grossAmountKrw = PRICETRACE_V4_MAX_INTEGER + 1L,
+                    netAmountKrw = PRICETRACE_V4_MAX_INTEGER + 1L,
+                ),
+            ),
+        ).copy(clientKey = "line-amount-overflow")
+        assertFalse(lineAmountOverflow.priceTraceSubmissionEligible)
+        assertEquals(
+            PriceTraceV4SubmissionReason.LINE_AMOUNT_INTEGER_RANGE_REQUIRED,
+            lineAmountOverflow.priceTraceSubmissionReasonCode,
+        )
+        assertTrue(lineAmountOverflow.cashOsTransactionEligible)
+
+        val paymentAmountOverflow = orderRecord().copy(
+            clientKey = "payment-amount-overflow",
+            totals = PurchaseRecordTotals(
+                subtotalAmountKrw = null,
+                discountAmountKrw = null,
+                shippingAmountKrw = null,
+                taxAmountKrw = null,
+                grandTotalAmountKrw = PRICETRACE_V4_MAX_INTEGER + 1L,
+                paidAmountKrw = PRICETRACE_V4_MAX_INTEGER + 1L,
+            ),
+        )
+        assertFalse(paymentAmountOverflow.priceTraceSubmissionEligible)
+        assertEquals(
+            PriceTraceV4SubmissionReason.PAYMENT_AMOUNT_INTEGER_RANGE_REQUIRED,
+            paymentAmountOverflow.priceTraceSubmissionReasonCode,
+        )
+        assertTrue(paymentAmountOverflow.cashOsTransactionEligible)
+    }
+
+    @Test
     fun `fractional source quantity keeps CashOS active and excludes PriceTrace before submit`() = runBlocking {
         val fractionalRecord = orderRecord(
             lineItems = listOf(

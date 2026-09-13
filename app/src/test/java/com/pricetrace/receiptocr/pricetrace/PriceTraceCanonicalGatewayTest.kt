@@ -23,6 +23,9 @@ import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
 import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Contract
 import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Json
 import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Payload
+import com.pricetrace.receiptscanner.review.ReviewDestination
+import com.pricetrace.receiptscanner.review.ReviewDestinationStatus
+import com.pricetrace.receiptscanner.review.ReviewViewModel
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -365,6 +368,118 @@ class PriceTraceCanonicalGatewayTest {
             (result as PriceTraceCanonicalOutcome.Failure).message,
         )
         assertTrue(transport.requests.isEmpty())
+    }
+
+    @Test
+    fun mixedV4RecordsOnlySubmitCompatibleRecordAndPreserveBothCanonicalFacts() = runTest {
+        val compatible = purchaseRecordForGateway("purchase-compatible", quantity = 2.0, total = 1100)
+        val incompatible = purchaseRecordForGateway("purchase-fractional", quantity = 0.5, total = 500)
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.PURCHASE,
+            source = IngestionSource("chatgpt", emptyList(), "혼합 구매 기록"),
+            review = IngestionReview(
+                status = IngestionReviewStatus.READY,
+                verificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+            ),
+            schemaVersion = YEONSIK_OCR_V4_SCHEMA,
+            purchaseRecords = listOf(compatible, incompatible),
+        )
+        val canonicalJson = YeonsikOcrV4Json.encode(envelope)
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(
+                200,
+                """[{"purchaseSourceId":"purchase-source-compatible","observationIds":["observation-compatible"],"replayed":false,"deduplicated":false}]""",
+            ),
+        )
+
+        val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .submitPurchasePriceObservationsV4("mixed-records-key", envelope)
+
+        assertTrue(result is PriceTraceCanonicalOutcome.Success)
+        assertEquals(1, transport.requests.size)
+        val purchaseJson = Json.parseToJsonElement(requireNotNull(transport.requests.single().body))
+            .jsonObject["p_purchase"]!!.jsonObject
+        assertEquals(1, purchaseJson["items"]!!.jsonArray.size)
+        assertEquals(
+            "2",
+            purchaseJson["items"]!!.jsonArray.single().jsonObject["quantity"]?.jsonPrimitive?.content,
+        )
+        assertFalse(requireNotNull(transport.requests.single().body).contains("0.5"))
+
+        val roundTripped = YeonsikOcrV4Json.decode(canonicalJson, "mixed-records")
+        assertEquals(
+            listOf(2.0, 0.5),
+            roundTripped.purchaseRecords.map { it.lineItems.single().quantity },
+        )
+        val plan = CanonicalProjectionPlanner.plan(roundTripped)
+        assertTrue(IngestionProjection.PRICETRACE_PRICE_OBSERVATION in plan.eligible)
+        assertTrue(IngestionProjection.CASHOS_TRANSACTION in plan.eligible)
+        assertTrue(roundTripped.purchaseRecords.all(PurchaseRecord::cashOsTransactionEligible))
+
+        assertEquals(
+            ReviewDestinationStatus.PLANNED,
+            ReviewViewModel.fromCanonical(roundTripped).rows
+                .single { it.id == "purchase:purchase-compatible:플랫폼" }
+                .destinations.single { it.destination == ReviewDestination.PRICE_TRACE }.status,
+        )
+        val incompatibleBadge = ReviewViewModel.fromCanonical(roundTripped).rows
+            .single { it.id == "purchase:purchase-fractional:플랫폼" }
+            .destinations.single { it.destination == ReviewDestination.PRICE_TRACE }
+        assertEquals(ReviewDestinationStatus.CONDITION_UNMET, incompatibleBadge.status)
+        assertEquals(
+            PriceTraceV4SubmissionReason.QUANTITY_POSITIVE_INTEGER_REQUIRED,
+            incompatibleBadge.reason,
+        )
+    }
+
+    @Test
+    fun v4RangeIncompatibilitiesFailBeforePriceTraceTransport() = runTest {
+        val cases = listOf(
+            purchaseRecordForGateway(
+                clientKey = "quantity-overflow",
+                quantity = (PRICETRACE_V4_MAX_INTEGER + 1L).toDouble(),
+                total = PRICETRACE_V4_MAX_INTEGER + 1L,
+                netAmount = null,
+            ) to PriceTraceV4SubmissionReason.QUANTITY_INTEGER_RANGE_REQUIRED,
+            purchaseRecordForGateway(
+                clientKey = "line-amount-overflow",
+                quantity = 1.0,
+                total = 1100,
+                unitPrice = PRICETRACE_V4_MAX_INTEGER + 1L,
+                grossAmount = null,
+                netAmount = null,
+            ) to PriceTraceV4SubmissionReason.LINE_AMOUNT_INTEGER_RANGE_REQUIRED,
+            purchaseRecordForGateway(
+                clientKey = "payment-amount-overflow",
+                quantity = 1.0,
+                total = 550,
+                totalsOverride = PurchaseRecordTotals(
+                    grandTotalAmountKrw = PRICETRACE_V4_MAX_INTEGER + 1L,
+                    paidAmountKrw = PRICETRACE_V4_MAX_INTEGER + 1L,
+                ),
+            ) to PriceTraceV4SubmissionReason.PAYMENT_AMOUNT_INTEGER_RANGE_REQUIRED,
+        )
+
+        cases.forEach { (record, reason) ->
+            val transport = QueueTransport(
+                PriceObservationHttpResponse(200, "[{\"purchaseSourceId\":\"unexpected\"}]"),
+            )
+            val envelope = YeonsikOcrEnvelope(
+                mode = IngestionMode.PURCHASE,
+                source = IngestionSource("chatgpt", emptyList(), "범위 테스트"),
+                review = IngestionReview(
+                    status = IngestionReviewStatus.READY,
+                    verificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+                ),
+                schemaVersion = YEONSIK_OCR_V4_SCHEMA,
+                purchaseRecords = listOf(record),
+            )
+            val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+                .submitPurchasePriceObservationsV4("range-${record.clientKey}", envelope)
+            assertEquals(reason, (result as PriceTraceCanonicalOutcome.Failure).message)
+            assertTrue(transport.requests.isEmpty())
+            assertTrue(record.cashOsTransactionEligible)
+        }
     }
 
     @Test
@@ -896,6 +1011,53 @@ class PriceTraceCanonicalGatewayTest {
         )
         assertEquals("price_observation_incomplete", incompleteObservationResult.primaryPendingReason)
     }
+
+    private fun purchaseRecordForGateway(
+        clientKey: String,
+        quantity: Double,
+        total: Long,
+        unitPrice: Long? = null,
+        grossAmount: Long? = total,
+        netAmount: Long? = total,
+        totalsOverride: PurchaseRecordTotals? = null,
+    ) = PurchaseRecord(
+        clientKey = clientKey,
+        platform = "쿠팡",
+        seller = "공식 판매자",
+        sellerBusinessKind = "retail",
+        purchaseKind = PurchaseKind.RETAIL,
+        orderedOn = "2026-09-11",
+        paidOn = "2026-09-11",
+        status = PurchaseRecordStatus.PAID,
+        totals = totalsOverride ?: PurchaseRecordTotals(
+            subtotalAmountKrw = total,
+            discountAmountKrw = 0,
+            shippingAmountKrw = 0,
+            taxAmountKrw = 0,
+            grandTotalAmountKrw = total,
+            paidAmountKrw = total,
+        ),
+        payment = PurchaseRecordPayment(method = "card", status = "paid"),
+        lineItems = listOf(
+            PurchaseRecordLine(
+                productClientKey = "$clientKey-product",
+                description = "상품 $clientKey",
+                quantity = quantity,
+                unitPriceAmountKrw = unitPrice ?: when {
+                    quantity == 0.5 -> 1000
+                    quantity > PRICETRACE_V4_MAX_INTEGER.toDouble() -> 1
+                    else -> 550
+                },
+                grossAmountKrw = grossAmount,
+                discountAmountKrw = 0,
+                netAmountKrw = netAmount,
+            ),
+        ),
+        evidence = listOf(
+            PurchaseRecordEvidence("user_statement", field = "quantity", observedValue = quantity.toString()),
+        ),
+        confidence = 0.98,
+    )
 
     private fun receipt() = ReceiptV2(
         document = ReceiptDocument(

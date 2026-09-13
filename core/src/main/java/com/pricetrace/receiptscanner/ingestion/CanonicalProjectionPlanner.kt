@@ -7,19 +7,25 @@ data class CanonicalProjectionPlan(
     val dependencies: Map<IngestionProjection, Set<IngestionProjection>>,
     /** Structural compatibility exclusions for review/UI; never canonical source data. */
     val disabledReasons: Map<IngestionProjection, String> = emptyMap(),
+    /** Record-level routing facts are separate from the global projection decision. */
+    val priceTraceRecordCompatibility: Map<String, PriceTraceSubmissionCompatibility> = emptyMap(),
 ) {
     fun isEligible(projection: IngestionProjection): Boolean = projection in eligible
 }
 
 object CanonicalProjectionPlanner {
     fun plan(envelope: YeonsikOcrEnvelope): CanonicalProjectionPlan {
+        val priceTraceRecordCompatibility = envelope.purchaseRecords.associate { record ->
+            record.clientKey to record.priceTraceSubmissionCompatibility
+        }
         val disabledReasons = buildMap {
             if (envelope.purchaseRecords.any(PurchaseRecord::priceTraceSourceEligible) &&
                 envelope.purchaseRecords.none(PurchaseRecord::priceTraceSubmissionEligible)
             ) {
                 put(
                     IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
-                    "pricetrace_v4_quantity_positive_integer_required",
+                    PriceTraceV4SubmissionCompatibility.incompatibilityReason(envelope.purchaseRecords)
+                        ?: PriceTraceV4SubmissionReason.SUBMISSION_INCOMPATIBLE,
                 )
             }
         }
@@ -86,6 +92,7 @@ object CanonicalProjectionPlanner {
             disabled = IngestionProjection.entries.toSet() - withDependencies,
             dependencies = dependencies,
             disabledReasons = disabledReasons.filterKeys { it !in withDependencies },
+            priceTraceRecordCompatibility = priceTraceRecordCompatibility,
         )
     }
 

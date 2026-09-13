@@ -197,14 +197,31 @@ data class ReviewViewModel(
             session: IngestionSession?,
             selectedProjections: Set<IngestionProjection>?,
             relevantProjections: Set<IngestionProjection>,
+            purchaseRecord: PurchaseRecord? = null,
         ): List<ReviewDestinationBadge> = ReviewDestination.entries.mapNotNull { destination ->
                 val projections = projectionsFor(destination).intersect(relevantProjections)
                 if (projections.isEmpty()) return@mapNotNull null
                 val eligible = projections.intersect(plan.eligible)
                 val actual = session?.projections.orEmpty().filter { it.projection in projections }
-                val reason = projections.mapNotNull(plan.disabledReasons::get).distinct().joinToString()
-                    .takeIf(String::isNotBlank)
+                val recordCompatibility = purchaseRecord?.let { record ->
+                    plan.priceTraceRecordCompatibility[record.clientKey]
+                        ?: record.priceTraceSubmissionCompatibility
+                }
+                val isRecordPriceTrace = destination == ReviewDestination.PRICE_TRACE &&
+                    purchaseRecord != null &&
+                    IngestionProjection.PRICETRACE_PRICE_OBSERVATION in projections
+                val recordSourceEligible = purchaseRecord?.priceTraceSourceEligible ?: false
+                val reason = if (isRecordPriceTrace) {
+                    recordCompatibility?.reasonCode
+                } else {
+                    projections.mapNotNull(plan.disabledReasons::get).distinct().joinToString()
+                        .takeIf(String::isNotBlank)
+                }
                 val status = when {
+                    isRecordPriceTrace && !recordSourceEligible ->
+                        ReviewDestinationStatus.NOT_APPLICABLE
+                    isRecordPriceTrace && recordCompatibility?.eligible == false ->
+                        ReviewDestinationStatus.CONDITION_UNMET
                     eligible.isEmpty() && actual.any { it.status == ProjectionStatus.BLOCKED } -> ReviewDestinationStatus.CONDITION_UNMET
                     eligible.isEmpty() && reason != null -> ReviewDestinationStatus.CONDITION_UNMET
                     eligible.isEmpty() -> ReviewDestinationStatus.NOT_APPLICABLE
@@ -212,7 +229,14 @@ data class ReviewViewModel(
                     selectedProjections != null && eligible.none { it in selectedProjections } -> ReviewDestinationStatus.UNSELECTED
                     else -> ReviewDestinationStatus.PLANNED
                 }
-                ReviewDestinationBadge(destination, status, actual.map { it.status }, reason)
+                val projectionStatuses = if (isRecordPriceTrace && recordCompatibility?.eligible == false) {
+                    // The session status belongs to the global projection. It must not make an
+                    // excluded record appear to have been sent with its compatible siblings.
+                    emptyList()
+                } else {
+                    actual.map { it.status }
+                }
+                ReviewDestinationBadge(destination, status, projectionStatuses, reason)
             }
 
         private fun projectionsFor(destination: ReviewDestination): Set<IngestionProjection> = when (destination) {
@@ -239,7 +263,13 @@ data class ReviewViewModel(
             session: IngestionSession?,
             selectedProjections: Set<IngestionProjection>?,
         ) {
-            val destinations = destinationBadgesFor(plan, session, selectedProjections, PURCHASE_PROJECTIONS)
+            val destinations = destinationBadgesFor(
+                plan = plan,
+                session = session,
+                selectedProjections = selectedProjections,
+                relevantProjections = PURCHASE_PROJECTIONS,
+                purchaseRecord = purchase,
+            )
             fun addPurchaseField(item: String, value: String?, fields: Set<String>) = rows.add(
                 ReviewRow(
                     "purchase:${purchase.clientKey}:$item",

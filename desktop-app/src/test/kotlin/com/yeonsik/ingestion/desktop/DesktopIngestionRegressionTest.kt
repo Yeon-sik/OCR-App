@@ -16,16 +16,21 @@ import com.pricetrace.receiptscanner.ingestion.IngestionSource
 import com.pricetrace.receiptscanner.ingestion.MerchantCandidate
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_BUNDLE_VERSION
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleEvidence
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifest
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV2Json
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV4Json
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveCheckpoint
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchivePort
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveRequest
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveResult
 import com.pricetrace.receiptscanner.ingestion.EvidenceVerificationEventResult
+import com.pricetrace.receiptscanner.review.ReviewDestination
+import com.pricetrace.receiptscanner.review.ReviewDestinationStatus
+import com.pricetrace.receiptscanner.review.ReviewViewModel
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -40,6 +45,60 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 class DesktopIngestionRegressionTest {
+    @Test
+    fun `desktop review derives PriceTrace status and reason per V4 purchase record`() = runBlocking {
+        val source = YeonsikOcrV4Json.decode(
+            readExample("yeonsik-ocr.v4.purchase.example.json"),
+            "desktop-mixed-review",
+        )
+        val compatible = source.purchaseRecords.single().copy(clientKey = "purchase-compatible")
+        val incompatible = compatible.copy(
+            clientKey = "purchase-incompatible",
+            totals = compatible.totals.copy(
+                subtotalAmountKrw = 500,
+                grandTotalAmountKrw = 500,
+                paidAmountKrw = 500,
+            ),
+            lineItems = compatible.lineItems.map { line ->
+                line.copy(
+                    quantity = 0.5,
+                    unitPriceAmountKrw = 1000,
+                    grossAmountKrw = 500,
+                    netAmountKrw = 500,
+                )
+            },
+        )
+        val canonical = YeonsikOcrV4Json.encode(
+            source.copy(purchaseRecords = listOf(compatible, incompatible)),
+        )
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-console-mixed-review"))
+        val controller = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(
+                config = DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")),
+            ),
+        )
+
+        controller.importJson(canonical)
+        val plan = CanonicalProjectionPlanner.plan(requireNotNull(controller.state.value.envelope))
+        assertTrue(IngestionProjection.PRICETRACE_PRICE_OBSERVATION in plan.eligible)
+        assertTrue(IngestionProjection.CASHOS_TRANSACTION in plan.eligible)
+        assertFalse(canonical.contains("pricetrace_v4_"))
+        val model = ReviewViewModel.fromCanonical(requireNotNull(controller.state.value.envelope))
+        fun badge(recordKey: String) = model.rows
+            .single { it.id == "purchase:$recordKey:플랫폼" }
+            .destinations.single { it.destination == ReviewDestination.PRICE_TRACE }
+
+        assertEquals(ReviewDestinationStatus.PLANNED, badge("purchase-compatible").status)
+        assertEquals(ReviewDestinationStatus.CONDITION_UNMET, badge("purchase-incompatible").status)
+        assertEquals(
+            "pricetrace_v4_quantity_positive_integer_required",
+            badge("purchase-incompatible").reason,
+        )
+        assertTrue(badge("purchase-incompatible").projectionStatuses.isEmpty())
+        assertEquals(YEONSIK_OCR_V4_SCHEMA, controller.state.value.schema)
+    }
+
     @Test
     fun `desktop v2 merchant bundles distinguish text evidence missing evidence and image evidence`() = runBlocking {
         fun controller(store: DesktopSessionStore) = DesktopIngestionController(

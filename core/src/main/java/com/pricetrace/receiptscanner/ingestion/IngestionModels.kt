@@ -12,6 +12,20 @@ const val YEONSIK_OCR_V2_SCHEMA = "yeonsik-ocr.v2"
 const val YEONSIK_OCR_V3_SCHEMA = "yeonsik-ocr.v3"
 const val YEONSIK_OCR_V4_SCHEMA = "yeonsik-ocr.v4"
 
+/** PriceTrace purchase-price v4 uses PostgreSQL integer fields for these values. */
+const val PRICETRACE_V4_MAX_INTEGER = 2_147_483_647L
+
+/** Stable, displayable compatibility reasons for the PriceTrace purchase-price receiver. */
+object PriceTraceV4SubmissionReason {
+    const val SUBMISSION_INCOMPATIBLE = "pricetrace_v4_submission_incompatible"
+    const val QUANTITY_POSITIVE_INTEGER_REQUIRED = "pricetrace_v4_quantity_positive_integer_required"
+    const val QUANTITY_INTEGER_RANGE_REQUIRED = "pricetrace_v4_quantity_int32_range_required"
+    const val LINE_AMOUNT_NON_NEGATIVE_INTEGER_REQUIRED = "pricetrace_v4_line_amount_non_negative_integer_required"
+    const val LINE_AMOUNT_INTEGER_RANGE_REQUIRED = "pricetrace_v4_line_amount_int32_range_required"
+    const val PAYMENT_AMOUNT_NON_NEGATIVE_INTEGER_REQUIRED = "pricetrace_v4_payment_amount_non_negative_integer_required"
+    const val PAYMENT_AMOUNT_INTEGER_RANGE_REQUIRED = "pricetrace_v4_payment_amount_int32_range_required"
+}
+
 private val CANONICAL_EVIDENCE_SOURCE_TYPES = setOf(
     "product_photo",
     "package_label",
@@ -685,6 +699,92 @@ enum class PurchaseKind(val wireValue: String) {
     }
 }
 
+/**
+ * Computed sink compatibility. The reason is UI/routing metadata only; it is never part of the
+ * canonical envelope and never changes a source fact.
+ */
+data class PriceTraceSubmissionCompatibility(
+    val eligible: Boolean,
+    val reasonCode: String? = null,
+)
+
+/** One predicate shared by projection planning, gateway filtering, and review rows. */
+object PriceTraceV4SubmissionCompatibility {
+    /** Stable aggregate reason for a global projection when every source-eligible record is blocked. */
+    fun incompatibilityReason(records: Iterable<PurchaseRecord>): String? = records
+        .filter { it.priceTraceSourceEligible && !it.priceTraceSubmissionEligible }
+        .mapNotNull { it.priceTraceSubmissionReasonCode }
+        .distinct()
+        .joinToString(",")
+        .takeIf(String::isNotBlank)
+
+    fun evaluate(record: PurchaseRecord): PriceTraceSubmissionCompatibility {
+        if (!record.priceTraceSourceEligible) {
+            return PriceTraceSubmissionCompatibility(eligible = false)
+        }
+
+        record.lineItems.forEach { line ->
+            val quantity = line.quantity ?: return@forEach
+            if (!quantity.isFinite() || quantity <= 0.0 || quantity % 1.0 != 0.0) {
+                return PriceTraceSubmissionCompatibility(
+                    eligible = false,
+                    reasonCode = PriceTraceV4SubmissionReason.QUANTITY_POSITIVE_INTEGER_REQUIRED,
+                )
+            }
+            if (quantity > PRICETRACE_V4_MAX_INTEGER.toDouble()) {
+                return PriceTraceSubmissionCompatibility(
+                    eligible = false,
+                    reasonCode = PriceTraceV4SubmissionReason.QUANTITY_INTEGER_RANGE_REQUIRED,
+                )
+            }
+        }
+
+        record.lineItems.forEach { line ->
+            listOf(
+                line.unitPriceAmountKrw,
+                line.grossAmountKrw,
+                line.discountAmountKrw,
+                line.netAmountKrw,
+            ).forEach { amount ->
+                val reason = amountReason(
+                    amount = amount,
+                    negativeReason = PriceTraceV4SubmissionReason.LINE_AMOUNT_NON_NEGATIVE_INTEGER_REQUIRED,
+                    rangeReason = PriceTraceV4SubmissionReason.LINE_AMOUNT_INTEGER_RANGE_REQUIRED,
+                ) ?: return@forEach
+                return PriceTraceSubmissionCompatibility(eligible = false, reasonCode = reason)
+            }
+        }
+
+        // These are exactly the four numeric fields emitted under PriceTrace's payment object.
+        listOf(
+            record.totals.cashOsAmountKrw,
+            record.totals.subtotalAmountKrw,
+            record.totals.shippingAmountKrw,
+            record.totals.discountAmountKrw,
+        ).forEach { amount ->
+            val reason = amountReason(
+                amount = amount,
+                negativeReason = PriceTraceV4SubmissionReason.PAYMENT_AMOUNT_NON_NEGATIVE_INTEGER_REQUIRED,
+                rangeReason = PriceTraceV4SubmissionReason.PAYMENT_AMOUNT_INTEGER_RANGE_REQUIRED,
+            ) ?: return@forEach
+            return PriceTraceSubmissionCompatibility(eligible = false, reasonCode = reason)
+        }
+
+        return PriceTraceSubmissionCompatibility(eligible = true)
+    }
+
+    private fun amountReason(
+        amount: Long?,
+        negativeReason: String,
+        rangeReason: String,
+    ): String? = when {
+        amount == null -> null
+        amount < 0L -> negativeReason
+        amount > PRICETRACE_V4_MAX_INTEGER -> rangeReason
+        else -> null
+    }
+}
+
 data class PurchaseRecord(
     val clientKey: String,
     val platform: String,
@@ -781,20 +881,16 @@ data class PurchaseRecord(
     val priceTraceSourceEligible: Boolean
         get() = lineItems.isNotEmpty() && (effectiveOrderedOn != null || effectivePaidOn != null)
 
-    /**
-     * PriceTrace V4 serializes a present line quantity as a positive long integer. This is a
-     * sink-compatibility check, not a normalization rule: source quantities (including 0.5)
-     * remain unchanged in the canonical purchase record and can still be sent to other sinks.
-     */
+    /** The receiver-compatibility predicate; source quantities and amounts remain untouched. */
+    val priceTraceSubmissionCompatibility: PriceTraceSubmissionCompatibility
+        get() = PriceTraceV4SubmissionCompatibility.evaluate(this)
+
     val priceTraceSubmissionEligible: Boolean
-        get() = priceTraceSourceEligible && lineItems.all { line ->
-            line.quantity?.let { quantity ->
-                quantity.isFinite() &&
-                    quantity > 0.0 &&
-                    quantity % 1.0 == 0.0 &&
-                    quantity <= Long.MAX_VALUE.toDouble()
-            } ?: true
-        }
+        get() = priceTraceSubmissionCompatibility.eligible
+
+    /** Null means source eligibility itself is absent; otherwise this is a stable exclusion code. */
+    val priceTraceSubmissionReasonCode: String?
+        get() = priceTraceSubmissionCompatibility.reasonCode
 
     /** Only a settled, explicitly classified retail/restaurant purchase may create a normal observation. */
     val priceObservationEligible: Boolean
