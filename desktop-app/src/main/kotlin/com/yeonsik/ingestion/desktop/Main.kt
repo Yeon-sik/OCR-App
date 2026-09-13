@@ -21,6 +21,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -42,6 +43,9 @@ import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
+import com.pricetrace.receiptscanner.ingestion.LocalEvidence
+import com.pricetrace.receiptscanner.review.ReviewViewModel
+import com.pricetrace.receiptscanner.review.ReviewRow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.awt.dnd.DnDConstants
@@ -71,6 +75,7 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
     var evidenceType by remember { mutableStateOf(SourceAttachmentType.RECEIPT) }
     var verificationBasis by remember { mutableStateOf(VerificationBasis.SOURCE_EVIDENCE) }
     var selectedProjections by remember { mutableStateOf<Set<IngestionProjection>?>(null) }
+    var reviewTab by remember { mutableStateOf(ReviewTab.STRUCTURED) }
     val activeProjections = state.session?.projections.orEmpty()
         .filterNot { it.status == ProjectionStatus.DISABLED }
         .map { it.projection }
@@ -126,17 +131,26 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                         enabled = !state.busy,
                         onJson = { value -> launchIo { controller.importJson(value) } },
                     )
-                    TextField(
-                        value = state.rawJson,
-                        onValueChange = controller::updateRawJson,
-                        enabled = !state.busy && !bundleActive,
-                        readOnly = bundleActive,
-                        modifier = Modifier.fillMaxWidth().weight(1f),
-                        label = { Text(if (bundleActive) "번들 정본 JSON (읽기 전용)" else "외부 JSON (편집 가능)") },
-                        placeholder = { Text("yeonsik-ocr.v1/v2/v3 JSON 파일을 열거나 여기에 놓으세요") },
-                        minLines = 14,
-                        maxLines = 40,
-                    )
+                    ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it })
+                    if (reviewTab == ReviewTab.STRUCTURED) {
+                        Column(
+                            Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
+                        ) {
+                            DesktopReviewTable(state)
+                        }
+                    } else {
+                        TextField(
+                            value = state.rawJson,
+                            onValueChange = controller::updateRawJson,
+                            enabled = !state.busy && !bundleActive,
+                            readOnly = bundleActive,
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                            label = { Text(if (bundleActive) "번들 정본 JSON (읽기 전용)" else "외부 JSON (편집 가능)") },
+                            placeholder = { Text("yeonsik-ocr.v1/v2/v3 JSON 파일을 열거나 여기에 놓으세요") },
+                            minLines = 14,
+                            maxLines = 40,
+                        )
+                    }
                 }
 
                 Column(
@@ -218,6 +232,94 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                 }
             }
         }
+    }
+}
+
+private enum class ReviewTab { STRUCTURED, RAW_JSON }
+
+@Composable
+private fun ReviewTabs(selected: ReviewTab, onSelected: (ReviewTab) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (selected == ReviewTab.STRUCTURED) Button(onClick = { onSelected(ReviewTab.STRUCTURED) }) { Text("정리 보기") }
+        else OutlinedButton(onClick = { onSelected(ReviewTab.STRUCTURED) }) { Text("정리 보기") }
+        if (selected == ReviewTab.RAW_JSON) Button(onClick = { onSelected(ReviewTab.RAW_JSON) }) { Text("원본 JSON") }
+        else OutlinedButton(onClick = { onSelected(ReviewTab.RAW_JSON) }) { Text("원본 JSON") }
+    }
+}
+
+@Composable
+private fun DesktopReviewTable(state: DesktopUiState) {
+    val model = state.envelope?.let { envelope ->
+        ReviewViewModel.fromCanonical(
+            envelope = envelope,
+            session = state.session,
+            evidence = state.evidence.map { LocalEvidence(it.attachmentId, it.type, Files.isReadable(it.path), it.pageId) },
+        )
+    }
+    if (model == null) {
+        Text("JSON을 파싱하면 인식 정보와 전송 계획을 여기에서 확인할 수 있습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        return
+    }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("인식 정보 및 전송 계획 · ${model.schema}", style = MaterialTheme.typography.titleMedium)
+        ReviewTableHeader()
+        if (model.rows.isEmpty()) Text("표시할 인식 정보가 없습니다.")
+        else model.rows.forEach { row -> DesktopReviewTableRow(row) }
+    }
+}
+
+@Composable
+private fun ReviewTableHeader() {
+    Row(Modifier.fillMaxWidth().border(BorderStroke(1.dp, MaterialTheme.colorScheme.outline)).padding(8.dp)) {
+        Text("구분", Modifier.weight(0.9f), style = MaterialTheme.typography.labelMedium)
+        Text("항목", Modifier.weight(1.5f), style = MaterialTheme.typography.labelMedium)
+        Text("인식 값", Modifier.weight(2f), style = MaterialTheme.typography.labelMedium)
+        Text("근거", Modifier.weight(1.4f), style = MaterialTheme.typography.labelMedium)
+        Text("전송 대상", Modifier.weight(2.2f), style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+@Composable
+private fun DesktopReviewTableRow(row: ReviewRow) {
+    var expanded by remember(row.id) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant))) {
+        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Top) {
+            Text(row.section, Modifier.weight(0.9f), style = MaterialTheme.typography.bodySmall)
+            Text(row.item, Modifier.weight(1.5f), style = MaterialTheme.typography.bodySmall)
+            Column(Modifier.weight(2f)) {
+                Text(row.value)
+                row.confidence?.let { Text("confidence $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                if (row.details.isNotEmpty()) {
+                    TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "상세 접기" else "상세 보기") }
+                }
+            }
+            Row(Modifier.weight(1.4f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                row.evidence.forEach { badge -> ReviewEvidenceBadgeText(badge.kind.label) }
+            }
+            Row(Modifier.weight(2.2f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                row.destinations.forEach { badge -> ReviewDestinationBadgeText(badge) }
+            }
+        }
+        if (expanded) {
+            Column(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                row.details.forEach { detail -> Text("${detail.item}: ${detail.value}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReviewEvidenceBadgeText(label: String) {
+    Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+        Text(label, Modifier.padding(horizontal = 6.dp, vertical = 3.dp), style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@Composable
+private fun ReviewDestinationBadgeText(badge: com.pricetrace.receiptscanner.review.ReviewDestinationBadge) {
+    val color = Color(badge.destination.colorHex.removePrefix("#").toLong(16) or 0xFF000000L)
+    Surface(color = color, contentColor = Color.Black, shape = MaterialTheme.shapes.small) {
+        Text("${badge.destination.shortLabel} · ${badge.status.label}", Modifier.padding(horizontal = 6.dp, vertical = 3.dp), style = MaterialTheme.typography.labelSmall)
     }
 }
 

@@ -5,6 +5,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -122,6 +123,7 @@ import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionConsumption
 import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
+import com.pricetrace.receiptscanner.ingestion.LocalEvidence
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
 import com.pricetrace.receiptscanner.publisher.PriceObservationSource
@@ -132,6 +134,9 @@ import com.pricetrace.receiptscanner.preflight.ReceiptPreflightRoute
 import com.pricetrace.receiptscanner.storage.PriceObservationQueueStatus
 import com.pricetrace.receiptscanner.storage.ReceiptSession
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
+import com.pricetrace.receiptscanner.review.ReviewDestinationBadge
+import com.pricetrace.receiptscanner.review.ReviewRow
+import com.pricetrace.receiptscanner.review.ReviewViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -1061,6 +1066,7 @@ private fun CanonicalJsonValidatorScreen(
     onRetry: () -> Unit,
     onArchiveRetry: () -> Unit,
 ) {
+    var reviewTab by remember { mutableStateOf(ReviewTab.STRUCTURED) }
     val plan = state.plan
     val eligible = plan?.eligible.orEmpty().sortedBy(IngestionProjection::wireValue)
     val disabled = plan?.disabled.orEmpty().sortedBy(IngestionProjection::wireValue)
@@ -1128,18 +1134,23 @@ private fun CanonicalJsonValidatorScreen(
                 }
             }
         }
-        item {
-            OutlinedTextField(
-                value = state.rawJson,
-                onValueChange = onJsonChanged,
-                enabled = !state.busy && !bundleActive,
-                readOnly = bundleActive,
-                label = { Text(if (bundleActive) "Bundle canonical JSON (읽기 전용)" else "JSON") },
-                minLines = 12,
-                maxLines = 24,
-                modifier = Modifier.fillMaxWidth().testTag("canonical_json_input"),
-                textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace),
-            )
+        item { ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it }) }
+        if (reviewTab == ReviewTab.STRUCTURED) {
+            item { AppReviewTable(state.envelope, state.session, state.evidence) }
+        } else {
+            item {
+                OutlinedTextField(
+                    value = state.rawJson,
+                    onValueChange = onJsonChanged,
+                    enabled = !state.busy && !bundleActive,
+                    readOnly = bundleActive,
+                    label = { Text(if (bundleActive) "Bundle canonical JSON (읽기 전용)" else "JSON") },
+                    minLines = 12,
+                    maxLines = 24,
+                    modifier = Modifier.fillMaxWidth().testTag("canonical_json_input"),
+                    textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace),
+                )
+            }
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1246,6 +1257,102 @@ private fun CanonicalJsonValidatorScreen(
                 }
             }
         }
+    }
+}
+
+private enum class ReviewTab { STRUCTURED, RAW_JSON }
+
+@Composable
+private fun ReviewTabs(selected: ReviewTab, onSelected: (ReviewTab) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (selected == ReviewTab.STRUCTURED) MaterialButton(onClick = { onSelected(ReviewTab.STRUCTURED) }, modifier = Modifier.testTag("structured_review_tab")) { Text("정리 보기") }
+        else MaterialOutlinedButton(onClick = { onSelected(ReviewTab.STRUCTURED) }, modifier = Modifier.testTag("structured_review_tab")) { Text("정리 보기") }
+        if (selected == ReviewTab.RAW_JSON) MaterialButton(onClick = { onSelected(ReviewTab.RAW_JSON) }, modifier = Modifier.testTag("raw_json_tab")) { Text("원본 JSON") }
+        else MaterialOutlinedButton(onClick = { onSelected(ReviewTab.RAW_JSON) }, modifier = Modifier.testTag("raw_json_tab")) { Text("원본 JSON") }
+    }
+}
+
+@Composable
+private fun AppReviewTable(
+    envelope: com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope?,
+    session: com.pricetrace.receiptscanner.ingestion.IngestionSession?,
+    evidence: List<LocalEvidence>,
+) {
+    val model = envelope?.let { ReviewViewModel.fromCanonical(it, session, evidence) }
+    if (model == null) {
+        Text("JSON을 파싱하면 인식 정보와 전송 계획을 여기에서 확인할 수 있습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        return
+    }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("인식 정보 및 전송 계획 · ${model.schema}", style = MaterialTheme.typography.titleMedium)
+        AppReviewTableHeader()
+        if (model.rows.isEmpty()) Text("표시할 인식 정보가 없습니다.")
+        else model.rows.forEach { row -> AppReviewTableRow(row) }
+    }
+}
+
+@Composable
+private fun AppReceiptReviewTable(receipt: ReceiptV2, verified: Boolean) {
+    val model = ReviewViewModel.fromReceipt(receipt, verified)
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("인식 정보 및 전송 계획 · ${model.schema}", style = MaterialTheme.typography.titleMedium)
+        AppReviewTableHeader()
+        model.rows.forEach { row -> AppReviewTableRow(row) }
+    }
+}
+
+@Composable
+private fun AppReviewTableHeader() {
+    Row(Modifier.fillMaxWidth().border(BorderStroke(1.dp, MaterialTheme.colorScheme.outline)).padding(8.dp)) {
+        Text("구분", Modifier.weight(0.9f), style = MaterialTheme.typography.labelMedium)
+        Text("항목", Modifier.weight(1.5f), style = MaterialTheme.typography.labelMedium)
+        Text("인식 값", Modifier.weight(2f), style = MaterialTheme.typography.labelMedium)
+        Text("근거", Modifier.weight(1.4f), style = MaterialTheme.typography.labelMedium)
+        Text("전송 대상", Modifier.weight(2.2f), style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+@Composable
+private fun AppReviewTableRow(row: ReviewRow) {
+    var expanded by remember(row.id) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant))) {
+        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Top) {
+            Text(row.section, Modifier.weight(0.9f), style = MaterialTheme.typography.bodySmall)
+            Text(row.item, Modifier.weight(1.5f), style = MaterialTheme.typography.bodySmall)
+            Column(Modifier.weight(2f)) {
+                Text(row.value)
+                row.confidence?.let { Text("confidence $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                if (row.details.isNotEmpty()) {
+                    TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "상세 접기" else "상세 보기") }
+                }
+            }
+            Row(Modifier.weight(1.4f), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                row.evidence.forEach { badge -> ReviewEvidenceBadgeText(badge.kind.label) }
+            }
+            Row(Modifier.weight(2.2f), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                row.destinations.forEach { badge -> AppReviewDestinationBadge(badge) }
+            }
+        }
+        if (expanded) {
+            Column(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                row.details.forEach { detail -> Text("${detail.item}: ${detail.value}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReviewEvidenceBadgeText(label: String) {
+    Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+        Text(label, Modifier.padding(horizontal = 6.dp, vertical = 3.dp), style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@Composable
+private fun AppReviewDestinationBadge(badge: ReviewDestinationBadge) {
+    val color = Color(badge.destination.colorHex.removePrefix("#").toLong(16) or 0xFF000000L)
+    Surface(color = color, contentColor = Color.Black, shape = MaterialTheme.shapes.small) {
+        Text("${badge.destination.shortLabel} · ${badge.status.label}", Modifier.padding(horizontal = 6.dp, vertical = 3.dp), style = MaterialTheme.typography.labelSmall)
     }
 }
 
@@ -3799,6 +3906,7 @@ fun JsonPreviewScreen(
     onSelectCashOsLedgerEntry: (String) -> Unit = {},
     onSubmitCashOsReceipt: () -> Unit = {},
 ) {
+    var reviewTab by remember { mutableStateOf(ReviewTab.STRUCTURED) }
     val verified = receipt?.document?.source?.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
     val canonicalNutritionVerified = canonicalNutritionCount > 0 &&
         canonicalNutritionVerifiedCount == canonicalNutritionCount
@@ -3850,16 +3958,20 @@ fun JsonPreviewScreen(
                 Switch(checked = includeRawText, onCheckedChange = null)
             }
         }
+        item { ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it }) }
         item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                SelectionContainer {
-                    Text(
-                        json,
-                        modifier = Modifier.fillMaxWidth().padding(14.dp).horizontalScroll(rememberScrollState())
-                            .testTag("json_text"),
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
+            if (reviewTab == ReviewTab.STRUCTURED && receipt != null) AppReceiptReviewTable(receipt, verified)
+            else {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    SelectionContainer {
+                        Text(
+                            json,
+                            modifier = Modifier.fillMaxWidth().padding(14.dp).horizontalScroll(rememberScrollState())
+                                .testTag("json_text"),
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                 }
             }
         }

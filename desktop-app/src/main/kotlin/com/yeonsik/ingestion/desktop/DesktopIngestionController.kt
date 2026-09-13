@@ -44,6 +44,8 @@ data class DesktopArtifactState(
 data class DesktopUiState(
     val rawJson: String = "",
     val canonicalJson: String = "",
+    /** Parsed canonical input for the shared human-readable review model. */
+    val envelope: YeonsikOcrEnvelope? = null,
     val schema: String? = null,
     val ingestionId: String? = null,
     val localDocumentId: String? = null,
@@ -80,7 +82,7 @@ class DesktopIngestionController(
                 notice = null,
             )
         } else {
-            _state.value = _state.value.copy(rawJson = value, error = null)
+            _state.value = _state.value.copy(rawJson = value, envelope = null, error = null)
         }
     }
 
@@ -603,6 +605,7 @@ class DesktopIngestionController(
         _state.value = DesktopUiState(
             rawJson = rawJson,
             canonicalJson = canonicalJson,
+            envelope = envelope,
             schema = envelope.schemaVersion,
             ingestionId = session.ingestionId,
             localDocumentId = session.localDocumentId,
