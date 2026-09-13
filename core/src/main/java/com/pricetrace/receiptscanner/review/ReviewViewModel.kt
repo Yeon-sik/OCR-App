@@ -274,9 +274,7 @@ data class ReviewViewModel(
             purchase: PurchaseRecord,
             fields: Set<String>,
         ): List<ReviewEvidenceBadge> {
-            val matching = purchase.evidence.filter { evidence ->
-                evidence.field in fields && valueMatches(evidence.observedValue, purchaseFieldValue(purchase, evidence.field))
-            }
+            val matching = purchase.evidence.filter { it.field in fields }
             return evidenceFor(
                 sourceFiles = sourceFiles,
                 ids = matching.flatMap(PurchaseRecordEvidence::sourceAttachmentIds),
@@ -304,23 +302,6 @@ data class ReviewViewModel(
                 userText = envelope.source.userText.takeIf { matching.any { evidence -> evidence.sourceType == "user_statement" } },
                 typed = matching.map { it.sourceType to it.sourceAttachmentIds.filter { id -> id in sourceFiles } },
             )
-        }
-
-        private fun purchaseFieldValue(purchase: PurchaseRecord, field: String): String? = when (field) {
-            "platform" -> purchase.platform
-            "seller" -> purchase.seller
-            "ordered_on" -> purchase.orderedOn
-            "ordered_at" -> purchase.orderedAt
-            "paid_on" -> purchase.paidOn
-            "paid_at" -> purchase.paidAt
-            "status" -> purchase.status.wireValue
-            "grand_total_amount_krw" -> purchase.totals.grandTotalAmountKrw?.toString()
-            "paid_amount_krw" -> purchase.totals.paidAmountKrw?.toString()
-            "order_reference" -> purchase.orderReference
-            "payment.method" -> purchase.payment?.method
-            "payment.provider" -> purchase.payment?.provider
-            "payment.status" -> purchase.payment?.status
-            else -> null
         }
 
         private fun lineEvidenceMatches(evidence: PurchaseRecordEvidence, line: com.pricetrace.receiptscanner.ingestion.PurchaseRecordLine): Boolean =

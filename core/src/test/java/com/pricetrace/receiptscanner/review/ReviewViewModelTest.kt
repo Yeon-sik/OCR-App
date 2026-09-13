@@ -182,11 +182,12 @@ class ReviewViewModelTest {
             evidence = listOf(
                 PurchaseRecordEvidence("order_history", listOf("order-1"), field = "platform", observedValue = "플랫폼"),
                 PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "seller", observedValue = "판매자"),
-                PurchaseRecordEvidence("order_history", listOf("order-1"), field = "grand_total_amount_krw", observedValue = "1000"),
+                PurchaseRecordEvidence("order_history", listOf("order-1"), field = "grand_total_amount_krw", observedValue = "11000"),
+                PurchaseRecordEvidence("order_history", listOf("order-2"), field = "grand_total_amount_krw", observedValue = "12000"),
                 PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "paid_amount_krw", observedValue = "1000"),
                 PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "payment.method", observedValue = "card"),
                 PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "payment.provider", observedValue = "카드사"),
-                PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "payment.status", observedValue = "paid"),
+                PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "payment.status", observedValue = "결제완료"),
                 PurchaseRecordEvidence("order_history", listOf("order-1"), sourceRef = "item-a", field = "description", observedValue = "상품"),
                 PurchaseRecordEvidence("user_statement", sourceRef = "screen-region-7", field = "quantity", observedValue = "1.0"),
             ),
@@ -200,6 +201,7 @@ class ReviewViewModelTest {
                 userText = "상품 1개",
                 sourceFiles = listOf(
                     SourceAttachment("order-1", SourceAttachmentType.ORDER_HISTORY),
+                    SourceAttachment("order-2", SourceAttachmentType.ORDER_HISTORY),
                     SourceAttachment("payment-1", SourceAttachmentType.PAYMENT_HISTORY),
                 ),
             ),
@@ -210,6 +212,7 @@ class ReviewViewModelTest {
             envelope,
             evidence = listOf(
                 LocalEvidence("order-1", SourceAttachmentType.ORDER_HISTORY, fileReadable = true),
+                LocalEvidence("order-2", SourceAttachmentType.ORDER_HISTORY, fileReadable = true),
                 LocalEvidence("payment-1", SourceAttachmentType.PAYMENT_HISTORY, fileReadable = true),
             ),
         ).rows
@@ -221,6 +224,7 @@ class ReviewViewModelTest {
         assertEquals(listOf(ReviewEvidenceKind.PAYMENT_HISTORY), rows.single { it.item == "결제상태" }.evidence.map { it.kind })
         assertEquals("1000 KRW", rows.single { it.item == "총 주문금액" }.value)
         assertEquals("1000 KRW", rows.single { it.item == "실제 결제금액" }.value)
+        assertEquals(listOf("order-1", "order-2"), rows.single { it.item == "총 주문금액" }.evidence.single().sourceIds)
         assertEquals(
             setOf(ReviewEvidenceKind.ORDER_HISTORY, ReviewEvidenceKind.USER_INPUT),
             rows.single { it.item == "상품" }.evidence.map { it.kind }.toSet(),
@@ -244,6 +248,7 @@ class ReviewViewModelTest {
             envelope.copy(purchaseRecords = listOf(ambiguousPurchase)),
             evidence = listOf(
                 LocalEvidence("order-1", SourceAttachmentType.ORDER_HISTORY, fileReadable = true),
+                LocalEvidence("order-2", SourceAttachmentType.ORDER_HISTORY, fileReadable = true),
                 LocalEvidence("payment-1", SourceAttachmentType.PAYMENT_HISTORY, fileReadable = true),
             ),
         ).rows.filter { it.section == "구매 상품" }
