@@ -6,9 +6,17 @@ import com.pricetrace.receiptscanner.ingestion.InMemoryIngestionSessionStore
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 import com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus
+import com.pricetrace.receiptscanner.ingestion.IngestionMode
+import com.pricetrace.receiptscanner.ingestion.IngestionSource
+import com.pricetrace.receiptscanner.ingestion.MerchantCandidate
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
+import com.pricetrace.receiptscanner.ingestion.SourceAttachment
+import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV2Json
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -39,6 +47,59 @@ import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifest
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
 
 class AndroidCanonicalJsonValidatorTest {
+    @Test
+    fun `android v2 merchant bundles distinguish text evidence missing evidence and image evidence`() = runBlocking {
+        fun validator() = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(InMemoryIngestionSessionStore()),
+            evidenceArchivePort = SuccessfulArchivePort(),
+            bundleRoot = Files.createTempDirectory("android-v2-merchant-bundle").toFile(),
+        )
+
+        val textValidator = validator()
+        var textState = textValidator.importBundle(
+            ByteArrayInputStream(textOnlyBundle(v2MerchantCanonical(userText = "텍스트로 상호를 확인했습니다."))),
+            "merchant-text.yeonsik",
+            AndroidCanonicalJsonValidatorState(),
+        )
+        assertEquals(YEONSIK_OCR_V2_SCHEMA, textState.envelope?.schemaVersion)
+        assertTrue(textState.evidence.isEmpty())
+        assertEquals(AndroidEvidenceArchiveStatus.ARCHIVED, textState.bundle?.archiveStatus)
+        textState = textValidator.confirm(textState)
+        assertEquals(IngestionReviewStatus.READY, textState.envelope?.review?.status)
+        assertTrue(textState.error == null)
+
+        val missingValidator = validator()
+        var missingState = missingValidator.importBundle(
+            ByteArrayInputStream(textOnlyBundle(v2MerchantCanonical(userText = null))),
+            "merchant-missing-evidence.yeonsik",
+            AndroidCanonicalJsonValidatorState(),
+        )
+        missingState = missingValidator.confirm(missingState)
+        assertTrue(missingState.error.orEmpty().contains("source_image_required"))
+        assertTrue(missingState.envelope?.review?.status != IngestionReviewStatus.READY)
+
+        val imageValidator = validator()
+        var imageState = imageValidator.importBundle(
+            ByteArrayInputStream(
+                evidenceBundle(
+                    canonical = v2MerchantCanonical(
+                        userText = null,
+                        sourceFiles = listOf(SourceAttachment("merchant-receipt-1", SourceAttachmentType.RECEIPT)),
+                        sourceAttachmentIds = listOf("merchant-receipt-1"),
+                    ),
+                    sourceFileId = "merchant-receipt-1",
+                    type = SourceAttachmentType.RECEIPT,
+                ),
+            ),
+            "merchant-image.yeonsik",
+            AndroidCanonicalJsonValidatorState(),
+        )
+        assertEquals(listOf("merchant-receipt-1"), imageState.evidence.map { it.attachmentId })
+        imageState = imageValidator.confirm(imageState)
+        assertEquals(IngestionReviewStatus.READY, imageState.envelope?.review?.status)
+        assertTrue(imageState.error == null)
+    }
+
     @Test
     fun `invalid Android bundle clears active canonical state and blocks confirmation`() = runBlocking {
         val validator = AndroidCanonicalJsonValidator(
@@ -412,14 +473,19 @@ class AndroidCanonicalJsonValidatorTest {
         return output.toByteArray()
     }
 
-    private fun evidenceBundle(canonical: String, variant: String = ""): ByteArray {
+    private fun evidenceBundle(
+        canonical: String,
+        variant: String = "",
+        sourceFileId: String = "menu-photo-1",
+        type: SourceAttachmentType = SourceAttachmentType.MENU_PHOTO,
+    ): ByteArray {
         val canonicalBytes = canonical.toByteArray()
         val evidenceBytes = "menu evidence$variant".toByteArray()
         val evidencePath = if (variant.isBlank()) "evidence/menu.jpg" else "evidence/menu-$variant.jpg"
         val originalFilename = evidencePath.substringAfterLast('/')
         val evidence = com.pricetrace.receiptscanner.ingestion.YeonsikBundleEvidence(
-            sourceFileId = "menu-photo-1",
-            type = com.pricetrace.receiptscanner.ingestion.SourceAttachmentType.MENU_PHOTO,
+            sourceFileId = sourceFileId,
+            type = type,
             path = evidencePath,
             sha256 = MessageDigest.getInstance("SHA-256").digest(evidenceBytes)
                 .joinToString("") { "%02x".format(it) },
@@ -492,5 +558,21 @@ class AndroidCanonicalJsonValidatorTest {
                 put("user_verified", JsonPrimitive(true))
             })
         },
+    )
+
+    private fun v2MerchantCanonical(
+        userText: String?,
+        sourceFiles: List<SourceAttachment> = emptyList(),
+        sourceAttachmentIds: List<String> = emptyList(),
+    ): String = YeonsikOcrV2Json.encode(
+        YeonsikOcrEnvelope(
+            mode = IngestionMode.MERCHANT,
+            source = IngestionSource("chatgpt", sourceFiles, userText),
+            merchantCandidate = MerchantCandidate(
+                name = "V2 Merchant",
+                sourceAttachmentIds = sourceAttachmentIds,
+            ),
+            schemaVersion = YEONSIK_OCR_V2_SCHEMA,
+        ),
     )
 }

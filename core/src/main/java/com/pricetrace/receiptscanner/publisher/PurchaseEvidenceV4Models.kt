@@ -74,8 +74,8 @@ data class PriceTracePurchaseObservationV4Payload(
     val verificationBasis: VerificationBasis,
 ) {
     init {
-        require(purchaseRecord.priceTraceSourceEligible) {
-            "PriceTrace V4 requires a line-item purchase with an order/payment date"
+        require(purchaseRecord.priceTraceSubmissionEligible) {
+            "PriceTrace V4 requires source eligibility and positive integer quantities when present"
         }
     }
 

@@ -1091,7 +1091,7 @@ private fun CanonicalJsonValidatorScreen(
                         if (state.verificationBasis == VerificationBasis.MANUAL_CANONICAL_REVIEW) {
                             "MANUAL_CANONICAL_REVIEW · 원본 이미지 없이도 domain validation과 명시적 확인 후 확정할 수 있습니다."
                         } else {
-                            "SOURCE_EVIDENCE · 기존 이미지 evidence gate를 통과해야 확정할 수 있습니다."
+                            "SOURCE_EVIDENCE · 원본 attachment 또는 지원되는 text source evidence gate를 통과해야 확정할 수 있습니다."
                         },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1213,7 +1213,10 @@ private fun CanonicalJsonValidatorScreen(
                         }
                         if (disabled.isNotEmpty()) {
                             Text(
-                                "disabled · ${disabled.joinToString { it.wireValue }}",
+                                "disabled · ${disabled.joinToString { projection ->
+                                    projection.wireValue + plan.disabledReasons[projection]
+                                        ?.let { reason -> " ($reason)" }.orEmpty()
+                                }}",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.bodySmall,
                             )
@@ -1347,7 +1350,12 @@ private fun ReviewEvidenceBadgeText(label: String) {
 private fun AppReviewDestinationBadge(badge: ReviewDestinationBadge) {
     val color = Color(badge.destination.colorHex.removePrefix("#").toLong(16) or 0xFF000000L)
     Surface(color = color, contentColor = Color.Black, shape = MaterialTheme.shapes.small) {
-        Text("${badge.destination.shortLabel} · ${badge.status.label}", Modifier.padding(horizontal = 6.dp, vertical = 3.dp), style = MaterialTheme.typography.labelSmall)
+        Text(
+            "${badge.destination.shortLabel} · ${badge.status.label}" +
+                badge.reason?.let { " · $it" }.orEmpty(),
+            Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+            style = MaterialTheme.typography.labelSmall,
+        )
     }
 }
 

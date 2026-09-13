@@ -4,6 +4,7 @@ import com.pricetrace.receiptscanner.importer.CanonicalDraft
 import com.pricetrace.receiptscanner.importer.ExternalJsonImportOutcome
 import com.pricetrace.receiptscanner.importer.ExternalJsonImporter
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -23,6 +24,53 @@ import org.junit.Test
 import java.io.File
 
 class YeonsikOcrV2Test {
+    @Test
+    fun `v2 text-only merchant source evidence is explicit without fabricating an image`() {
+        val textBacked = v2MerchantEnvelope(userText = "상호명은 사용자 입력으로 확인했습니다.")
+
+        YeonsikOcrV2Json.validate(textBacked)
+        assertTrue(IngestionEvidenceGate.evaluate(textBacked, emptyList()).isAllowed)
+
+        val missingEvidence = textBacked.copy(source = textBacked.source.copy(userText = null))
+        assertFalse(IngestionEvidenceGate.evaluate(missingEvidence, emptyList()).isAllowed)
+
+        val attachmentBacked = textBacked.copy(
+            source = textBacked.source.copy(
+                sourceFiles = listOf(SourceAttachment("merchant-receipt-1", SourceAttachmentType.RECEIPT)),
+                userText = null,
+            ),
+            merchantCandidate = textBacked.merchantCandidate!!.copy(
+                sourceAttachmentIds = listOf("merchant-receipt-1"),
+            ),
+        )
+        assertTrue(
+            IngestionEvidenceGate.evaluate(
+                attachmentBacked,
+                listOf(LocalEvidence("merchant-receipt-1", SourceAttachmentType.RECEIPT, true)),
+            ).isAllowed,
+        )
+    }
+
+    @Test
+    fun `v2 confirmation revalidates edited cross artifact invariants`() = runBlocking {
+        val useCase = CanonicalIngestionUseCase(InMemoryIngestionSessionStore())
+        val imported = useCase.importJson(
+            value = readExample("yeonsik-ocr.v2.restaurant.example.json"),
+            localDocumentId = "v2-revalidate-document",
+            ingestionId = "v2-revalidate-ingestion",
+        ) as CanonicalImportResult.Success
+        val invalidRevision = imported.envelope.copy(links = emptyList())
+
+        val confirmation = useCase.confirm(
+            ingestionId = "v2-revalidate-ingestion",
+            envelope = invalidRevision,
+            verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+        )
+
+        val failure = confirmation.result as IngestionStartResult.Failure
+        assertTrue(failure.issues.toString(), failure.issues.single().startsWith("canonical_domain_invalid:"))
+    }
+
     @Test
     fun `v2 accepts the Project product candidate shape and converts its facts to internal evidence`() {
         val envelope = YeonsikOcrV2Json.decode(projectProductOnlyJson(), "local-project-product")
@@ -297,6 +345,13 @@ class YeonsikOcrV2Test {
             .firstOrNull(File::isFile) ?: error("example not found: $name")
         return file.readText()
     }
+
+    private fun v2MerchantEnvelope(userText: String?): YeonsikOcrEnvelope = YeonsikOcrEnvelope(
+        mode = IngestionMode.MERCHANT,
+        source = IngestionSource("chatgpt", emptyList(), userText),
+        merchantCandidate = MerchantCandidate(name = "텍스트 상점"),
+        schemaVersion = YEONSIK_OCR_V2_SCHEMA,
+    )
 
     private fun canonicalNutritionOuter(value: JsonElement): JsonObject {
         val old = value.jsonObject

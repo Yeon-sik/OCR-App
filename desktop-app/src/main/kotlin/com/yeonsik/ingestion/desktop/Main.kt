@@ -323,7 +323,12 @@ private fun ReviewEvidenceBadgeText(label: String) {
 private fun ReviewDestinationBadgeText(badge: com.pricetrace.receiptscanner.review.ReviewDestinationBadge) {
     val color = Color(badge.destination.colorHex.removePrefix("#").toLong(16) or 0xFF000000L)
     Surface(color = color, contentColor = Color.Black, shape = MaterialTheme.shapes.small) {
-        Text("${badge.destination.shortLabel} · ${badge.status.label}", Modifier.padding(horizontal = 6.dp, vertical = 3.dp), style = MaterialTheme.typography.labelSmall)
+        Text(
+            "${badge.destination.shortLabel} · ${badge.status.label}" +
+                badge.reason?.let { " · $it" }.orEmpty(),
+            Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+            style = MaterialTheme.typography.labelSmall,
+        )
     }
 }
 

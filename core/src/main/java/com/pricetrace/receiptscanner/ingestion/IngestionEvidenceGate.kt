@@ -66,6 +66,7 @@ object IngestionEvidenceGate {
             }
         }
         val evidenceResults = listOfNotNull(
+            evaluateV2MerchantCandidateEvidence(envelope, artifactKeys),
             evaluatePurchaseEvidence(envelope, evidence, artifactKeys),
             if (envelope.schemaVersion == YEONSIK_OCR_V4_SCHEMA) {
                 evaluateProductCandidateEvidence(envelope, evidence, artifactKeys)
@@ -92,6 +93,29 @@ object IngestionEvidenceGate {
         val types = scopedEvidence.filter(LocalEvidence::fileReadable).map(LocalEvidence::type).toSet()
         val missing = requiredTypes - types
         return IngestionEvidenceResult(missing.isEmpty(), missing.map { "${it.wireValue}_image_required" })
+    }
+
+    /**
+     * A V2 merchant-only bundle may be based solely on an explicit user statement. This is
+     * source evidence in its own right, not a synthetic image attachment; all attachment-backed
+     * V2 flows continue through the existing local-file gate below.
+     */
+    private fun evaluateV2MerchantCandidateEvidence(
+        envelope: YeonsikOcrEnvelope,
+        artifactKeys: Set<String>?,
+    ): IngestionEvidenceResult? {
+        if (envelope.schemaVersion != YEONSIK_OCR_V2_SCHEMA ||
+            envelope.mode != IngestionMode.MERCHANT ||
+            envelope.merchantCandidate == null ||
+            envelope.receipt != null ||
+            (artifactKeys != null && IngestionArtifactKeys.MERCHANT_CANDIDATE !in artifactKeys)
+        ) {
+            return null
+        }
+        val textBacked = envelope.source.sourceFiles.isEmpty() &&
+            envelope.merchantCandidate.sourceAttachmentIds.isEmpty() &&
+            !envelope.source.userText.isNullOrBlank()
+        return IngestionEvidenceResult(isAllowed = true).takeIf { textBacked }
     }
 
     /**

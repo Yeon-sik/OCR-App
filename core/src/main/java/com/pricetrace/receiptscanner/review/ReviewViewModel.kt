@@ -55,6 +55,8 @@ data class ReviewDestinationBadge(
     val destination: ReviewDestination,
     val status: ReviewDestinationStatus,
     val projectionStatuses: List<ProjectionStatus> = emptyList(),
+    /** Structural planning reason, shown to reviewers but never written into canonical data. */
+    val reason: String? = null,
 )
 
 /** A display-only row. It never becomes part of a canonical wire model. */
@@ -200,14 +202,17 @@ data class ReviewViewModel(
                 if (projections.isEmpty()) return@mapNotNull null
                 val eligible = projections.intersect(plan.eligible)
                 val actual = session?.projections.orEmpty().filter { it.projection in projections }
+                val reason = projections.mapNotNull(plan.disabledReasons::get).distinct().joinToString()
+                    .takeIf(String::isNotBlank)
                 val status = when {
                     eligible.isEmpty() && actual.any { it.status == ProjectionStatus.BLOCKED } -> ReviewDestinationStatus.CONDITION_UNMET
+                    eligible.isEmpty() && reason != null -> ReviewDestinationStatus.CONDITION_UNMET
                     eligible.isEmpty() -> ReviewDestinationStatus.NOT_APPLICABLE
                     actual.any { it.status == ProjectionStatus.BLOCKED } -> ReviewDestinationStatus.CONDITION_UNMET
                     selectedProjections != null && eligible.none { it in selectedProjections } -> ReviewDestinationStatus.UNSELECTED
                     else -> ReviewDestinationStatus.PLANNED
                 }
-                ReviewDestinationBadge(destination, status, actual.map { it.status })
+                ReviewDestinationBadge(destination, status, actual.map { it.status }, reason)
             }
 
         private fun projectionsFor(destination: ReviewDestination): Set<IngestionProjection> = when (destination) {

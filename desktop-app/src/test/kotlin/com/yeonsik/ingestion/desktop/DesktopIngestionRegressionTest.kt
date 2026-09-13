@@ -10,6 +10,22 @@ import com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
+import com.pricetrace.receiptscanner.ingestion.SourceAttachment
+import com.pricetrace.receiptscanner.ingestion.IngestionMode
+import com.pricetrace.receiptscanner.ingestion.IngestionSource
+import com.pricetrace.receiptscanner.ingestion.MerchantCandidate
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_BUNDLE_VERSION
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA
+import com.pricetrace.receiptscanner.ingestion.YeonsikBundleEvidence
+import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifest
+import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV2Json
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveCheckpoint
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchivePort
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveRequest
+import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveResult
+import com.pricetrace.receiptscanner.ingestion.EvidenceVerificationEventResult
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -18,8 +34,56 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.Path
+import java.security.MessageDigest
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 class DesktopIngestionRegressionTest {
+    @Test
+    fun `desktop v2 merchant bundles distinguish text evidence missing evidence and image evidence`() = runBlocking {
+        fun controller(store: DesktopSessionStore) = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(
+                config = DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")),
+                evidenceArchivePortOverride = SuccessfulArchivePort(),
+            ),
+        )
+
+        val textStore = DesktopSessionStore(Files.createTempDirectory("yeonsik-v2-merchant-text"))
+        val textController = controller(textStore)
+        textController.importBundle(writeMerchantBundle(textStore.directory, "text", userText = "텍스트로 상호를 확인했습니다."))
+        assertEquals(YEONSIK_OCR_V2_SCHEMA, textController.state.value.schema)
+        assertTrue(textController.state.value.evidence.isEmpty())
+        assertEquals(DesktopEvidenceArchiveStatus.ARCHIVED, textController.state.value.bundleMetadata?.archiveStatus)
+        textController.verify(VerificationBasis.SOURCE_EVIDENCE)
+        assertEquals(IngestionReviewStatus.READY, textController.state.value.session?.reviewStatus)
+        assertTrue(textController.state.value.error == null)
+
+        val missingStore = DesktopSessionStore(Files.createTempDirectory("yeonsik-v2-merchant-missing"))
+        val missingController = controller(missingStore)
+        missingController.importBundle(writeMerchantBundle(missingStore.directory, "missing", userText = null))
+        missingController.verify(VerificationBasis.SOURCE_EVIDENCE)
+        assertTrue(missingController.state.value.error.orEmpty().contains("source_image_required"))
+        assertTrue(missingController.state.value.session?.reviewStatus != IngestionReviewStatus.READY)
+
+        val imageStore = DesktopSessionStore(Files.createTempDirectory("yeonsik-v2-merchant-image"))
+        val imageController = controller(imageStore)
+        imageController.importBundle(
+            writeMerchantBundle(
+                imageStore.directory,
+                "image",
+                userText = null,
+                sourceFiles = listOf(SourceAttachment("merchant-receipt-1", SourceAttachmentType.RECEIPT)),
+                sourceAttachmentIds = listOf("merchant-receipt-1"),
+            ),
+        )
+        assertEquals(listOf("merchant-receipt-1"), imageController.state.value.evidence.map { it.attachmentId })
+        imageController.verify(VerificationBasis.SOURCE_EVIDENCE)
+        assertEquals(IngestionReviewStatus.READY, imageController.state.value.session?.reviewStatus)
+        assertTrue(imageController.state.value.error == null)
+    }
+
     @Test
     fun `v1 and v2 examples use the shared importer and persist active projections`() = runBlocking {
         val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-console-regression"))
@@ -244,5 +308,82 @@ class DesktopIngestionRegressionTest {
         val file = sequenceOf(File("examples", name), File("../examples", name))
             .firstOrNull(File::isFile) ?: error("example not found: $name")
         return file.readText()
+    }
+
+    private fun writeMerchantBundle(
+        directory: Path,
+        name: String,
+        userText: String?,
+        sourceFiles: List<SourceAttachment> = emptyList(),
+        sourceAttachmentIds: List<String> = emptyList(),
+    ): Path {
+        val canonical = YeonsikOcrV2Json.encode(
+            YeonsikOcrEnvelope(
+                mode = IngestionMode.MERCHANT,
+                source = IngestionSource("chatgpt", sourceFiles, userText),
+                merchantCandidate = MerchantCandidate(
+                    name = "Desktop V2 Merchant",
+                    sourceAttachmentIds = sourceAttachmentIds,
+                ),
+                schemaVersion = YEONSIK_OCR_V2_SCHEMA,
+            ),
+        )
+        val canonicalBytes = canonical.toByteArray()
+        val evidenceBytes = "merchant receipt evidence".toByteArray()
+        val evidence = sourceFiles.singleOrNull()?.let { source ->
+            YeonsikBundleEvidence(
+                sourceFileId = source.id,
+                type = source.type,
+                path = "evidence/${source.id}.jpg",
+                sha256 = sha256(evidenceBytes),
+                mimeType = "image/jpeg",
+                byteSize = evidenceBytes.size.toLong(),
+                originalFilename = "${source.id}.jpg",
+            )
+        }
+        val manifest = YeonsikBundleManifest(
+            bundleVersion = YEONSIK_BUNDLE_VERSION,
+            canonicalPath = "canonical.json",
+            canonicalSha256 = sha256(canonicalBytes),
+            evidence = listOfNotNull(evidence),
+        )
+        val path = directory.resolve("$name.yeonsik")
+        ZipOutputStream(Files.newOutputStream(path)).use { zip ->
+            zip.putNextEntry(ZipEntry("canonical.json"))
+            zip.write(canonicalBytes)
+            zip.closeEntry()
+            zip.putNextEntry(ZipEntry("manifest.json"))
+            zip.write(YeonsikBundleManifestCodec.encode(manifest).toByteArray())
+            zip.closeEntry()
+            evidence?.let { item ->
+                zip.putNextEntry(ZipEntry(item.path))
+                zip.write(evidenceBytes)
+                zip.closeEntry()
+            }
+        }
+        return path
+    }
+
+    private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
+        .digest(bytes)
+        .joinToString("") { "%02x".format(it) }
+
+    private class SuccessfulArchivePort : EvidenceArchivePort {
+        override suspend fun archive(
+            request: EvidenceArchiveRequest,
+            checkpoint: EvidenceArchiveCheckpoint,
+        ): EvidenceArchiveResult = EvidenceArchiveResult.Success(
+            checkpoint.copy(
+                canonicalArtifactId = checkpoint.canonicalArtifactId ?: "desktop-archive-artifact",
+                bundleFingerprint = request.bundle.bundleFingerprint,
+            ),
+        )
+
+        override suspend fun recordVerification(
+            canonicalArtifactId: String,
+            basis: VerificationBasis,
+            result: String,
+            issues: List<String>,
+        ): EvidenceVerificationEventResult = EvidenceVerificationEventResult.Success
     }
 }

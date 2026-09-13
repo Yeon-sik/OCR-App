@@ -103,6 +103,14 @@ class PriceTraceCanonicalGateway(
         envelope: YeonsikOcrEnvelope,
         contract: PriceTracePurchaseObservationV4Contract = PriceTracePurchaseObservationV4Contract(),
     ): PriceTraceCanonicalOutcome {
+        if (envelope.purchaseRecords.any { it.priceTraceSourceEligible } &&
+            envelope.purchaseRecords.none { it.priceTraceSubmissionEligible }
+        ) {
+            return PriceTraceCanonicalOutcome.Failure(
+                PriceObservationFailureKind.CONTRACT,
+                "pricetrace_v4_quantity_positive_integer_required",
+            )
+        }
         val initial = store.read()
         if (!initial.isSignedIn) return PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
         val first = submitPurchaseV4Once(idempotencyKey, envelope, initial, contract)
@@ -333,7 +341,7 @@ class PriceTraceCanonicalGateway(
         config: PriceTraceSupabaseConfig,
         contract: PriceTracePurchaseObservationV4Contract,
     ): PriceTraceCanonicalOutcome = try {
-        val records = envelope.purchaseRecords.filter { it.priceTraceSourceEligible }
+        val records = envelope.purchaseRecords.filter { it.priceTraceSubmissionEligible }
         require(records.isNotEmpty()) { "purchase_price_observation_missing" }
         val responses = records.map { record ->
             val recordKey = StableIds.sha256("$idempotencyKey|purchase_record=${record.clientKey}")
@@ -657,6 +665,12 @@ class PriceTraceCanonicalProjectionSubmitter(
                 ) {
                     if (envelope.review.status != com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus.READY) {
                         return ProjectionSubmission.Failure("canonical_review_required", retryable = false)
+                    }
+                    if (envelope.purchaseRecords.none { it.priceTraceSubmissionEligible }) {
+                        return ProjectionSubmission.Failure(
+                            "pricetrace_v4_quantity_positive_integer_required",
+                            retryable = false,
+                        )
                     }
                     return when (val result = gateway.submitPurchasePriceObservationsV4(
                         request.idempotencyKey,

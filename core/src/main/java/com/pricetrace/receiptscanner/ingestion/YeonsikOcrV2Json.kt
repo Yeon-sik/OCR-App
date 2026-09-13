@@ -70,9 +70,6 @@ object YeonsikOcrV2Json {
             .orEmpty()
         val hints = decodeHints(root.objectValue("classification_hints"))
         val externalReview = decodeReview(root.objectValue("review"))
-        validateEnvelope(mode, source, merchant, receipt, nutrition, productCandidates, consumption, links)
-        validateTargets(merchant, targets, receipt, nutrition, productCandidates, consumption)
-
         return YeonsikOcrEnvelope(
             mode = mode,
             source = source,
@@ -90,6 +87,40 @@ object YeonsikOcrV2Json {
             ),
             productCandidates = productCandidates,
             schemaVersion = YEONSIK_OCR_V2_SCHEMA,
+        ).also(::validate)
+    }
+
+    /** Reusable domain validation for imported and locally revised V2 canonical envelopes. */
+    fun validate(envelope: YeonsikOcrEnvelope) {
+        require(envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA) {
+            "yeonsik-ocr.v2 validation requires a v2 envelope"
+        }
+        require(envelope.priceObservations.isEmpty() && envelope.purchaseRecords.isEmpty()) {
+            "yeonsik-ocr.v2 cannot contain v3 or v4 artifacts"
+        }
+        require(envelope.source.producer == "chatgpt" || envelope.source.producer == "ocr_app") {
+            "unsupported envelope producer"
+        }
+        require(envelope.source.sourceFiles.map(SourceAttachment::id).distinct().size == envelope.source.sourceFiles.size) {
+            "source attachment IDs must be unique"
+        }
+        validateEnvelope(
+            mode = envelope.mode,
+            source = envelope.source,
+            merchant = envelope.merchantCandidate,
+            receipt = envelope.receipt,
+            nutrition = envelope.nutrition,
+            productCandidates = envelope.productCandidates,
+            consumption = envelope.consumption,
+            links = envelope.links,
+        )
+        validateTargets(
+            merchant = envelope.merchantCandidate,
+            targets = envelope.targets,
+            receipt = envelope.receipt,
+            nutrition = envelope.nutrition,
+            productCandidates = envelope.productCandidates,
+            consumption = envelope.consumption,
         )
     }
 

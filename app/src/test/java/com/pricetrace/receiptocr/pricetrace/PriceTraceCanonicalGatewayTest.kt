@@ -312,6 +312,62 @@ class PriceTraceCanonicalGatewayTest {
     }
 
     @Test
+    fun fractionalV4QuantityIsRejectedAsPlanningCompatibilityWithoutCallingPriceTrace() = runTest {
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(200, """[{"purchaseSourceId":"unexpected"}]"""),
+        )
+        val record = PurchaseRecord(
+            clientKey = "fractional-purchase-1",
+            platform = "쿠팡",
+            purchaseKind = PurchaseKind.RETAIL,
+            orderedOn = "2026-09-11",
+            paidOn = "2026-09-11",
+            status = PurchaseRecordStatus.PAID,
+            totals = PurchaseRecordTotals(
+                subtotalAmountKrw = 500,
+                discountAmountKrw = 0,
+                shippingAmountKrw = 0,
+                taxAmountKrw = 0,
+                grandTotalAmountKrw = 500,
+                paidAmountKrw = 500,
+            ),
+            payment = PurchaseRecordPayment(method = "card", status = "paid"),
+            lineItems = listOf(
+                PurchaseRecordLine(
+                    description = "중량 상품",
+                    quantity = 0.5,
+                    unitPriceAmountKrw = 1000,
+                    grossAmountKrw = 500,
+                    netAmountKrw = 500,
+                ),
+            ),
+            evidence = listOf(
+                PurchaseRecordEvidence("user_statement", field = "quantity", observedValue = "0.5"),
+            ),
+            confidence = 0.98,
+        )
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.PURCHASE,
+            source = IngestionSource("chatgpt", emptyList(), "중량 상품 0.5개"),
+            review = IngestionReview(
+                status = IngestionReviewStatus.READY,
+                verificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+            ),
+            schemaVersion = YEONSIK_OCR_V4_SCHEMA,
+            purchaseRecords = listOf(record),
+        )
+
+        val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .submitPurchasePriceObservationsV4("fractional-request-key", envelope)
+
+        assertEquals(
+            "pricetrace_v4_quantity_positive_integer_required",
+            (result as PriceTraceCanonicalOutcome.Failure).message,
+        )
+        assertTrue(transport.requests.isEmpty())
+    }
+
+    @Test
     fun purchaseSourceCanBeSavedWithoutClaimingPriceObservationWhenSellerIsUnknown() = runTest {
         val transport = QueueTransport(
             PriceObservationHttpResponse(

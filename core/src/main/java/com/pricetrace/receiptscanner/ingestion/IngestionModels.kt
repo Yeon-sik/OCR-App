@@ -781,6 +781,21 @@ data class PurchaseRecord(
     val priceTraceSourceEligible: Boolean
         get() = lineItems.isNotEmpty() && (effectiveOrderedOn != null || effectivePaidOn != null)
 
+    /**
+     * PriceTrace V4 serializes a present line quantity as a positive long integer. This is a
+     * sink-compatibility check, not a normalization rule: source quantities (including 0.5)
+     * remain unchanged in the canonical purchase record and can still be sent to other sinks.
+     */
+    val priceTraceSubmissionEligible: Boolean
+        get() = priceTraceSourceEligible && lineItems.all { line ->
+            line.quantity?.let { quantity ->
+                quantity.isFinite() &&
+                    quantity > 0.0 &&
+                    quantity % 1.0 == 0.0 &&
+                    quantity <= Long.MAX_VALUE.toDouble()
+            } ?: true
+        }
+
     /** Only a settled, explicitly classified retail/restaurant purchase may create a normal observation. */
     val priceObservationEligible: Boolean
         get() = priceTraceSourceEligible &&

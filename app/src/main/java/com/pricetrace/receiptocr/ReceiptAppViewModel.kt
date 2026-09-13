@@ -1870,7 +1870,7 @@ class ReceiptAppViewModel(
             mutableUiState.value = mutableUiState.value.copy(
                 isSubmittingCanonicalAllReady = true,
                 isSubmittingCanonicalPriceTrace = envelope.receipt != null ||
-                    envelope.purchaseRecords.any { it.priceTraceSourceEligible },
+                    envelope.purchaseRecords.any { it.priceTraceSubmissionEligible },
                 isSubmittingCashOsReceipt = envelope.receipt != null ||
                     envelope.purchaseRecords.any { it.cashOsTransactionEligible },
                 isNutritionPublishing = envelope.nutrition.isNotEmpty(),

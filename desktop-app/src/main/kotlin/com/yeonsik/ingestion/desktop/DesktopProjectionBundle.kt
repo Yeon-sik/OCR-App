@@ -27,9 +27,10 @@ import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
 /** Shared core gateway wiring for the Desktop console. No Desktop-specific submitter is added. */
 class DesktopProjectionBundle(
     private val config: DesktopRuntimeConfig = DesktopRuntimeConfig.load(),
+    private val evidenceArchivePortOverride: EvidenceArchivePort? = null,
 ) {
     val evidenceStore = DesktopEvidenceSupabaseStore(config.evidence)
-    val evidenceArchivePort: EvidenceArchivePort = EvidenceSupabaseArchivePort(
+    val evidenceArchivePort: EvidenceArchivePort = evidenceArchivePortOverride ?: EvidenceSupabaseArchivePort(
         store = evidenceStore,
         email = config.evidence.email,
         password = config.evidence.password,

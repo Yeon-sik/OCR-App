@@ -5,12 +5,24 @@ data class CanonicalProjectionPlan(
     val eligible: Set<IngestionProjection>,
     val disabled: Set<IngestionProjection>,
     val dependencies: Map<IngestionProjection, Set<IngestionProjection>>,
+    /** Structural compatibility exclusions for review/UI; never canonical source data. */
+    val disabledReasons: Map<IngestionProjection, String> = emptyMap(),
 ) {
     fun isEligible(projection: IngestionProjection): Boolean = projection in eligible
 }
 
 object CanonicalProjectionPlanner {
     fun plan(envelope: YeonsikOcrEnvelope): CanonicalProjectionPlan {
+        val disabledReasons = buildMap {
+            if (envelope.purchaseRecords.any(PurchaseRecord::priceTraceSourceEligible) &&
+                envelope.purchaseRecords.none(PurchaseRecord::priceTraceSubmissionEligible)
+            ) {
+                put(
+                    IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+                    "pricetrace_v4_quantity_positive_integer_required",
+                )
+            }
+        }
         val eligible = buildSet {
             if (envelope.receipt != null) {
                 add(IngestionProjection.PRICETRACE_RECEIPT)
@@ -22,7 +34,7 @@ object CanonicalProjectionPlanner {
             ) {
                 add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
             }
-            if (envelope.purchaseRecords.any(PurchaseRecord::priceTraceSourceEligible)) {
+            if (envelope.purchaseRecords.any(PurchaseRecord::priceTraceSubmissionEligible)) {
                 add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
             }
             if (envelope.purchaseRecords.any(PurchaseRecord::cashOsTransactionEligible)) {
@@ -73,6 +85,7 @@ object CanonicalProjectionPlanner {
             eligible = withDependencies,
             disabled = IngestionProjection.entries.toSet() - withDependencies,
             dependencies = dependencies,
+            disabledReasons = disabledReasons.filterKeys { it !in withDependencies },
         )
     }
 
@@ -91,7 +104,7 @@ object CanonicalProjectionPlanner {
         }
         if (requested.contains(IngestionProjection.PRICETRACE_PRICE_OBSERVATION) &&
             envelope.purchaseRecords.any { record ->
-                record.priceTraceSourceEligible &&
+                record.priceTraceSubmissionEligible &&
                     record.purchaseKind == PurchaseKind.RETAIL &&
                     record.lineItems.any { line ->
                         line.productClientKey in envelope.productCandidates.map(ProductCandidate::clientKey).toSet()
@@ -140,7 +153,7 @@ object CanonicalProjectionPlanner {
                     add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
                 }
                 if (envelope.purchaseRecords.any { record ->
-                        record.priceTraceSourceEligible &&
+                        record.priceTraceSubmissionEligible &&
                             record.purchaseKind == PurchaseKind.RETAIL &&
                             record.lineItems.any { line ->
                                 line.productClientKey in envelope.productCandidates.map(ProductCandidate::clientKey).toSet()

@@ -7,6 +7,9 @@ import com.pricetrace.receiptscanner.publisher.CashOsTransactionV4Payload
 import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Contract
 import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Json
 import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Payload
+import com.pricetrace.receiptscanner.review.ReviewDestination
+import com.pricetrace.receiptscanner.review.ReviewDestinationStatus
+import com.pricetrace.receiptscanner.review.ReviewViewModel
 import com.pricetrace.receiptscanner.input.InputOrigin
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -24,6 +27,90 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class YeonsikOcrV4PurchaseTest {
+    @Test
+    fun `fractional source quantity keeps CashOS active and excludes PriceTrace before submit`() = runBlocking {
+        val fractionalRecord = orderRecord(
+            lineItems = listOf(
+                PurchaseRecordLine(
+                    productClientKey = "product-client-1",
+                    description = "중량 상품",
+                    quantity = 0.5,
+                    unitPriceAmountKrw = 1000,
+                    grossAmountKrw = 500,
+                    discountAmountKrw = 0,
+                    netAmountKrw = 500,
+                ),
+            ),
+            evidence = listOf(
+                PurchaseRecordEvidence(
+                    sourceType = "user_statement",
+                    field = "quantity",
+                    observedValue = "0.5",
+                ),
+            ),
+        ).copy(
+            totals = PurchaseRecordTotals(
+                subtotalAmountKrw = 500,
+                discountAmountKrw = 0,
+                shippingAmountKrw = 0,
+                taxAmountKrw = 0,
+                grandTotalAmountKrw = 500,
+                paidAmountKrw = 500,
+            ),
+        )
+        val canonical = purchaseEnvelope(
+            record = fractionalRecord,
+            sourceFiles = emptyList(),
+            userText = "중량 상품 0.5개를 구매했습니다.",
+        )
+        val canonicalJson = YeonsikOcrV4Json.encode(canonical)
+        val decoded = YeonsikOcrV4Json.decode(canonicalJson, "v4-fractional-quantity")
+        val plan = CanonicalProjectionPlanner.plan(decoded)
+
+        assertEquals(0.5, decoded.purchaseRecords.single().lineItems.single().quantity)
+        assertFalse(decoded.purchaseRecords.single().priceTraceSubmissionEligible)
+        assertFalse(IngestionProjection.PRICETRACE_PRICE_OBSERVATION in plan.eligible)
+        assertEquals(
+            "pricetrace_v4_quantity_positive_integer_required",
+            plan.disabledReasons[IngestionProjection.PRICETRACE_PRICE_OBSERVATION],
+        )
+        assertTrue(IngestionProjection.CASHOS_TRANSACTION in plan.eligible)
+        val priceTraceBadge = ReviewViewModel.fromCanonical(decoded).destinations.single {
+            it.destination == ReviewDestination.PRICE_TRACE
+        }
+        assertEquals(ReviewDestinationStatus.CONDITION_UNMET, priceTraceBadge.status)
+        assertEquals("pricetrace_v4_quantity_positive_integer_required", priceTraceBadge.reason)
+
+        val calls = mutableListOf<IngestionProjection>()
+        val useCase = CanonicalIngestionUseCase(
+            store = InMemoryIngestionSessionStore(),
+            submitters = mapOf(
+                IngestionProjection.CASHOS_TRANSACTION to object : IngestionProjectionSubmitter {
+                    override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                        calls += request.projection
+                        return ProjectionSubmission.Success("cashos-fractional")
+                    }
+                },
+            ),
+        )
+        val imported = useCase.importJson(canonicalJson, "v4-fractional-quantity", "v4-fractional-ingestion")
+            as CanonicalImportResult.Success
+        val confirmed = useCase.confirm("v4-fractional-ingestion", imported.envelope)
+        assertTrue(confirmed.result is IngestionStartResult.Success)
+
+        val submitted = useCase.submitSelected(
+            "v4-fractional-ingestion",
+            confirmed.envelope,
+            plan.eligible,
+        )
+        assertEquals(listOf(IngestionProjection.CASHOS_TRANSACTION), calls)
+        assertEquals(
+            ProjectionStatus.UPLOADED,
+            submitted.single { it.projection == IngestionProjection.CASHOS_TRANSACTION }.status,
+        )
+        assertFalse(submitted.any { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION && it.status != ProjectionStatus.DISABLED })
+    }
+
     @Test
     fun `coupang seller and optional line key map to exact PriceTrace and CashOS V4 shapes`() {
         val envelope = purchaseEnvelope(orderRecord(seller = "공식 판매자"))
