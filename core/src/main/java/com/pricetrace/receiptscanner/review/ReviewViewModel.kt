@@ -234,22 +234,30 @@ data class ReviewViewModel(
             session: IngestionSession?,
             selectedProjections: Set<IngestionProjection>?,
         ) {
-            val evidence = evidenceFor(sourceFiles, purchase.evidence.flatMap(PurchaseRecordEvidence::sourceAttachmentIds), envelope.source.userText, purchase.evidence.map { it.sourceType to it.sourceAttachmentIds })
             val destinations = destinationBadgesFor(plan, session, selectedProjections, PURCHASE_PROJECTIONS)
-            fun addPurchaseField(item: String, value: String?) = rows.add(
-                ReviewRow("purchase:${purchase.clientKey}:$item", "구매", item, value.orEmpty(), evidence, destinations, percent(purchase.confidence))
+            fun addPurchaseField(item: String, value: String?, fields: Set<String>) = rows.add(
+                ReviewRow(
+                    "purchase:${purchase.clientKey}:$item",
+                    "구매",
+                    item,
+                    value.orEmpty(),
+                    purchaseEvidenceFor(sourceFiles, envelope, purchase, fields),
+                    destinations,
+                    percent(purchase.confidence),
+                )
             )
-            addPurchaseField("플랫폼", purchase.platform)
-            addPurchaseField("판매자", purchase.seller)
-            addPurchaseField("주문일·시각", listOfNotNull(purchase.orderedOn?.let { "날짜 $it" }, purchase.orderedAt?.let { "시각 $it" }).joinToString(" · ").ifBlank { null })
-            addPurchaseField("결제일·시각", listOfNotNull(purchase.paidOn?.let { "날짜 $it" }, purchase.paidAt?.let { "시각 $it" }).joinToString(" · ").ifBlank { null })
-            addPurchaseField("상태", purchase.status.wireValue)
-            addPurchaseField("결제금액", purchase.totals.cashOsAmountKrw?.let { "$it KRW" })
-            purchase.orderReference?.let { addPurchaseField("주문번호", it) }
-            purchase.payment?.method?.let { addPurchaseField("결제수단", it) }
-            purchase.payment?.status?.let { addPurchaseField("결제상태", it) }
+            addPurchaseField("플랫폼", purchase.platform, setOf("platform"))
+            addPurchaseField("판매자", purchase.seller, setOf("seller"))
+            addPurchaseField("주문일·시각", listOfNotNull(purchase.orderedOn?.let { "날짜 $it" }, purchase.orderedAt?.let { "시각 $it" }).joinToString(" · ").ifBlank { null }, setOf("ordered_on", "ordered_at"))
+            addPurchaseField("결제일·시각", listOfNotNull(purchase.paidOn?.let { "날짜 $it" }, purchase.paidAt?.let { "시각 $it" }).joinToString(" · ").ifBlank { null }, setOf("paid_on", "paid_at"))
+            addPurchaseField("상태", purchase.status.wireValue, setOf("status"))
+            addPurchaseField("총 주문금액", purchase.totals.grandTotalAmountKrw?.let { "$it KRW" }, setOf("grand_total_amount_krw"))
+            addPurchaseField("실제 결제금액", purchase.totals.paidAmountKrw?.let { "$it KRW" }, setOf("paid_amount_krw"))
+            purchase.orderReference?.let { addPurchaseField("주문번호", it, setOf("order_reference")) }
+            purchase.payment?.method?.let { addPurchaseField("결제수단", it, setOf("payment_method")) }
+            purchase.payment?.status?.let { addPurchaseField("결제상태", it, setOf("payment_status")) }
             purchase.lineItems.forEachIndexed { index, line ->
-                rows.add(ReviewRow("purchase:${purchase.clientKey}:line:$index", "구매 상품", line.description.orEmpty(), listOfNotNull(line.quantity?.let { "수량 $it" }, line.netAmountKrw?.let { "$it KRW" }).joinToString(" · "), evidence, destinations, details = buildList {
+                rows.add(ReviewRow("purchase:${purchase.clientKey}:line:$index", "구매 상품", line.description.orEmpty(), listOfNotNull(line.quantity?.let { "수량 $it" }, line.netAmountKrw?.let { "$it KRW" }).joinToString(" · "), purchaseLineEvidenceFor(sourceFiles, envelope, purchase, line, index), destinations, details = buildList {
                     line.optionText?.let { add(ReviewDetail("옵션", it)) }
                     line.merchantSku?.let { add(ReviewDetail("판매자 SKU", it)) }
                     line.priceStatus.let { add(ReviewDetail("가격 상태", it)) }
@@ -258,6 +266,73 @@ data class ReviewViewModel(
                 }))
             }
         }
+
+        private fun purchaseEvidenceFor(
+            sourceFiles: Map<String, SourceAttachment>,
+            envelope: YeonsikOcrEnvelope,
+            purchase: PurchaseRecord,
+            fields: Set<String>,
+        ): List<ReviewEvidenceBadge> {
+            val matching = purchase.evidence.filter { it.field in fields }
+            return evidenceFor(
+                sourceFiles = sourceFiles,
+                ids = matching.flatMap(PurchaseRecordEvidence::sourceAttachmentIds),
+                userText = envelope.source.userText.takeIf { matching.any { evidence -> evidence.sourceType == "user_statement" } },
+                typed = matching.map { it.sourceType to it.sourceAttachmentIds.filter { id -> id in sourceFiles } },
+            )
+        }
+
+        private fun purchaseLineEvidenceFor(
+            sourceFiles: Map<String, SourceAttachment>,
+            envelope: YeonsikOcrEnvelope,
+            purchase: PurchaseRecord,
+            line: com.pricetrace.receiptscanner.ingestion.PurchaseRecordLine,
+            index: Int,
+        ): List<ReviewEvidenceBadge> {
+            val matching = purchase.evidence.filter { evidence ->
+                evidence.field in LINE_EVIDENCE_FIELDS && evidence.sourceRef?.let { ref -> lineReferenceMatches(ref, line.lineKey, index) } == true
+            }
+            return evidenceFor(
+                sourceFiles = sourceFiles,
+                ids = matching.flatMap(PurchaseRecordEvidence::sourceAttachmentIds),
+                userText = envelope.source.userText.takeIf { matching.any { evidence -> evidence.sourceType == "user_statement" } },
+                typed = matching.map { it.sourceType to it.sourceAttachmentIds.filter { id -> id in sourceFiles } },
+            )
+        }
+
+        private fun lineReferenceMatches(reference: String, lineKey: String?, index: Int): Boolean {
+            val normalized = reference.trim()
+            val candidates = buildSet {
+                lineKey?.let {
+                    add(it)
+                    add("line:$it")
+                    add("line/$it")
+                    add("line_items/$it")
+                    add("line_items.$it")
+                }
+                add("line_items[$index]")
+                add("line_items.$index")
+                add("line_item[$index]")
+                add("line_item.$index")
+            }
+            return normalized in candidates || candidates.any { normalized.endsWith("/$it") || normalized.endsWith("#$it") }
+        }
+
+        private val LINE_EVIDENCE_FIELDS = setOf(
+            "line_key",
+            "product_client_key",
+            "description",
+            "seller_override",
+            "option_text",
+            "price_status",
+            "merchant_sku",
+            "quantity",
+            "unit_price_amount_krw",
+            "gross_amount_krw",
+            "discount_amount_krw",
+            "net_amount_krw",
+            "line_item",
+        )
 
         private fun addNutritionRow(
             rows: MutableList<ReviewRow>,
@@ -308,20 +383,32 @@ data class ReviewViewModel(
                 nutrients[NutritionField.SUGARS_GRAMS]?.let { ReviewDetail("당류", "${number(it)} g") },
                 nutrients[NutritionField.SATURATED_FAT_GRAMS]?.let { ReviewDetail("포화지방", "${number(it)} g") },
             ) + provenance.map { (field, source) -> ReviewDetail("provenance ${field.koreanLabel}", source) }
-            val nutritionEvidenceIds = when (nutrition) {
+            val nutritionEvidenceRefs = when (nutrition) {
                 is IngestionNutrition.ProductLabel -> nutrition.draft.evidence.values.flatten().map { it.pageId }
                 is IngestionNutrition.RestaurantEstimate -> nutrition.estimate.nutrientProvenance.values.flatMap { it.evidenceRefs }
                 is IngestionNutrition.RestaurantMenuEstimate -> nutrition.estimate.nutrientProvenance.values.flatMap { it.evidenceRefs }
                 is IngestionNutrition.MealComponentEstimate -> nutrition.estimate.nutrientProvenance.values.flatMap { it.evidenceRefs }
-            }.filter { it in sourceFiles }.distinct()
-            val typedNutritionEvidence = when (nutrition) {
-                is IngestionNutrition.ProductLabel -> emptyList()
-                is IngestionNutrition.RestaurantEstimate -> nutrition.estimate.nutrientProvenance.values.mapNotNull { it.sourceType to it.evidenceRefs.filter { ref -> ref in sourceFiles } }.filter { it.second.isNotEmpty() }
-                is IngestionNutrition.RestaurantMenuEstimate -> nutrition.estimate.nutrientProvenance.values.mapNotNull { it.sourceType to it.evidenceRefs.filter { ref -> ref in sourceFiles } }.filter { it.second.isNotEmpty() }
-                is IngestionNutrition.MealComponentEstimate -> nutrition.estimate.nutrientProvenance.values.mapNotNull { it.sourceType to it.evidenceRefs.filter { ref -> ref in sourceFiles } }.filter { it.second.isNotEmpty() }
             }
-            rows.add(ReviewRow("nutrition:${nutrition.clientKey}", "영양", name, summary, evidenceFor(sourceFiles, nutritionEvidenceIds, envelope.source.userText, typedNutritionEvidence), destinationBadgesFor(plan, session, selectedProjections, setOf(IngestionProjection.FITNESS_NUTRITION)), confidence?.let(::percent), details))
+            val nutritionEvidenceIds = nutritionEvidenceRefs
+                .flatMap(::resolveSourceFileIds)
+                .filter { it in sourceFiles }
+                .toMutableSet()
+            if (nutrition is IngestionNutrition.ProductLabel && nutritionEvidenceIds.isEmpty()) {
+                sourceFiles.values
+                    .distinctBy(SourceAttachment::id)
+                    .firstOrNull { it.type == SourceAttachmentType.NUTRITION_LABEL && it.id == nutrition.draft.documentId }
+                    ?.let { nutritionEvidenceIds += it.id }
+            }
+            val nutritionUserText = when (nutrition) {
+                is IngestionNutrition.ProductLabel -> false
+                is IngestionNutrition.RestaurantEstimate -> nutrition.estimate.nutrientProvenance.values.any { it.sourceType == "user_statement" }
+                is IngestionNutrition.RestaurantMenuEstimate -> nutrition.estimate.nutrientProvenance.values.any { it.sourceType == "user_statement" }
+                is IngestionNutrition.MealComponentEstimate -> nutrition.estimate.nutrientProvenance.values.any { it.sourceType == "user_statement" }
+            }
+            rows.add(ReviewRow("nutrition:${nutrition.clientKey}", "영양", name, summary, evidenceFor(sourceFiles, nutritionEvidenceIds.toList(), envelope.source.userText.takeIf { nutritionUserText }), destinationBadgesFor(plan, session, selectedProjections, setOf(IngestionProjection.FITNESS_NUTRITION)), confidence?.let(::percent), details))
         }
+
+        private fun resolveSourceFileIds(reference: String): List<String> = listOf(reference.substringBefore('/'))
 
         private val RECEIPT_PROJECTIONS = setOf(
             IngestionProjection.PRICETRACE_RECEIPT,

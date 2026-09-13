@@ -7,9 +7,24 @@ import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.domain.ReceiptV2Totals
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
 import com.pricetrace.receiptscanner.ingestion.IngestionMode
+import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionSource
+import com.pricetrace.receiptscanner.ingestion.LocalEvidence
+import com.pricetrace.receiptscanner.ingestion.NutritionNutrientProvenance
+import com.pricetrace.receiptscanner.ingestion.PurchaseKind
+import com.pricetrace.receiptscanner.ingestion.PurchaseRecord
+import com.pricetrace.receiptscanner.ingestion.PurchaseRecordEvidence
+import com.pricetrace.receiptscanner.ingestion.PurchaseRecordLine
+import com.pricetrace.receiptscanner.ingestion.PurchaseRecordStatus
+import com.pricetrace.receiptscanner.ingestion.PurchaseRecordTotals
+import com.pricetrace.receiptscanner.ingestion.RestaurantNutritionEstimate
+import com.pricetrace.receiptscanner.ingestion.SourceAttachment
+import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
+import com.pricetrace.receiptscanner.nutrition.NutritionField
+import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -69,6 +84,136 @@ class ReviewViewModelTest {
             ReviewDestinationStatus.UNSELECTED,
             merchantRow.destinations.single { it.destination == ReviewDestination.CASH_OS }.status,
         )
+    }
+
+    @Test
+    fun nutritionEvidenceRefsResolveToBoundSourceFileOnly() {
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.RESTAURANT,
+            source = IngestionSource(
+                producer = "test",
+                sourceFiles = listOf(
+                    SourceAttachment("food-1", SourceAttachmentType.FOOD_PHOTO),
+                    SourceAttachment("food-2", SourceAttachmentType.FOOD_PHOTO),
+                ),
+            ),
+            nutrition = listOf(
+                IngestionNutrition.RestaurantEstimate(
+                    clientKey = "nutrition-1",
+                    lineId = "line-1",
+                    menuName = "비빔밥",
+                    estimate = RestaurantNutritionEstimate(
+                        nutrients = mapOf(NutritionField.CALORIES_KCAL to 500.0),
+                        estimated = true,
+                        confidence = "medium",
+                        nutrientProvenance = mapOf(
+                            NutritionField.CALORIES_KCAL to NutritionNutrientProvenance(
+                                valueStatus = "estimated",
+                                sourceType = "food_image_estimate",
+                                evidenceRefs = listOf("food-1/calories_kcal"),
+                            ),
+                        ),
+                        confidenceScore = 0.8,
+                    ),
+                ),
+            ),
+        )
+
+        val row = ReviewViewModel.fromCanonical(
+            envelope,
+            evidence = listOf(
+                LocalEvidence("food-1", SourceAttachmentType.FOOD_PHOTO, fileReadable = true),
+                LocalEvidence("food-2", SourceAttachmentType.FOOD_PHOTO, fileReadable = true),
+            ),
+        ).rows.single { it.section == "영양" }
+
+        assertEquals(listOf("food-1"), row.evidence.single().sourceIds)
+    }
+
+    @Test
+    fun productLabelUsesDocumentIdFallbackForBoundNutritionLabel() {
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.PACKAGED_PRODUCT,
+            source = IngestionSource(
+                producer = "test",
+                sourceFiles = listOf(
+                    SourceAttachment("nutrition-doc", SourceAttachmentType.NUTRITION_LABEL),
+                    SourceAttachment("other-nutrition", SourceAttachmentType.NUTRITION_LABEL),
+                ),
+            ),
+            nutrition = listOf(
+                IngestionNutrition.ProductLabel(
+                    clientKey = "nutrition-doc",
+                    draft = NutritionLabelDraft(documentId = "nutrition-doc"),
+                ),
+            ),
+        )
+
+        val row = ReviewViewModel.fromCanonical(
+            envelope,
+            evidence = listOf(
+                LocalEvidence("nutrition-doc", SourceAttachmentType.NUTRITION_LABEL, fileReadable = true),
+                LocalEvidence("other-nutrition", SourceAttachmentType.NUTRITION_LABEL, fileReadable = true),
+            ),
+        ).rows.single { it.section == "영양" }
+
+        assertEquals(ReviewEvidenceKind.NUTRITION_LABEL, row.evidence.single().kind)
+        assertEquals(listOf("nutrition-doc"), row.evidence.single().sourceIds)
+    }
+
+    @Test
+    fun v4PurchaseRowsUseFieldAndLineScopedEvidenceAndSeparateAmounts() {
+        val purchase = PurchaseRecord(
+            clientKey = "purchase-1",
+            platform = "플랫폼",
+            seller = "판매자",
+            purchaseKind = PurchaseKind.RETAIL,
+            orderedOn = "2026-09-13",
+            orderedAt = "2026-09-13T09:00:00+09:00",
+            paidOn = "2026-09-13",
+            paidAt = "2026-09-13T09:01:00+09:00",
+            status = PurchaseRecordStatus.PAID,
+            totals = PurchaseRecordTotals(grandTotalAmountKrw = 1000, paidAmountKrw = 1000),
+            payment = null,
+            lineItems = listOf(
+                PurchaseRecordLine(lineKey = "line-1", description = "상품", quantity = 1.0, netAmountKrw = 1000),
+            ),
+            evidence = listOf(
+                PurchaseRecordEvidence("order_history", listOf("order-1"), field = "platform"),
+                PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "seller"),
+                PurchaseRecordEvidence("order_history", listOf("order-1"), field = "grand_total_amount_krw"),
+                PurchaseRecordEvidence("payment_history", listOf("payment-1"), field = "paid_amount_krw"),
+                PurchaseRecordEvidence("order_history", listOf("order-1"), sourceRef = "line-1", field = "description"),
+                PurchaseRecordEvidence("order_history", listOf("order-1"), sourceRef = "line-2", field = "description"),
+            ),
+            confidence = 0.9,
+        )
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.PURCHASE,
+            schemaVersion = YEONSIK_OCR_V4_SCHEMA,
+            source = IngestionSource(
+                producer = "test",
+                sourceFiles = listOf(
+                    SourceAttachment("order-1", SourceAttachmentType.ORDER_HISTORY),
+                    SourceAttachment("payment-1", SourceAttachmentType.PAYMENT_HISTORY),
+                ),
+            ),
+            purchaseRecords = listOf(purchase),
+        )
+
+        val rows = ReviewViewModel.fromCanonical(
+            envelope,
+            evidence = listOf(
+                LocalEvidence("order-1", SourceAttachmentType.ORDER_HISTORY, fileReadable = true),
+                LocalEvidence("payment-1", SourceAttachmentType.PAYMENT_HISTORY, fileReadable = true),
+            ),
+        ).rows
+
+        assertEquals(listOf(ReviewEvidenceKind.ORDER_HISTORY), rows.single { it.item == "플랫폼" }.evidence.map { it.kind })
+        assertEquals(listOf(ReviewEvidenceKind.PAYMENT_HISTORY), rows.single { it.item == "판매자" }.evidence.map { it.kind })
+        assertEquals("1000 KRW", rows.single { it.item == "총 주문금액" }.value)
+        assertEquals("1000 KRW", rows.single { it.item == "실제 결제금액" }.value)
+        assertEquals(listOf("order-1"), rows.single { it.item == "상품" }.evidence.single().sourceIds)
     }
 
     private fun receipt() = ReceiptV2(
