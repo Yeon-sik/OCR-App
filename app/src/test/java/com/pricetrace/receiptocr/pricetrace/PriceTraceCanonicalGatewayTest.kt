@@ -64,6 +64,11 @@ class PriceTraceCanonicalGatewayTest {
         assertEquals("pricetrace-idempotency-1", body["p_idempotency_key"]?.jsonPrimitive?.content)
 
         val sentReceipt = body["p_receipt"]!!.jsonObject
+        val merchant = sentReceipt["merchant"]!!.jsonObject
+        assertEquals("Main", merchant["branch_name"]?.jsonPrimitive?.content)
+        assertEquals("서울시 중구 테스트로 1", merchant["address"]?.jsonPrimitive?.content)
+        assertEquals("02-1234-5678", merchant["phone"]?.jsonPrimitive?.content)
+        assertEquals("123-45-67890", merchant["business_registration_number"]?.jsonPrimitive?.content)
         val document = sentReceipt["document"]!!.jsonObject
         assertEquals(JsonNull, document["id"])
         assertFalse(document.containsKey("localDocumentId"))
@@ -1088,9 +1093,9 @@ class PriceTraceCanonicalGatewayTest {
             retailChannel = RetailChannel.REGULAR,
             catalogNamespace = null,
             merchantId = null,
-            businessRegistrationNumber = null,
-            address = null,
-            phone = null,
+            businessRegistrationNumber = "123-45-67890",
+            address = "서울시 중구 테스트로 1",
+            phone = "02-1234-5678",
         ),
         lineItems = listOf(
             ReceiptV2LineItem(

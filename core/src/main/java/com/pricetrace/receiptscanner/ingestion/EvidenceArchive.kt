@@ -20,6 +20,7 @@ import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.Base64
+import java.util.Locale
 
 data class EvidenceSupabaseConfig(
     val url: String = "",
@@ -302,8 +303,8 @@ class EvidenceSupabaseArchivePort(
                 contentLength = item.byteSize,
             )
         }
-        require(response.statusCode in 200..299 || response.statusCode == 409) {
-            "evidence blob archive failed (${response.statusCode})"
+        require(response.statusCode in 200..299 || response.isDuplicateBlobConflict()) {
+            response.failureMessage("evidence blob archive")
         }
     }
 
@@ -487,7 +488,39 @@ class EvidenceSupabaseArchivePort(
     }
 
     private fun EvidenceHttpResponse.requireSuccess(label: String): EvidenceHttpResponse = also {
-        require(statusCode in 200..299) { "$label failed ($statusCode): ${body.take(240)}" }
+        require(statusCode in 200..299) { failureMessage(label) }
+    }
+
+    /** Storage duplicate responses vary between 400 and 409; status alone is not sufficient. */
+    private fun EvidenceHttpResponse.isDuplicateBlobConflict(): Boolean {
+        if (statusCode != 400 && statusCode != 409) return false
+        val root = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull() ?: return false
+        return listOf("code", "error", "message")
+            .mapNotNull { (root[it] as? JsonPrimitive)?.contentOrNull }
+            .any(::isDuplicateMarker)
+    }
+
+    private fun isDuplicateMarker(value: String): Boolean {
+        val normalized = value.trim().lowercase(Locale.ROOT)
+        val compact = normalized.filter(Char::isLetterOrDigit)
+        return compact in setOf("assetalreadyexists", "resourcealreadyexists", "keyalreadyexists") ||
+            Regex("\\balready\\s+exists?\\b").containsMatchIn(normalized) ||
+            (Regex("\\bduplicate\\b").containsMatchIn(normalized) &&
+                !Regex("\\bnot\\s+(a\\s+)?duplicate\\b").containsMatchIn(normalized))
+    }
+
+    private fun EvidenceHttpResponse.failureMessage(label: String): String {
+        val safeBody = body.replace(Regex("\\s+"), " ").trim().take(240)
+        val root = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
+        val code = root?.let { value ->
+            listOf("code", "error", "message")
+                .firstNotNullOfOrNull { key -> (value[key] as? JsonPrimitive)?.contentOrNull }
+        }
+        return buildString {
+            append("$label failed ($statusCode)")
+            if (code != null) append(" code=$code")
+            append(" response=${safeBody.ifBlank { "<empty>" }}")
+        }
     }
 
     private fun EvidenceHttpResponse.firstIdOrNull(): String? =

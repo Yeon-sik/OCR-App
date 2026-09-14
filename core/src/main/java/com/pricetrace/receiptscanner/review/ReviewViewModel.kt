@@ -105,6 +105,9 @@ data class ReviewViewModel(
                     val receiptEvidence = receiptEvidence(sourceFiles)
                     add("판매처", "판매처명", receipt.merchant.name, receiptEvidence, receiptDestinations)
                     add("판매처", "지점명", receipt.merchant.branchName, receiptEvidence, receiptDestinations)
+                    add("판매처", "주소", receipt.merchant.address, receiptEvidence, receiptDestinations)
+                    add("판매처", "전화번호", receipt.merchant.phone, receiptEvidence, receiptDestinations)
+                    add("판매처", "사업자등록번호", receipt.merchant.businessRegistrationNumber, receiptEvidence, receiptDestinations)
                     add("문서", "구매일", receipt.document.issuedOn, receiptEvidence, receiptDestinations)
                     add("문서", "통화", receipt.document.currency, receiptEvidence, receiptDestinations)
                     add("금액", "최종 결제금액", receipt.totals.grandTotalAmountMinor?.let { "$it ${receipt.document.currency.orEmpty()}" }, receiptEvidence, receiptDestinations)
@@ -122,7 +125,7 @@ data class ReviewViewModel(
                         )
                     }
                 }
-                envelope.merchantCandidate?.let { candidate ->
+                envelope.merchantCandidate?.takeIf { envelope.receipt == null }?.let { candidate ->
                     val candidateDestinations = destinationBadgesFor(plan, session, selectedProjections, setOf(IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE))
                     add("판매처 후보", "판매처명", candidate.name, evidenceFor(sourceFiles, candidate.sourceAttachmentIds, envelope.source.userText), candidateDestinations)
                     add("판매처 후보", "지점명", candidate.branchName, evidenceFor(sourceFiles, candidate.sourceAttachmentIds, envelope.source.userText), candidateDestinations)

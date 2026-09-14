@@ -11,6 +11,7 @@ import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionSource
 import com.pricetrace.receiptscanner.ingestion.LocalEvidence
+import com.pricetrace.receiptscanner.ingestion.MerchantCandidate
 import com.pricetrace.receiptscanner.ingestion.NutritionNutrientProvenance
 import com.pricetrace.receiptscanner.ingestion.PurchaseKind
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecord
@@ -84,6 +85,53 @@ class ReviewViewModelTest {
         assertEquals(
             ReviewDestinationStatus.UNSELECTED,
             merchantRow.destinations.single { it.destination == ReviewDestination.CASH_OS }.status,
+        )
+    }
+
+    @Test
+    fun receiptMerchantFieldsUseReceiptProjectionDestination() {
+        val model = ReviewViewModel.fromCanonical(
+            YeonsikOcrEnvelope(
+                mode = IngestionMode.RESTAURANT,
+                source = IngestionSource(producer = "test", sourceFiles = emptyList()),
+                receipt = receiptWithMerchantDetails(),
+                merchantCandidate = MerchantCandidate(name = "중복 후보"),
+            ),
+            selectedProjections = setOf(IngestionProjection.PRICETRACE_RECEIPT),
+        )
+
+        val merchantRows = model.rows.filter { it.section == "판매처" }
+        assertEquals(
+            mapOf(
+                "판매처명" to "테스트 마트",
+                "지점명" to "본점",
+                "주소" to "서울시 중구 테스트로 1",
+                "전화번호" to "02-1234-5678",
+                "사업자등록번호" to "123-45-67890",
+            ),
+            merchantRows.associate { it.item to it.value },
+        )
+        assertTrue(merchantRows.all {
+            it.destinations.single { badge -> badge.destination == ReviewDestination.PRICE_TRACE }.status ==
+                ReviewDestinationStatus.PLANNED
+        })
+        assertTrue(model.rows.none { it.section == "판매처 후보" })
+    }
+
+    @Test
+    fun merchantOnlyUsesMerchantCandidateDestination() {
+        val model = ReviewViewModel.fromCanonical(
+            YeonsikOcrEnvelope(
+                mode = IngestionMode.MERCHANT,
+                source = IngestionSource(producer = "test", sourceFiles = emptyList()),
+                merchantCandidate = MerchantCandidate(name = "후보 판매처"),
+            ),
+        )
+
+        val row = model.rows.single { it.section == "판매처 후보" && it.item == "판매처명" }
+        assertEquals(
+            ReviewDestinationStatus.PLANNED,
+            row.destinations.single { it.destination == ReviewDestination.PRICE_TRACE }.status,
         )
     }
 
@@ -253,6 +301,18 @@ class ReviewViewModelTest {
             ),
         ).rows.filter { it.section == "구매 상품" }
         assertTrue(ambiguousRows.all { it.evidence.isEmpty() })
+    }
+
+    private fun receiptWithMerchantDetails(): ReceiptV2 {
+        val receipt = receipt()
+        return receipt.copy(
+            merchant = receipt.merchant.copy(
+                branchName = "본점",
+                address = "서울시 중구 테스트로 1",
+                phone = "02-1234-5678",
+                businessRegistrationNumber = "123-45-67890",
+            ),
+        )
     }
 
     private fun receipt() = ReceiptV2(
