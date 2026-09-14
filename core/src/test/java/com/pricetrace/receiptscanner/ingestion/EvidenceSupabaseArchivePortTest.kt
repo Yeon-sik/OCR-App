@@ -12,6 +12,68 @@ import java.security.MessageDigest
 
 class EvidenceSupabaseArchivePortTest {
     @Test
+    fun firstBlobUploadSucceedsWithoutOverwrite() = runTest {
+        val (result, transport) = archiveWithUploadResponse(EvidenceHttpResponse(201, "{}"))
+
+        assertTrue(result is EvidenceArchiveResult.Success)
+        val upload = transport.requests.single { "/storage/v1/object/" in it.url }
+        assertEquals("POST", upload.method)
+        assertEquals("false", upload.headers["x-upsert"])
+    }
+
+    @Test
+    fun duplicate400ReusesBlobAndContinuesObjectAndBinding() = runTest {
+        val (result, transport) = archiveWithUploadResponse(
+            EvidenceHttpResponse(400, """{"code":"AssetAlreadyExists","error":"Asset Already Exists","message":"The asset already exists"}"""),
+        )
+
+        assertTrue(result is EvidenceArchiveResult.Success)
+        assertEquals(4, transport.requests.size)
+        assertTrue(transport.requests.any { "/rest/v1/evidence_objects" in it.url })
+        assertTrue(transport.requests.any { "/rest/v1/evidence_bindings" in it.url })
+    }
+
+    @Test
+    fun duplicate409ReusesBlob() = runTest {
+        val (result, _) = archiveWithUploadResponse(
+            EvidenceHttpResponse(409, """{"error":"ResourceAlreadyExists","message":"resource already exists"}"""),
+        )
+
+        assertTrue(result is EvidenceArchiveResult.Success)
+    }
+
+    @Test
+    fun unrelated400FailsAndIncludesResponseCodeAndBody() = runTest {
+        val (result, _) = archiveWithUploadResponse(
+            EvidenceHttpResponse(400, """{"code":"InvalidMimeType","message":"mime type is not allowed"}"""),
+        )
+
+        assertTrue(result is EvidenceArchiveResult.Failure)
+        val issue = (result as EvidenceArchiveResult.Failure).issue
+        assertTrue(issue.contains("(400)"))
+        assertTrue(issue.contains("InvalidMimeType"))
+        assertTrue(issue.contains("mime type is not allowed"))
+    }
+
+    @Test
+    fun unrelated409Fails() = runTest {
+        val (result, _) = archiveWithUploadResponse(
+            EvidenceHttpResponse(409, """{"code":"BucketPolicyConflict","message":"policy conflict"}"""),
+        )
+
+        assertTrue(result is EvidenceArchiveResult.Failure)
+    }
+
+    @Test
+    fun duplicateMarkerMustComeFromStorageErrorFields() = runTest {
+        val (result, _) = archiveWithUploadResponse(
+            EvidenceHttpResponse(400, """{"code":"BadRequest","message":"invalid request","details":"Asset Already Exists"}"""),
+        )
+
+        assertTrue(result is EvidenceArchiveResult.Failure)
+    }
+
+    @Test
     fun partialFailureCheckpointResumesWithoutReupload() = runTest {
         val canonicalJson = Files.readString(Path.of("..", "examples", "yeonsik-ocr.v3.restaurant.example.json"))
         val bytes = "menu evidence".toByteArray()
@@ -152,6 +214,43 @@ class EvidenceSupabaseArchivePortTest {
         assertTrue(transport.requests.single { "/storage/v1/object/" in it.url }.url.endsWith("/${item.sha256}.jpg"))
         assertEquals("new-access", transport.requests.first { "/rest/v1/canonical_artifacts" in it.url && it.headers["Authorization"]?.contains("new-access") == true }
             .headers["Authorization"]?.substringAfter("Bearer "))
+    }
+
+    private suspend fun archiveWithUploadResponse(response: EvidenceHttpResponse): Pair<EvidenceArchiveResult, ScriptedTransport> {
+        val canonicalJson = Files.readString(Path.of("..", "examples", "yeonsik-ocr.v3.restaurant.example.json"))
+        val bytes = "menu evidence".toByteArray()
+        val item = YeonsikBundleEvidence(
+            sourceFileId = "menu-photo-1",
+            type = SourceAttachmentType.MENU_PHOTO,
+            path = "evidence/menu.jpg",
+            sha256 = digest(bytes),
+            mimeType = "image/jpeg",
+            byteSize = bytes.size.toLong(),
+            originalFilename = "menu.jpg",
+        )
+        val manifest = YeonsikBundleManifest(
+            YEONSIK_BUNDLE_VERSION,
+            "canonical.json",
+            digest(canonicalJson.toByteArray()),
+            listOf(item),
+        )
+        val bundle = YeonsikBundle(
+            manifest,
+            YeonsikBundleManifestCodec.encode(manifest),
+            canonicalJson,
+            YeonsikOcrEnvelopeCodec.decode(canonicalJson, "archive-upload-test"),
+        )
+        val transport = ScriptedTransport(
+            mutableListOf(
+                EvidenceHttpResponse(201, "[{\"id\":\"artifact-1\"}]"),
+                response,
+                EvidenceHttpResponse(201, "[{\"id\":\"object-1\"}]"),
+                EvidenceHttpResponse(201, "[{\"id\":\"binding-1\"}]"),
+            ),
+        )
+        val result = EvidenceSupabaseArchivePort(SignedInStore(), transport)
+            .archive(EvidenceArchiveRequest(bundle) { ByteArrayInputStream(bytes) })
+        return result to transport
     }
 
     private class ScriptedTransport(
