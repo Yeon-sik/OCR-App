@@ -41,6 +41,8 @@ data class AndroidCanonicalJsonValidatorState(
     val selectedProjections: Set<IngestionProjection> = emptySet(),
     val verificationBasis: VerificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
     val bundle: AndroidBundleState? = null,
+    /** Set only when this import resolved to an existing immutable bundle session. */
+    val duplicateOfIngestionId: String? = null,
     /** Keeps a rejected bundle visible even when no trusted manifest metadata exists. */
     val bundleValidationStatus: AndroidBundleValidationStatus? = null,
     val busy: Boolean = false,
@@ -81,11 +83,25 @@ class AndroidCanonicalJsonValidator(
 ) {
     private var structuredReviewController: CanonicalReviewController? = null
 
+    /** Source-compatible single-bundle entry point; batch UI uses the phase-aware overload. */
     suspend fun importBundle(
         input: InputStream,
         sourceName: String,
         previous: AndroidCanonicalJsonValidatorState,
+    ): AndroidCanonicalJsonValidatorState = importBundle(
+        input = input,
+        sourceName = sourceName,
+        previous = previous,
+        onPhase = {},
+    )
+
+    suspend fun importBundle(
+        input: InputStream,
+        sourceName: String,
+        previous: AndroidCanonicalJsonValidatorState,
+        onPhase: (AndroidBundleImportPhase) -> Unit,
     ): AndroidCanonicalJsonValidatorState {
+        onPhase(AndroidBundleImportPhase.IMPORTING)
         val localDocumentId = newLocalDocumentId().replace("android-json-", "android-bundle-")
         val ingestionId = newIngestionId()
         val root = requireNotNull(bundleRoot) { "Android bundle storage is not configured." }.resolve(ingestionId)
@@ -116,6 +132,7 @@ class AndroidCanonicalJsonValidator(
                         evidence = emptyList(),
                         selectedProjections = emptySet(),
                         bundle = null,
+                        duplicateOfIngestionId = null,
                         bundleValidationStatus = AndroidBundleValidationStatus.INVALID,
                         error = result.error?.detail ?: result.issues.joinToString(", "),
                         notice = null,
@@ -127,9 +144,11 @@ class AndroidCanonicalJsonValidator(
                         val restored = restoreBundleState(result.session.ingestionId)
                             ?: previous.takeIf { bundleStateStore == null && it.ingestionId == result.session.ingestionId && it.bundle != null }
                         return restored?.copy(
+                            duplicateOfIngestionId = result.session.ingestionId,
                             notice = "Duplicate bundle fingerprint: 기존 immutable session을 복구했습니다.",
                             error = null,
                         ) ?: previous.copy(
+                            duplicateOfIngestionId = result.session.ingestionId,
                             error = "Duplicate bundle session is missing its durable recovery record.",
                             notice = null,
                         )
@@ -154,11 +173,13 @@ class AndroidCanonicalJsonValidator(
                                 it.sourceFileId to materializer.fileFor(it.path).absolutePath
                             },
                         ),
+                        duplicateOfIngestionId = null,
                         bundleValidationStatus = AndroidBundleValidationStatus.VALID,
                         error = null,
                         notice = "Bundle 검증 및 evidence 자동 binding 완료. archive를 시작합니다.",
                     )
                     persistBundleState(state)
+                    onPhase(AndroidBundleImportPhase.ARCHIVING)
                     archiveBundle(state)
                 }
             }
@@ -175,6 +196,7 @@ class AndroidCanonicalJsonValidator(
                 evidence = emptyList(),
                 selectedProjections = emptySet(),
                 bundle = null,
+                duplicateOfIngestionId = null,
                 bundleValidationStatus = AndroidBundleValidationStatus.INVALID,
                 error = "Bundle invalid: ${error.message ?: error.javaClass.simpleName}",
                 notice = null,
@@ -258,6 +280,7 @@ class AndroidCanonicalJsonValidator(
             evidence = emptyList(),
             selectedProjections = emptySet(),
             bundle = null,
+            duplicateOfIngestionId = null,
             bundleValidationStatus = null,
         ) else previous
         val localDocumentId = if (startNewIngestion) newLocalDocumentId() else base.localDocumentId ?: newLocalDocumentId()
@@ -289,6 +312,7 @@ class AndroidCanonicalJsonValidator(
                     plan = plan,
                     evidence = base.evidence,
                     bundle = null,
+                    duplicateOfIngestionId = null,
                     bundleValidationStatus = null,
                     selectedProjections = selected,
                     error = null,
@@ -405,6 +429,7 @@ class AndroidCanonicalJsonValidator(
             selectedProjections = recovery.selectedProjections.intersect(plan.eligible),
             verificationBasis = recovery.verificationBasis,
             bundle = recoveredBundle,
+            duplicateOfIngestionId = null,
             bundleValidationStatus = recoveredBundle.validationStatus,
             notice = if (recoveredBundle.archiveStatus == AndroidEvidenceArchiveStatus.FAILED) {
                 "저장된 bundle을 복구했습니다. Archive / Retry로 중단된 작업을 재개하세요."

@@ -45,9 +45,9 @@ class MainActivity : ComponentActivity() {
         }
 
         val bundlePickerLauncher = registerForActivityResult(
-            ActivityResultContracts.OpenDocument(),
-        ) { uri ->
-            uri?.let(viewModel::importCanonicalBundle)
+            ActivityResultContracts.OpenMultipleDocuments(),
+        ) { uris ->
+            viewModel.importCanonicalBundles(uris)
         }
 
         setContent {

@@ -122,6 +122,7 @@ import com.pricetrace.receiptscanner.verification.VerifiedDraftGate
 import com.pricetrace.receiptscanner.verification.VerifiedDraftGateFailure
 import com.pricetrace.receiptscanner.verification.VerifiedDraftGateResult
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -139,6 +140,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.util.UUID
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.LocalDate
@@ -330,12 +332,23 @@ class ReceiptAppViewModel(
         container.bundleDirectory,
         bundleStateStore = container.bundleStateStore,
     )
+    private val canonicalBundleBatchCoordinator = AndroidBundleBatchCoordinator(
+        validator = canonicalJsonValidator,
+        openInput = { input ->
+            Uri.parse(input.sourceUri).let { uri ->
+                getApplication<Application>().contentResolver.openInputStream(uri)
+                    ?: error("Bundle 파일을 열 수 없습니다: ${input.sourceName}")
+            }
+        },
+    )
 
     private val mutableUiState = MutableStateFlow(ReceiptAppUiState())
     val uiState: StateFlow<ReceiptAppUiState> = mutableUiState.asStateFlow()
     private val mutableCanonicalJsonValidatorState = MutableStateFlow(AndroidCanonicalJsonValidatorState())
     val canonicalJsonValidatorState: StateFlow<AndroidCanonicalJsonValidatorState> =
         mutableCanonicalJsonValidatorState.asStateFlow()
+    private val mutableCanonicalBundleBatchState = MutableStateFlow(AndroidBundleBatchState())
+    val canonicalBundleBatchState: StateFlow<AndroidBundleBatchState> = mutableCanonicalBundleBatchState.asStateFlow()
     private val mutableEvents = MutableSharedFlow<ReceiptUiEvent>(extraBufferCapacity = 1)
     val events: SharedFlow<ReceiptUiEvent> = mutableEvents.asSharedFlow()
 
@@ -372,7 +385,7 @@ class ReceiptAppViewModel(
         refreshCashOsConnectionState()
         refreshEvidenceConnectionState()
         autoSignInFromBuildEnvironment()
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             try {
                 val restored = canonicalJsonValidator.restoreBundleState()
                 if (restored != null) {
@@ -382,6 +395,7 @@ class ReceiptAppViewModel(
                         message = null,
                     )
                 }
+                restoreCanonicalBundleBatchItems()
             } catch (error: Exception) {
                 mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(
                     error = "저장된 bundle을 복구하지 못했습니다: ${error.message ?: error.javaClass.simpleName}",
@@ -650,23 +664,152 @@ class ReceiptAppViewModel(
         }
     }
 
-    fun importCanonicalBundle(uri: Uri) {
+    fun importCanonicalBundle(uri: Uri) = importCanonicalBundles(listOf(uri))
+
+    fun importCanonicalBundles(uris: List<Uri>) {
         val current = mutableCanonicalJsonValidatorState.value
-        if (current.busy) return
-        viewModelScope.launch {
-            mutableCanonicalJsonValidatorState.value = current.copy(busy = true, error = null, notice = null)
-            val updated = try {
-                val input = getApplication<Application>().contentResolver.openInputStream(uri)
-                    ?: error("Bundle 파일을 열 수 없습니다.")
-                input.use { canonicalJsonValidator.importBundle(it, uri.lastPathSegment ?: "bundle.yeonsik", current) }
+        if (current.busy || uris.isEmpty()) return
+        val inputs = uris.mapIndexed { index, uri ->
+            val sourceName = uri.lastPathSegment
+                ?.substringAfterLast('/')
+                ?.takeIf(String::isNotBlank)
+                ?: "bundle-${index + 1}.yeonsik"
+            AndroidBundleBatchInput(
+                itemId = "android-batch-${UUID.randomUUID()}",
+                sourceName = sourceName,
+                sourceUri = uri.toString(),
+            )
+        }
+        mutableCanonicalJsonValidatorState.value = current.copy(busy = true, error = null, notice = null)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val result = canonicalBundleBatchCoordinator.importBundles(
+                    inputs = inputs,
+                    previous = current,
+                    existing = mutableCanonicalBundleBatchState.value.items,
+                    onUpdate = { batch -> mutableCanonicalBundleBatchState.value = batch },
+                )
+                mutableCanonicalBundleBatchState.value = result.batchState
+                mutableCanonicalJsonValidatorState.value = result.state.copy(busy = false)
+            } catch (cancelled: CancellationException) {
+                mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(busy = false)
+                throw cancelled
             } catch (error: Exception) {
-                current.copy(error = error.message ?: "Bundle 파일을 읽지 못했습니다.", notice = null)
+                mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(
+                    busy = false,
+                    error = error.message ?: error.javaClass.simpleName,
+                    notice = null,
+                )
+                mutableCanonicalBundleBatchState.value = mutableCanonicalBundleBatchState.value.copy(busy = false)
             }
-            mutableCanonicalJsonValidatorState.value = updated.copy(busy = false)
+        }
+    }
+
+    fun openCanonicalBundleItem(itemId: String) {
+        val item = mutableCanonicalBundleBatchState.value.items.firstOrNull { it.itemId == itemId } ?: return
+        val ingestionId = item.ingestionId ?: return
+        loadCanonicalBundleItem(ingestionId)
+    }
+
+    fun retryCanonicalBundleItem(itemId: String) {
+        val batch = mutableCanonicalBundleBatchState.value
+        val item = batch.items.firstOrNull { it.itemId == itemId } ?: return
+        if (item.status == AndroidBundleBatchItemStatus.DUPLICATE) return
+        val current = mutableCanonicalJsonValidatorState.value
+        if (current.busy || batch.busy) return
+        if (item.ingestionId == null) {
+            val sourceUri = item.sourceUri ?: return
+            val source = AndroidBundleBatchInput(item.itemId, item.sourceName, sourceUri)
+            mutableCanonicalJsonValidatorState.value = current.copy(busy = true, error = null, notice = null)
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val result = canonicalBundleBatchCoordinator.importBundles(
+                        inputs = listOf(source),
+                        previous = current,
+                        existing = mutableCanonicalBundleBatchState.value.items,
+                        onUpdate = { next -> mutableCanonicalBundleBatchState.value = next },
+                    )
+                    mutableCanonicalBundleBatchState.value = result.batchState
+                    mutableCanonicalJsonValidatorState.value = result.state.copy(busy = false)
+                } catch (cancelled: CancellationException) {
+                    mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(busy = false)
+                    throw cancelled
+                } catch (error: Exception) {
+                    mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(
+                        busy = false,
+                        error = error.message ?: error.javaClass.simpleName,
+                    )
+                    mutableCanonicalBundleBatchState.value = mutableCanonicalBundleBatchState.value.copy(busy = false)
+                }
+            }
+            return
+        }
+        mutableCanonicalJsonValidatorState.value = current.copy(busy = true, error = null, notice = null)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val restored = canonicalJsonValidator.restoreBundleState(item.ingestionId)
+                    ?: error("저장된 bundle을 찾을 수 없습니다: ${item.ingestionId}")
+                val next = when {
+                    restored.bundle?.archiveStatus == AndroidEvidenceArchiveStatus.FAILED -> {
+                        mutableCanonicalBundleBatchState.value = batch.withItemStatus(
+                            itemId,
+                            AndroidBundleBatchItemStatus.ARCHIVING,
+                        )
+                        canonicalJsonValidator.archiveBundle(restored)
+                    }
+                    restored.session?.let { it.verifiedCanonicalFingerprint == it.canonicalFingerprint } == true -> {
+                        mutableCanonicalBundleBatchState.value = batch.withItemStatus(
+                            itemId,
+                            AndroidBundleBatchItemStatus.SUBMITTING,
+                        )
+                        canonicalJsonValidator.retry(restored)
+                    }
+                    else -> restored.copy(error = "검수 완료 또는 보관 실패 상태의 항목만 재시도할 수 있습니다.")
+                }
+                mutableCanonicalJsonValidatorState.value = next.copy(busy = false)
+                updateCanonicalBatchItem(next)
+            } catch (cancelled: CancellationException) {
+                mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(busy = false)
+                throw cancelled
+            } catch (error: Exception) {
+                mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(
+                    busy = false,
+                    error = error.message ?: error.javaClass.simpleName,
+                    notice = null,
+                )
+                mutableCanonicalBundleBatchState.value = mutableCanonicalBundleBatchState.value.copy(busy = false)
+            }
         }
     }
 
     fun retryCanonicalBundleArchive() = runCanonicalJsonValidator(canonicalJsonValidator::archiveBundle)
+
+    private fun loadCanonicalBundleItem(ingestionId: String) {
+        val current = mutableCanonicalJsonValidatorState.value
+        if (current.busy) return
+        mutableCanonicalJsonValidatorState.value = current.copy(busy = true, error = null, notice = null)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val restored = canonicalJsonValidator.restoreBundleState(ingestionId)
+                    ?: error("저장된 bundle을 찾을 수 없습니다: $ingestionId")
+                mutableCanonicalJsonValidatorState.value = restored.copy(busy = false)
+                mutableUiState.value = mutableUiState.value.copy(
+                    screen = AppScreen.CANONICAL_JSON_VALIDATOR,
+                    message = null,
+                )
+                updateCanonicalBatchItem(restored)
+            } catch (cancelled: CancellationException) {
+                mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(busy = false)
+                throw cancelled
+            } catch (error: Exception) {
+                mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(
+                    busy = false,
+                    error = error.message ?: error.javaClass.simpleName,
+                    notice = null,
+                )
+            }
+        }
+    }
 
     fun parseCanonicalJsonValidator() =
         runCanonicalJsonValidator { state -> canonicalJsonValidator.importJson(state.rawJson, state) }
@@ -717,7 +860,9 @@ class ReceiptAppViewModel(
         mutableCanonicalJsonValidatorState.value = before.copy(busy = true, error = null)
         viewModelScope.launch {
             try {
-                mutableCanonicalJsonValidatorState.value = operation(before).copy(busy = false)
+                val updated = operation(before).copy(busy = false)
+                mutableCanonicalJsonValidatorState.value = updated
+                updateCanonicalBatchItem(updated)
             } catch (cancelled: CancellationException) {
                 mutableCanonicalJsonValidatorState.value = mutableCanonicalJsonValidatorState.value.copy(busy = false)
                 throw cancelled
@@ -728,6 +873,41 @@ class ReceiptAppViewModel(
                     notice = null,
                 )
             }
+        }
+    }
+
+    private fun updateCanonicalBatchItem(updated: AndroidCanonicalJsonValidatorState) {
+        val ingestionId = updated.ingestionId ?: return
+        if (updated.duplicateOfIngestionId != null) return
+        val current = mutableCanonicalBundleBatchState.value
+        val index = current.items.indexOfFirst {
+            it.ingestionId == ingestionId && it.duplicateOfIngestionId == null
+        }
+        if (index < 0) return
+        val item = canonicalBundleBatchCoordinator.itemFromState(current.items[index], updated)
+        mutableCanonicalBundleBatchState.value = current.copy(
+            items = current.items.toMutableList().also { it[index] = item },
+        )
+    }
+
+    private suspend fun restoreCanonicalBundleBatchItems() {
+        val restored = container.bundleStateStore.list().mapNotNull { recovery ->
+            val session = container.canonicalIngestionUseCase.session(recovery.ingestionId) ?: return@mapNotNull null
+            val envelope = runCatching {
+                container.canonicalIngestionUseCase.strictDecode(
+                    recovery.canonicalJson,
+                    recovery.localDocumentId,
+                    preservePersistedVerification = true,
+                )
+            }.getOrNull() ?: return@mapNotNull null
+            AndroidBundleBatchItem(
+                itemId = recovery.ingestionId,
+                sourceName = recovery.bundle.sourceName,
+                ingestionId = recovery.ingestionId,
+            ).fromRecovery(recovery, envelope, session)
+        }
+        if (restored.isNotEmpty()) {
+            mutableCanonicalBundleBatchState.value = AndroidBundleBatchState(items = restored)
         }
     }
 

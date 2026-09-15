@@ -165,6 +165,9 @@ fun ReceiptOcrContent(
     onAttachImportImage: () -> Unit = {},
     onCancelImport: () -> Unit = {},
     canonicalJsonValidatorState: AndroidCanonicalJsonValidatorState = AndroidCanonicalJsonValidatorState(),
+    canonicalBundleBatchState: AndroidBundleBatchState = AndroidBundleBatchState(),
+    onCanonicalBatchItemSelected: (String) -> Unit = {},
+    onCanonicalBatchItemRetry: (String) -> Unit = {},
     onCanonicalJsonChanged: (String) -> Unit = {},
     onCanonicalJsonBasisChanged: (VerificationBasis) -> Unit = {},
     onCanonicalJsonParse: () -> Unit = {},
@@ -407,7 +410,10 @@ fun ReceiptOcrContent(
                 }
                 AppScreen.CANONICAL_JSON_VALIDATOR -> CanonicalJsonValidatorScreen(
                     state = canonicalJsonValidatorState,
+                    batchState = canonicalBundleBatchState,
                     onBack = onBack,
+                    onBatchItemSelected = onCanonicalBatchItemSelected,
+                    onBatchItemRetry = onCanonicalBatchItemRetry,
                     onJsonChanged = onCanonicalJsonChanged,
                     onBasisChanged = onCanonicalJsonBasisChanged,
                     onParse = onCanonicalJsonParse,
@@ -913,7 +919,7 @@ private fun SessionListScreen(
                 enabled = !isBusy,
                 modifier = Modifier.fillMaxWidth().testTag("pick_canonical_bundle_button"),
             ) {
-                Text(".yeonsik 열기")
+                Text(".yeonsik 여러 파일 선택")
             }
         }
         item {
@@ -1075,7 +1081,10 @@ private fun ImportPreviewScreen(
 @Composable
 private fun CanonicalJsonValidatorScreen(
     state: AndroidCanonicalJsonValidatorState,
+    batchState: AndroidBundleBatchState,
     onBack: () -> Unit,
+    onBatchItemSelected: (String) -> Unit,
+    onBatchItemRetry: (String) -> Unit,
     onJsonChanged: (String) -> Unit,
     onBasisChanged: (VerificationBasis) -> Unit,
     onParse: () -> Unit,
@@ -1108,6 +1117,13 @@ private fun CanonicalJsonValidatorScreen(
                 "올인원 JSON 검증기",
                 "동일한 canonical Core로 파싱·수정·확정하고 필요한 projection만 제출합니다.",
                 onBack,
+            )
+        }
+        item {
+            CanonicalBundleBatchCard(
+                state = batchState,
+                onItemSelected = onBatchItemSelected,
+                onItemRetry = onBatchItemRetry,
             )
         }
         item {
@@ -1303,6 +1319,89 @@ private fun CanonicalJsonValidatorScreen(
             }
         }
     }
+}
+
+@Composable
+private fun CanonicalBundleBatchCard(
+    state: AndroidBundleBatchState,
+    onItemSelected: (String) -> Unit,
+    onItemRetry: (String) -> Unit,
+) {
+    if (state.items.isEmpty()) return
+    val summary = state.summary
+    Card(
+        modifier = Modifier.fillMaxWidth().testTag("canonical_bundle_batch"),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Bundle 일괄 가져오기", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "전체 ${summary.total} · 대기 ${summary.queued} · 검수 필요 ${summary.reviewRequired} · " +
+                    "완료 ${summary.completed} · 실패 ${summary.failed} · 중복 ${summary.duplicate}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            state.items.forEach { item ->
+                val itemModifier = if (item.ingestionId != null) {
+                    Modifier.clickable { onItemSelected(item.itemId) }
+                } else {
+                    Modifier
+                }
+                Column(
+                    modifier = Modifier.fillMaxWidth()
+                        .then(itemModifier)
+                        .testTag("canonical_bundle_batch_item_${item.itemId}")
+                        .padding(vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(item.sourceName, modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                        Text(androidBundleBatchStatusLabel(item.status))
+                    }
+                    item.sourceUri?.let { Text("source · $it", style = MaterialTheme.typography.bodySmall) }
+                    item.ingestionId?.let { Text("ingestion · $it", style = MaterialTheme.typography.bodySmall) }
+                    item.schema?.let { Text("schema · $it", style = MaterialTheme.typography.bodySmall) }
+                    item.mode?.let { Text("mode · $it", style = MaterialTheme.typography.bodySmall) }
+                    item.merchantOrPlatform?.let { Text("merchant/platform · $it", style = MaterialTheme.typography.bodySmall) }
+                    if (item.projectionSummary.isNotEmpty()) {
+                        Text(
+                            "projection · " + item.projectionSummary.joinToString { projection ->
+                                "${projection.projection.wireValue}:${projection.status.name}"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    item.duplicateOfIngestionId?.let {
+                        Text("duplicate of · $it", style = MaterialTheme.typography.bodySmall)
+                    }
+                    item.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    if (item.status == AndroidBundleBatchItemStatus.FAILED) {
+                        MaterialOutlinedButton(
+                            onClick = { onItemRetry(item.itemId) },
+                            enabled = !state.busy,
+                            modifier = Modifier.fillMaxWidth()
+                                .testTag("canonical_bundle_batch_retry_${item.itemId}"),
+                        ) { Text("이 항목 재시도") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun androidBundleBatchStatusLabel(status: AndroidBundleBatchItemStatus): String = when (status) {
+    AndroidBundleBatchItemStatus.QUEUED -> "대기"
+    AndroidBundleBatchItemStatus.IMPORTING -> "가져오는 중"
+    AndroidBundleBatchItemStatus.ARCHIVING -> "보관 중"
+    AndroidBundleBatchItemStatus.REVIEW_REQUIRED -> "검수 필요"
+    AndroidBundleBatchItemStatus.READY_TO_SUBMIT -> "전송 가능"
+    AndroidBundleBatchItemStatus.SUBMITTING -> "전송 중"
+    AndroidBundleBatchItemStatus.COMPLETED -> "완료"
+    AndroidBundleBatchItemStatus.FAILED -> "실패"
+    AndroidBundleBatchItemStatus.DUPLICATE -> "중복"
 }
 
 private enum class ReviewTab { STRUCTURED, RAW_JSON }

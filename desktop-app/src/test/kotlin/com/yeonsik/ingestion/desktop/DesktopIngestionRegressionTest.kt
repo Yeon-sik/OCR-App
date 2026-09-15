@@ -363,6 +363,136 @@ class DesktopIngestionRegressionTest {
         assertEquals(verified.session?.canonicalFingerprint, verified.session?.verifiedCanonicalFingerprint)
     }
 
+    @Test
+    fun `desktop batch keeps independent sessions and opens the selected item`() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-desktop-batch-two"))
+        val archive = CountingArchivePort()
+        val controller = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(
+                config = DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")),
+                evidenceArchivePortOverride = archive,
+            ),
+        )
+        val coordinator = DesktopBatchCoordinator(controller)
+        val first = writeMerchantBundle(store.directory, "batch-first", userText = "첫 번째 출처")
+        val second = writeMerchantBundle(store.directory, "batch-second", userText = "두 번째 출처")
+
+        coordinator.importBundles(listOf(first, second))
+
+        val state = coordinator.state.value
+        assertEquals(2, state.items.size)
+        assertEquals(2, state.items.mapNotNull { it.ingestionId }.toSet().size)
+        assertTrue(state.items.all { it.status == DesktopBatchItemStatus.REVIEW_REQUIRED })
+        assertEquals(2, archive.archiveCalls)
+        val selected = state.items[1]
+        coordinator.openItem(selected.itemId)
+        assertEquals(selected.ingestionId, controller.state.value.ingestionId)
+        controller.verify(VerificationBasis.SOURCE_EVIDENCE)
+        coordinator.syncActiveItem()
+        assertEquals(DesktopBatchItemStatus.READY_TO_SUBMIT, coordinator.state.value.items[1].status)
+    }
+
+    @Test
+    fun `desktop batch isolates invalid item and continues with valid item`() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-desktop-batch-invalid"))
+        val controller = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(
+                config = DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")),
+                evidenceArchivePortOverride = CountingArchivePort(),
+            ),
+        )
+        val coordinator = DesktopBatchCoordinator(controller)
+        val invalid = store.directory.resolve("invalid.yeonsik").also { Files.writeString(it, "not a zip") }
+        val valid = writeMerchantBundle(store.directory, "batch-valid", userText = "유효한 출처")
+
+        coordinator.importBundles(listOf(invalid, valid))
+
+        val items = coordinator.state.value.items
+        assertEquals(DesktopBatchItemStatus.FAILED, items[0].status)
+        assertTrue(items[0].error.orEmpty().isNotBlank())
+        assertEquals(DesktopBatchItemStatus.REVIEW_REQUIRED, items[1].status)
+        assertNotNull(items[1].ingestionId)
+    }
+
+    @Test
+    fun `desktop batch duplicate does not rearchive the existing session`() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-desktop-batch-duplicate"))
+        val archive = CountingArchivePort()
+        val controller = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(
+                config = DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")),
+                evidenceArchivePortOverride = archive,
+            ),
+        )
+        val coordinator = DesktopBatchCoordinator(controller)
+        val first = writeMerchantBundle(store.directory, "batch-original", userText = "동일한 출처")
+        val duplicate = writeMerchantBundle(store.directory, "batch-duplicate", userText = "동일한 출처")
+
+        coordinator.importBundles(listOf(first, duplicate))
+
+        val items = coordinator.state.value.items
+        assertEquals(DesktopBatchItemStatus.REVIEW_REQUIRED, items[0].status)
+        assertEquals(DesktopBatchItemStatus.DUPLICATE, items[1].status)
+        assertEquals(items[0].ingestionId, items[1].duplicateOfIngestionId)
+        assertEquals(1, archive.archiveCalls)
+        assertNotNull(store.loadRecord(requireNotNull(items[0].ingestionId)))
+        val sessionFiles = Files.list(store.directory).use { stream ->
+            stream.filter { it.fileName.toString().endsWith(".json") }.count()
+        }
+        assertEquals(1, sessionFiles)
+    }
+
+    @Test
+    fun `desktop batch continues after archive failure`() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-desktop-batch-archive-failure"))
+        val archive = CountingArchivePort(failuresBeforeSuccess = 1)
+        val controller = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(
+                config = DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")),
+                evidenceArchivePortOverride = archive,
+            ),
+        )
+        val coordinator = DesktopBatchCoordinator(controller)
+        val first = writeMerchantBundle(store.directory, "batch-archive-fails", userText = "첫 보관 실패")
+        val second = writeMerchantBundle(store.directory, "batch-after-failure", userText = "다음 항목")
+
+        coordinator.importBundles(listOf(first, second))
+
+        val items = coordinator.state.value.items
+        assertEquals(DesktopBatchItemStatus.FAILED, items[0].status)
+        assertTrue(items[0].error.orEmpty().contains("archive", ignoreCase = true))
+        assertEquals(DesktopBatchItemStatus.REVIEW_REQUIRED, items[1].status)
+        assertEquals(2, archive.archiveCalls)
+    }
+
+    @Test
+    fun `desktop batch retries only the failed archive item`() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-desktop-batch-retry"))
+        val archive = CountingArchivePort(failuresBeforeSuccess = 1)
+        val controller = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(
+                config = DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")),
+                evidenceArchivePortOverride = archive,
+            ),
+        )
+        val coordinator = DesktopBatchCoordinator(controller)
+        val source = writeMerchantBundle(store.directory, "batch-retry", userText = "보관 재시도")
+
+        coordinator.importBundles(listOf(source))
+        val failed = coordinator.state.value.items.single()
+        assertEquals(DesktopBatchItemStatus.FAILED, failed.status)
+
+        coordinator.retryItem(failed.itemId)
+
+        assertEquals(DesktopBatchItemStatus.REVIEW_REQUIRED, coordinator.state.value.items.single().status)
+        assertEquals(2, archive.archiveCalls)
+    }
+
     private fun readExample(name: String): String {
         val file = sequenceOf(File("examples", name), File("../examples", name))
             .firstOrNull(File::isFile) ?: error("example not found: $name")
@@ -437,6 +567,35 @@ class DesktopIngestionRegressionTest {
                 bundleFingerprint = request.bundle.bundleFingerprint,
             ),
         )
+
+        override suspend fun recordVerification(
+            canonicalArtifactId: String,
+            basis: VerificationBasis,
+            result: String,
+            issues: List<String>,
+        ): EvidenceVerificationEventResult = EvidenceVerificationEventResult.Success
+    }
+
+    private class CountingArchivePort(
+        private val failuresBeforeSuccess: Int = 0,
+    ) : EvidenceArchivePort {
+        var archiveCalls: Int = 0
+            private set
+
+        override suspend fun archive(
+            request: EvidenceArchiveRequest,
+            checkpoint: EvidenceArchiveCheckpoint,
+        ): EvidenceArchiveResult {
+            archiveCalls += 1
+            val nextCheckpoint = checkpoint.copy(bundleFingerprint = request.bundle.bundleFingerprint)
+            return if (archiveCalls <= failuresBeforeSuccess) {
+                EvidenceArchiveResult.Failure("archive test failure", nextCheckpoint)
+            } else {
+                EvidenceArchiveResult.Success(
+                    nextCheckpoint.copy(canonicalArtifactId = nextCheckpoint.canonicalArtifactId ?: "batch-artifact-$archiveCalls"),
+                )
+            }
+        }
 
         override suspend fun recordVerification(
             canonicalArtifactId: String,
