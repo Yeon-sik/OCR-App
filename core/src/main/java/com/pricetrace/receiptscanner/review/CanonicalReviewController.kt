@@ -190,14 +190,15 @@ class CanonicalReviewController(
             line.type != ReceiptLineType.PRODUCT
         ) return fail("review event requires a restaurant product line")
         val previousFoodService = line.foodService
-        val previousBenefit = previousFoodService?.benefitKind
+            ?: return fail("메뉴 역할을 먼저 지정하세요.")
+        val previousBenefit = previousFoodService.benefitKind
         val nextBenefit = when {
             checked -> ReceiptBenefitKind.REVIEW_EVENT
             previousBenefit == ReceiptBenefitKind.REVIEW_EVENT -> null
             else -> previousBenefit
         }
         if (nextBenefit == previousBenefit) return true
-        val nextFoodService = (previousFoodService ?: ReceiptFoodService(FoodServiceRole.MAIN)).copy(
+        val nextFoodService = previousFoodService.copy(
             benefitKind = nextBenefit,
         )
         return replaceLine(

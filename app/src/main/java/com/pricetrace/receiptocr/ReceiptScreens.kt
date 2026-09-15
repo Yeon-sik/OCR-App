@@ -1479,10 +1479,15 @@ private fun CanonicalStructuredReviewEditor(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Checkbox(
                                     checked = benefit == com.pricetrace.receiptscanner.domain.ReceiptBenefitKind.REVIEW_EVENT,
+                                    enabled = line.foodService != null,
                                     onCheckedChange = { checked -> onReviewEventChanged(line.id, checked) },
                                 )
                                 Text("리뷰 이벤트")
-                                benefit?.let { Text(" · 혜택 ${it.canonicalDisplayName()}") }
+                                if (line.foodService == null) {
+                                    Text(" · 메뉴 역할을 먼저 지정하세요.")
+                                } else {
+                                    benefit?.let { Text(" · 혜택 ${it.canonicalDisplayName()}") }
+                                }
                             }
                         }
                     }
