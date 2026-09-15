@@ -21,6 +21,7 @@ import com.pricetrace.receiptscanner.ingestion.EvidenceVerificationEventResult
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundle
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleReader
+import com.pricetrace.receiptscanner.review.CanonicalReviewController
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -74,6 +75,7 @@ class DesktopIngestionController(
         submitters = bundle.submitters,
         now = now,
     )
+    private var structuredReviewController: CanonicalReviewController? = null
 
     fun updateRawJson(value: String) {
         if (_state.value.bundleMetadata != null || _state.value.bundleValidationStatus != null) {
@@ -234,6 +236,58 @@ class DesktopIngestionController(
 
     /** Parses the editor draft in-place; a bundle can never be converted through this path. */
     suspend fun parseJson() = importJsonInternal(_state.value.rawJson, startNewIngestion = false)
+
+    /** Applies one source-faithful structured edit through the shared Core mutation API. */
+    suspend fun reviseStructuredReview(
+        mutation: (CanonicalReviewController) -> Boolean,
+    ) {
+        beginBusy()
+        try {
+            val current = _state.value
+            val envelope = current.envelope ?: error("편집하려면 정본 JSON을 먼저 가져오세요.")
+            val session = current.session ?: error("편집할 ingestion session이 없습니다.")
+            val controller = structuredReviewController
+                ?.takeIf { it.state.value.envelope == envelope }
+                ?: CanonicalReviewController(envelope, now = now)
+            structuredReviewController = controller
+            if (!mutation(controller)) {
+                _state.value = current.copy(error = controller.state.value.error ?: "구조화 편집을 저장하지 못했습니다.", notice = null)
+                return
+            }
+            val edited = controller.state.value.envelope
+            when (val result = useCase.reviseCanonicalDraft(session.ingestionId, edited)) {
+                is IngestionStartResult.Failure -> {
+                    _state.value = current.copy(error = result.issues.joinToString(", "), notice = null)
+                }
+                is IngestionStartResult.Success -> publishStructuredRevision(current, result.session, edited)
+                is IngestionStartResult.Duplicate -> publishStructuredRevision(current, result.session, edited)
+            }
+        } catch (error: Exception) {
+            _state.value = _state.value.copy(error = error.message ?: error.javaClass.simpleName, notice = null)
+        } finally {
+            endBusy()
+        }
+    }
+
+    private fun publishStructuredRevision(
+        previous: DesktopUiState,
+        session: IngestionSession,
+        envelope: YeonsikOcrEnvelope,
+    ) {
+        val canonicalJson = YeonsikOcrEnvelopeCodec.encodePersisted(envelope)
+        val rawJson = if (previous.bundleMetadata == null) canonicalJson else previous.rawJson
+        persistRecord(session, rawJson, canonicalJson, previous.evidence, previous.bundleMetadata)
+        publish(
+            session = session,
+            envelope = envelope,
+            rawJson = rawJson,
+            canonicalJson = canonicalJson,
+            evidence = previous.evidence,
+            notice = "구조화 편집을 저장했습니다. 이전 검증 상태는 무효화되어 다시 확정해야 합니다.",
+            error = null,
+            bundleMetadata = previous.bundleMetadata,
+        )
+    }
 
     private suspend fun importJsonInternal(value: String, startNewIngestion: Boolean) {
         beginBusy()

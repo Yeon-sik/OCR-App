@@ -1,6 +1,10 @@
 package com.pricetrace.receiptscanner.review
 
+import com.pricetrace.receiptscanner.domain.FoodServiceRole
+import com.pricetrace.receiptscanner.domain.ReceiptBenefitKind
+import com.pricetrace.receiptscanner.domain.ReceiptLineType
 import com.pricetrace.receiptscanner.domain.ReceiptV2
+import com.pricetrace.receiptscanner.domain.ReceiptV2LineItem
 import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlan
 import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner
 import com.pricetrace.receiptscanner.ingestion.IngestionConsumption
@@ -113,7 +117,7 @@ data class ReviewViewModel(
                     add("금액", "최종 결제금액", receipt.totals.grandTotalAmountMinor?.let { "$it ${receipt.document.currency.orEmpty()}" }, receiptEvidence, receiptDestinations)
                     receipt.lineItems.forEach { line ->
                         add(
-                            "상품",
+                            receiptLineSection(line),
                             line.description ?: "이름 미확인",
                             listOfNotNull(
                                 line.quantity?.let { "수량 ${it.value}" },
@@ -122,6 +126,7 @@ data class ReviewViewModel(
                             receiptEvidence(sourceFiles),
                             receiptDestinations,
                             confidence = line.confidence.name,
+                            details = lineReviewDetails(line),
                         )
                     }
                 }
@@ -188,7 +193,7 @@ data class ReviewViewModel(
                 add(ReviewRow("merchant", "판매처", "판매처명", receipt.merchant.name.orEmpty(), evidence, receiptDestinations))
                 add(ReviewRow("date", "문서", "구매일", receipt.document.issuedOn.orEmpty(), evidence, receiptDestinations))
                 receipt.lineItems.forEach { line ->
-                    add(ReviewRow(line.id, "상품", line.description ?: "이름 미확인", line.netAmountMinor?.let { "$it ${receipt.document.currency.orEmpty()}" }.orEmpty(), evidence, receiptDestinations, line.confidence.name))
+                    add(ReviewRow(line.id, receiptLineSection(line), line.description ?: "이름 미확인", line.netAmountMinor?.let { "$it ${receipt.document.currency.orEmpty()}" }.orEmpty(), evidence, receiptDestinations, line.confidence.name, lineReviewDetails(line)))
                 }
                 add(ReviewRow("total", "금액", "최종 결제금액", receipt.totals.grandTotalAmountMinor?.toString().orEmpty(), evidence, receiptDestinations))
             }.filter { it.value.isNotBlank() }
@@ -482,6 +487,46 @@ data class ReviewViewModel(
 
         private fun MutableList<ReviewRow>.add(section: String, item: String, value: String?, evidence: List<ReviewEvidenceBadge>, destinations: List<ReviewDestinationBadge>, confidence: String? = null, details: List<ReviewDetail> = emptyList()) {
             add(ReviewRow("$section:$item", section, item, value.orEmpty(), evidence, destinations, confidence, details))
+        }
+
+        private fun receiptLineSection(line: ReceiptV2LineItem): String = when {
+            line.type == ReceiptLineType.DISCOUNT -> "할인"
+            line.foodService?.role == FoodServiceRole.MAIN -> "메인"
+            line.foodService?.role == FoodServiceRole.OPTION -> "옵션"
+            line.foodService?.role == FoodServiceRole.SIDE -> "사이드"
+            else -> line.type.displayName()
+        }
+
+        private fun ReceiptLineType.displayName(): String = when (this) {
+            ReceiptLineType.PRODUCT -> "상품"
+            ReceiptLineType.SERVICE -> "서비스"
+            ReceiptLineType.DISCOUNT -> "할인"
+            ReceiptLineType.FEE -> "수수료"
+            ReceiptLineType.TAX -> "세금"
+            ReceiptLineType.TIP -> "팁"
+            ReceiptLineType.REFUND -> "환불"
+            ReceiptLineType.ROUNDING -> "반올림"
+            ReceiptLineType.OTHER -> "기타"
+        }
+
+        private fun lineReviewDetails(line: ReceiptV2LineItem): List<ReviewDetail> = buildList {
+            line.foodService?.role?.let { add(ReviewDetail("역할", it.displayName())) }
+            line.foodService?.appliesToLineId?.let { add(ReviewDetail("옵션 부모", it)) }
+            line.foodService?.benefitKind?.let { add(ReviewDetail("혜택", it.displayName())) }
+        }
+
+        private fun FoodServiceRole.displayName(): String = when (this) {
+            FoodServiceRole.MAIN -> "메인"
+            FoodServiceRole.OPTION -> "옵션"
+            FoodServiceRole.SIDE -> "사이드"
+        }
+
+        private fun ReceiptBenefitKind.displayName(): String = when (this) {
+            ReceiptBenefitKind.INCLUDED -> "포함"
+            ReceiptBenefitKind.COMPLIMENTARY -> "무료"
+            ReceiptBenefitKind.REVIEW_EVENT -> "리뷰 이벤트"
+            ReceiptBenefitKind.PROMOTION -> "프로모션"
+            ReceiptBenefitKind.OTHER -> "기타"
         }
 
         private fun receiptEvidence(sourceFiles: Map<String, SourceAttachment>): List<ReviewEvidenceBadge> =

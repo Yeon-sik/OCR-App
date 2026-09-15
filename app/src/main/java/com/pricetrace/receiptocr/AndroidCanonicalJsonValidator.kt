@@ -20,6 +20,7 @@ import com.pricetrace.receiptscanner.ingestion.YeonsikBundle
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleMaterializer
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleReader
+import com.pricetrace.receiptscanner.review.CanonicalReviewController
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -78,6 +79,8 @@ class AndroidCanonicalJsonValidator(
     private val newIngestionId: () -> String = { "android-ingestion-${UUID.randomUUID()}" },
     private val bundleStateStore: AndroidBundleStateStore? = null,
 ) {
+    private var structuredReviewController: CanonicalReviewController? = null
+
     suspend fun importBundle(
         input: InputStream,
         sourceName: String,
@@ -291,6 +294,60 @@ class AndroidCanonicalJsonValidator(
                     error = null,
                     notice = "JSON을 파싱하고 canonical 초안을 저장했습니다. 내용을 확인한 뒤 확정하세요.",
                 )
+            }
+        }
+    }
+
+    /** Applies one source-faithful structured edit and persists the revised canonical draft. */
+    suspend fun reviseStructuredReview(
+        state: AndroidCanonicalJsonValidatorState,
+        mutation: (CanonicalReviewController) -> Boolean,
+    ): AndroidCanonicalJsonValidatorState {
+        require(state.bundleValidationStatus != AndroidBundleValidationStatus.INVALID) { "Bundle is invalid." }
+        val envelope = requireNotNull(state.envelope) { "Import JSON before editing." }
+        val ingestionId = requireNotNull(state.ingestionId) { "Ingestion id is missing." }
+        val controller = structuredReviewController
+            ?.takeIf { it.state.value.envelope == envelope }
+            ?: CanonicalReviewController(envelope)
+        structuredReviewController = controller
+        if (!mutation(controller)) {
+            return state.copy(error = controller.state.value.error ?: "구조화 편집을 저장하지 못했습니다.", notice = null)
+        }
+        val edited = controller.state.value.envelope
+        return when (val result = useCase.reviseCanonicalDraft(ingestionId, edited)) {
+            is IngestionStartResult.Failure -> state.copy(
+                error = result.issues.joinToString(", "),
+                notice = null,
+            )
+            is IngestionStartResult.Success -> {
+                val plan = useCase.plan(edited)
+                val canonical = YeonsikOcrEnvelopeCodec.encodePersisted(edited)
+                state.copy(
+                    // A bundle's raw JSON is the manifest-bound immutable artifact; structured
+                    // edits live in canonicalJson while evidence bytes/bindings remain unchanged.
+                    rawJson = if (state.bundle == null) canonical else state.rawJson,
+                    canonicalJson = canonical,
+                    envelope = edited,
+                    session = result.session,
+                    plan = plan,
+                    selectedProjections = state.selectedProjections.intersect(plan.eligible),
+                    error = null,
+                    notice = "구조화 편집을 저장했습니다. 이전 검증 상태는 무효화되어 다시 확정해야 합니다.",
+                ).also(::persistBundleState)
+            }
+            is IngestionStartResult.Duplicate -> {
+                val plan = useCase.plan(edited)
+                val canonical = YeonsikOcrEnvelopeCodec.encodePersisted(edited)
+                state.copy(
+                    rawJson = if (state.bundle == null) canonical else state.rawJson,
+                    canonicalJson = canonical,
+                    envelope = edited,
+                    session = result.session,
+                    plan = plan,
+                    selectedProjections = state.selectedProjections.intersect(plan.eligible),
+                    error = null,
+                    notice = "구조화 편집을 저장했습니다. 이전 검증 상태는 무효화되어 다시 확정해야 합니다.",
+                ).also(::persistBundleState)
             }
         }
     }

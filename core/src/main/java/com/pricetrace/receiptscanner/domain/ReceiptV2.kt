@@ -56,10 +56,20 @@ enum class FoodServiceRole(val wireValue: String) {
     MAIN("main"), OPTION("option"), SIDE("side"),
 }
 
+/** A source-faithful restaurant benefit axis, independent from [FoodServiceRole]. */
+enum class ReceiptBenefitKind(val wireValue: String) {
+    INCLUDED("included"),
+    COMPLIMENTARY("complimentary"),
+    REVIEW_EVENT("review_event"),
+    PROMOTION("promotion"),
+    OTHER("other"),
+}
+
 /** A separately priced menu line. Its amount is never folded into its parent main menu. */
 data class ReceiptFoodService(
     val role: FoodServiceRole,
     val appliesToLineId: String? = null,
+    val benefitKind: ReceiptBenefitKind? = null,
 )
 
 /** OCR-created or imported drafts must receive a separate local ID before they enter editable storage. */

@@ -1,5 +1,14 @@
 package com.pricetrace.receiptscanner.ingestion
 
+import com.pricetrace.receiptscanner.domain.ReceiptLineType
+import com.pricetrace.receiptscanner.domain.ReceiptV2LineItem
+
+/** A receipt line that can produce a normal PriceTrace price observation. */
+fun ReceiptV2LineItem.isNormalPriceObservationCandidate(): Boolean =
+    type in setOf(ReceiptLineType.PRODUCT, ReceiptLineType.SERVICE) &&
+        netAmountMinor != null &&
+        foodService?.benefitKind == null
+
 /** The only routing authority for canonical artifacts. JSON projection_targets are hints. */
 data class CanonicalProjectionPlan(
     val eligible: Set<IngestionProjection>,
@@ -32,7 +41,9 @@ object CanonicalProjectionPlanner {
         val eligible = buildSet {
             if (envelope.receipt != null) {
                 add(IngestionProjection.PRICETRACE_RECEIPT)
-                add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+                if (envelope.receipt.lineItems.any(ReceiptV2LineItem::isNormalPriceObservationCandidate)) {
+                    add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+                }
                 add(IngestionProjection.CASHOS_RECEIPT)
             }
             if (envelope.priceObservations.isNotEmpty() &&
