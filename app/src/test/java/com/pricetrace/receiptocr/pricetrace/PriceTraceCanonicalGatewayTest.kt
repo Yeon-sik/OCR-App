@@ -2,7 +2,10 @@ package com.pricetrace.receiptocr.pricetrace
 
 import com.pricetrace.receiptscanner.domain.BusinessKind
 import com.pricetrace.receiptscanner.domain.ConfidenceLevel
+import com.pricetrace.receiptscanner.domain.FoodServiceRole
 import com.pricetrace.receiptscanner.domain.ReceiptDocument
+import com.pricetrace.receiptscanner.domain.ReceiptBenefitKind
+import com.pricetrace.receiptscanner.domain.ReceiptFoodService
 import com.pricetrace.receiptscanner.domain.ReceiptFulfillment
 import com.pricetrace.receiptscanner.domain.ReceiptFulfillmentEvidence
 import com.pricetrace.receiptscanner.domain.ReceiptFulfillmentType
@@ -1015,6 +1018,61 @@ class PriceTraceCanonicalGatewayTest {
             incompleteObservationResult.alsoUploaded,
         )
         assertEquals("price_observation_incomplete", incompleteObservationResult.primaryPendingReason)
+    }
+
+    @Test
+    fun benefit_lines_are_sent_with_the_receipt_but_excluded_from_normal_observations() = runTest {
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(
+                200,
+                """{"receiptId":"receipt-benefit","storeId":"store-1","restaurantId":"restaurant-1","restaurantLocationId":"location-1","observationIds":["observation-1"],"lines":[{"sourceLineId":"review-line","receiptItemId":"item-review","productId":"product-review","storeProductId":"store-product-review","catalogProductId":"catalog-review","restaurantMenuId":"menu-review","observationId":null,"restaurantObservationId":null,"resolutionStatus":"semantic_only"},{"sourceLineId":"line-1","receiptItemId":"item-1","productId":"product-1","storeProductId":"store-product-1","catalogProductId":"catalog-1","restaurantMenuId":"menu-1","observationId":"observation-1","restaurantObservationId":null,"resolutionStatus":"resolved"}]}""",
+            ),
+        )
+        val submitter = PriceTraceCanonicalProjectionSubmitter(
+            PriceTraceCanonicalGateway(FakeStore(signedIn()), transport),
+        )
+        val sourceReceipt = receipt().copy(
+            merchant = receipt().merchant.copy(businessKind = BusinessKind.FOOD_SERVICE),
+            lineItems = listOf(
+                receipt().lineItems.single().copy(
+                    id = "review-line",
+                    description = "리뷰 이벤트",
+                    netAmountMinor = 100,
+                    foodService = ReceiptFoodService(
+                        role = FoodServiceRole.OPTION,
+                        appliesToLineId = "line-1",
+                        benefitKind = ReceiptBenefitKind.REVIEW_EVENT,
+                    ),
+                ),
+                receipt().lineItems.single().copy(id = "line-1"),
+            ),
+        )
+        val envelope = YeonsikOcrEnvelope(
+            mode = IngestionMode.RESTAURANT,
+            source = IngestionSource("ocr_app", emptyList()),
+            receipt = sourceReceipt,
+        )
+        val result = submitter.submit(
+            ProjectionRequest(
+                ingestionId = "benefit-ingestion",
+                projection = IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+                canonicalPayload = "{}",
+                idempotencyKey = "benefit-projection",
+                envelope = envelope,
+            ),
+        ) as ProjectionSubmission.Success
+
+        assertTrue(result.primaryUploaded)
+        assertEquals(setOf(IngestionProjection.PRICETRACE_RECEIPT), result.alsoUploaded)
+        val requestReceipt = Json.parseToJsonElement(requireNotNull(transport.requests.single().body))
+            .jsonObject["p_receipt"]!!.jsonObject
+        val reviewLine = requestReceipt["line_items"]!!.jsonArray
+            .single { it.jsonObject["id"]!!.jsonPrimitive.content == "review-line" }.jsonObject
+        assertEquals(
+            "review_event",
+            reviewLine["food_service"]!!.jsonObject["benefit_kind"]!!.jsonPrimitive.content,
+        )
+        assertEquals("100", reviewLine["net_amount_minor"]!!.jsonPrimitive.content)
     }
 
     private fun purchaseRecordForGateway(

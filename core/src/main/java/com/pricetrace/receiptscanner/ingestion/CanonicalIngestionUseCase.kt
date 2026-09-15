@@ -124,6 +124,19 @@ class CanonicalIngestionUseCase(
     fun plan(envelope: YeonsikOcrEnvelope): CanonicalProjectionPlan =
         CanonicalProjectionPlanner.plan(envelope)
 
+    /**
+     * Persists a source-faithful structured-review edit through the same Core path on Android
+     * and Desktop. Validation happens before the orchestrator can invalidate or replace a draft.
+     */
+    suspend fun reviseCanonicalDraft(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+    ): IngestionStartResult {
+        val issues = CanonicalEnvelopeValidator.validate(envelope)
+        if (issues.isNotEmpty()) return IngestionStartResult.Failure(issues)
+        return orchestrator.reviseCanonicalDraft(ingestionId, envelope)
+    }
+
     suspend fun session(ingestionId: String): IngestionSession? = store.get(ingestionId)
 
     /** Promotes only after explicit review; producer review/user_verified fields never reach here. */

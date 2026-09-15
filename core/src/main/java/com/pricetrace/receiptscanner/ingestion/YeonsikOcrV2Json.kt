@@ -114,6 +114,7 @@ object YeonsikOcrV2Json {
             consumption = envelope.consumption,
             links = envelope.links,
         )
+        envelope.receipt?.let(ReceiptV2Json::validate)
         validateTargets(
             merchant = envelope.merchantCandidate,
             targets = envelope.targets,
@@ -682,7 +683,9 @@ object YeonsikOcrV2Json {
         val available = buildSet {
             if (receipt != null) {
                 add(IngestionProjection.PRICETRACE_RECEIPT)
-                add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+                if (receipt.lineItems.any(com.pricetrace.receiptscanner.domain.ReceiptV2LineItem::isNormalPriceObservationCandidate)) {
+                    add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+                }
                 add(IngestionProjection.CASHOS_RECEIPT)
             }
             if (productCandidates.isNotEmpty()) add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)

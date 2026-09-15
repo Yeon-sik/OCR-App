@@ -1,9 +1,15 @@
 package com.pricetrace.receiptscanner.review
 
 import com.pricetrace.receiptscanner.domain.ReceiptDocument
+import com.pricetrace.receiptscanner.domain.BusinessKind
+import com.pricetrace.receiptscanner.domain.FoodServiceRole
+import com.pricetrace.receiptscanner.domain.ReceiptBenefitKind
+import com.pricetrace.receiptscanner.domain.ReceiptFoodService
+import com.pricetrace.receiptscanner.domain.ReceiptLineType
 import com.pricetrace.receiptscanner.domain.ReceiptMerchant
 import com.pricetrace.receiptscanner.domain.ReceiptSource
 import com.pricetrace.receiptscanner.domain.ReceiptV2
+import com.pricetrace.receiptscanner.domain.ReceiptV2LineItem
 import com.pricetrace.receiptscanner.domain.ReceiptV2Totals
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
 import com.pricetrace.receiptscanner.ingestion.IngestionMode
@@ -24,6 +30,7 @@ import com.pricetrace.receiptscanner.ingestion.RestaurantNutritionEstimate
 import com.pricetrace.receiptscanner.ingestion.SourceAttachment
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
@@ -86,6 +93,34 @@ class ReviewViewModelTest {
             ReviewDestinationStatus.UNSELECTED,
             merchantRow.destinations.single { it.destination == ReviewDestination.CASH_OS }.status,
         )
+    }
+
+    @Test
+    fun `receipt rows use semantic line sections and separate benefit details`() {
+        val source = receipt()
+        val restaurant = source.copy(
+            merchant = source.merchant.copy(businessKind = BusinessKind.FOOD_SERVICE),
+            lineItems = listOf(
+                line("discount", ReceiptLineType.DISCOUNT, amount = -500),
+                line("main", ReceiptLineType.PRODUCT, FoodServiceRole.MAIN, amount = 10000),
+                line("included-option", ReceiptLineType.PRODUCT, FoodServiceRole.OPTION, ReceiptBenefitKind.INCLUDED, 0),
+                line("review-option", ReceiptLineType.PRODUCT, FoodServiceRole.OPTION, ReceiptBenefitKind.REVIEW_EVENT, 100),
+                line("side", ReceiptLineType.PRODUCT, FoodServiceRole.SIDE, amount = 2000),
+            ),
+        )
+        val rows = ReviewViewModel.fromCanonical(
+            YeonsikOcrEnvelope(
+                mode = IngestionMode.RESTAURANT,
+                schemaVersion = YEONSIK_OCR_V2_SCHEMA,
+                source = IngestionSource(producer = "ocr_app", sourceFiles = emptyList()),
+                receipt = restaurant,
+            ),
+        ).rows.filter { it.id.substringAfter(':') in setOf("discount", "main", "included-option", "review-option", "side") }
+
+        assertEquals(listOf("할인", "메인", "옵션", "옵션", "사이드"), rows.map { it.section })
+        assertEquals("포함", rows[2].details.single { it.item == "혜택" }.value)
+        assertEquals("리뷰 이벤트", rows[3].details.single { it.item == "혜택" }.value)
+        assertEquals("금액 100", rows[3].value)
     }
 
     @Test
@@ -341,5 +376,28 @@ class ReviewViewModelTest {
             grandTotalAmountMinor = 1000,
         ),
         payments = emptyList(),
+    )
+
+    private fun line(
+        id: String,
+        type: ReceiptLineType,
+        role: FoodServiceRole? = null,
+        benefit: ReceiptBenefitKind? = null,
+        amount: Long,
+    ) = ReceiptV2LineItem(
+        id = id,
+        type = type,
+        description = id,
+        sourceLineReferences = emptyList(),
+        identifiers = emptyList(),
+        quantity = null,
+        unitPriceAmountMinor = amount,
+        grossAmountMinor = amount,
+        discountAmountMinor = null,
+        taxAmountMinor = null,
+        netAmountMinor = amount,
+        confidence = com.pricetrace.receiptscanner.domain.ConfidenceLevel.USER_VERIFIED,
+        taxRatePercent = null,
+        foodService = role?.let { ReceiptFoodService(it, benefitKind = benefit) },
     )
 }

@@ -121,6 +121,7 @@ class CashOsReceiptGatewayTest {
         assertFalse(body.containsKey("p_ledger_entry_id"))
 
         val items = body["p_items"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(4, items.size)
         assertEquals(JsonNull, items[0]["quantity"])
         assertEquals(JsonNull, items[0]["unit"])
         assertEquals(JsonNull, items[0]["unit_price_krw"])
@@ -401,7 +402,7 @@ class CashOsReceiptGatewayTest {
             retailChannel = RetailChannel.REGULAR,
         ),
         lineItems = listOf(
-            ReceiptV2LineItem("product-1", ReceiptLineType.PRODUCT, "Coffee", listOf("line-1"), emptyList(), ReceiptQuantity("1", QuantityUnit.UNKNOWN), null, null, null, null, 100, ConfidenceLevel.USER_VERIFIED, null),
+            ReceiptV2LineItem("product-1", ReceiptLineType.PRODUCT, "Coffee", listOf("line-1"), emptyList(), ReceiptQuantity("1", QuantityUnit.UNKNOWN), null, null, null, null, 100, ConfidenceLevel.USER_VERIFIED, null, ReceiptFoodService(FoodServiceRole.OPTION, "main-1", ReceiptBenefitKind.REVIEW_EVENT)),
             ReceiptV2LineItem("discount-1", ReceiptLineType.DISCOUNT, "Discount", listOf("line-2"), emptyList(), null, null, null, 30, null, -30, ConfidenceLevel.USER_VERIFIED, null),
             ReceiptV2LineItem("refund-1", ReceiptLineType.REFUND, "Refund", listOf("line-3"), emptyList(), null, null, null, null, null, -20, ConfidenceLevel.USER_VERIFIED, null),
             ReceiptV2LineItem("rounding-1", ReceiptLineType.ROUNDING, "Rounding", listOf("line-4"), emptyList(), null, null, null, null, null, -5, ConfidenceLevel.USER_VERIFIED, null),

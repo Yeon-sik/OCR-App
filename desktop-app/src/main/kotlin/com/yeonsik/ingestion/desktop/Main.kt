@@ -44,6 +44,10 @@ import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.LocalEvidence
+import com.pricetrace.receiptscanner.domain.FoodServiceRole
+import com.pricetrace.receiptscanner.domain.ReceiptBenefitKind
+import com.pricetrace.receiptscanner.domain.ReceiptLineType
+import com.pricetrace.receiptscanner.review.CanonicalReviewController
 import com.pricetrace.receiptscanner.review.ReviewViewModel
 import com.pricetrace.receiptscanner.review.ReviewRow
 import kotlinx.coroutines.Dispatchers
@@ -87,6 +91,9 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
     }
     val launchIo: (suspend () -> Unit) -> Unit = remember(scope) {
         { block -> scope.launch(Dispatchers.IO) { block() } }
+    }
+    val editStructured: ((CanonicalReviewController) -> Boolean) -> Unit = remember(launchIo) {
+        { mutation -> launchIo { controller.reviseStructuredReview(mutation) } }
     }
 
     MaterialTheme {
@@ -136,7 +143,7 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                         Column(
                             Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
                         ) {
-                            DesktopReviewTable(state, effectiveSelectedProjections)
+                            DesktopReviewTable(state, effectiveSelectedProjections, editStructured)
                         }
                     } else {
                         TextField(
@@ -251,6 +258,7 @@ private fun ReviewTabs(selected: ReviewTab, onSelected: (ReviewTab) -> Unit) {
 private fun DesktopReviewTable(
     state: DesktopUiState,
     selectedProjections: Set<IngestionProjection>,
+    onEdit: (((CanonicalReviewController) -> Boolean) -> Unit),
 ) {
     val model = state.envelope?.let { envelope ->
         ReviewViewModel.fromCanonical(
@@ -266,10 +274,162 @@ private fun DesktopReviewTable(
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("인식 정보 및 전송 계획 · ${model.schema}", style = MaterialTheme.typography.titleMedium)
+        if (
+            state.envelope.schemaVersion == "yeonsik-ocr.v2" &&
+            state.envelope.receipt != null
+        ) {
+            DesktopStructuredReviewEditor(state.envelope, onEdit)
+        }
         ReviewTableHeader()
         if (model.rows.isEmpty()) Text("표시할 인식 정보가 없습니다.")
         else model.rows.forEach { row -> DesktopReviewTableRow(row) }
     }
+}
+
+@Composable
+private fun DesktopStructuredReviewEditor(
+    envelope: com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope,
+    onEdit: (((CanonicalReviewController) -> Boolean) -> Unit),
+) {
+    val receipt = envelope.receipt ?: return
+    val restaurant = receipt.merchant.businessKind == com.pricetrace.receiptscanner.domain.BusinessKind.FOOD_SERVICE
+    var merchantDraft by remember(receipt.merchant.name) { mutableStateOf(receipt.merchant.name.orEmpty()) }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("구조화 편집", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = { onEdit { it.undo() } }) { Text("실행 취소") }
+                    TextButton(onClick = { onEdit { it.redo() } }) { Text("다시 실행") }
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextField(
+                    value = merchantDraft,
+                    onValueChange = { merchantDraft = it },
+                    label = { Text("판매처명") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedButton(
+                    onClick = { onEdit { it.updateMerchantName(merchantDraft) } },
+                    modifier = Modifier.align(Alignment.CenterVertically),
+                ) { Text("적용") }
+            }
+            receipt.lineItems.forEach { line ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("line ${line.id}", style = MaterialTheme.typography.labelMedium)
+                        var descriptionDraft by remember(line.id, line.description) {
+                            mutableStateOf(line.description.orEmpty())
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            TextField(
+                                value = descriptionDraft,
+                                onValueChange = { descriptionDraft = it },
+                                label = { Text("설명") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                            )
+                            OutlinedButton(
+                                onClick = { onEdit { it.updateLineDescription(line.id, descriptionDraft) } },
+                                modifier = Modifier.align(Alignment.CenterVertically),
+                            ) { Text("적용") }
+                        }
+                        Text("line type", style = MaterialTheme.typography.labelSmall)
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            ReceiptLineType.entries.forEach { type ->
+                                if (line.type == type) {
+                                    Button(onClick = { onEdit { it.updateLineType(line.id, type) } }) {
+                                        Text(type.desktopDisplayName())
+                                    }
+                                } else {
+                                    OutlinedButton(onClick = { onEdit { it.updateLineType(line.id, type) } }) {
+                                        Text(type.desktopDisplayName())
+                                    }
+                                }
+                            }
+                        }
+                        if (restaurant && line.type == ReceiptLineType.PRODUCT) {
+                            Text("food_service role", style = MaterialTheme.typography.labelSmall)
+                            Row(
+                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                FoodServiceRole.entries.forEach { role ->
+                                    if (line.foodService?.role == role) {
+                                        Button(onClick = { onEdit { it.updateFoodServiceRole(line.id, role) } }) {
+                                            Text(role.desktopDisplayName())
+                                        }
+                                    } else {
+                                        OutlinedButton(onClick = { onEdit { it.updateFoodServiceRole(line.id, role) } }) {
+                                            Text(role.desktopDisplayName())
+                                        }
+                                    }
+                                }
+                            }
+                            if (line.foodService?.role == FoodServiceRole.OPTION) {
+                                var parentDraft by remember(line.id, line.foodService?.appliesToLineId) {
+                                    mutableStateOf(line.foodService?.appliesToLineId.orEmpty())
+                                }
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    TextField(
+                                        value = parentDraft,
+                                        onValueChange = { parentDraft = it },
+                                        label = { Text("옵션 부모 line id") },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    OutlinedButton(
+                                        onClick = { onEdit { it.updateFoodServiceOptionParent(line.id, parentDraft.takeIf(String::isNotBlank)) } },
+                                        modifier = Modifier.align(Alignment.CenterVertically),
+                                    ) { Text("적용") }
+                                }
+                            }
+                            val benefit = line.foodService?.benefitKind
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(
+                                    checked = benefit == ReceiptBenefitKind.REVIEW_EVENT,
+                                    onCheckedChange = { checked -> onEdit { it.setRestaurantReviewEvent(line.id, checked) } },
+                                )
+                                Text("리뷰 이벤트")
+                                benefit?.let { Text(" · 혜택 ${it.desktopDisplayName()}") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun ReceiptLineType.desktopDisplayName(): String = when (this) {
+    ReceiptLineType.PRODUCT -> "상품"
+    ReceiptLineType.SERVICE -> "서비스"
+    ReceiptLineType.DISCOUNT -> "할인"
+    ReceiptLineType.FEE -> "수수료"
+    ReceiptLineType.TAX -> "세금"
+    ReceiptLineType.TIP -> "팁"
+    ReceiptLineType.REFUND -> "환불"
+    ReceiptLineType.ROUNDING -> "반올림"
+    ReceiptLineType.OTHER -> "기타"
+}
+
+private fun FoodServiceRole.desktopDisplayName(): String = when (this) {
+    FoodServiceRole.MAIN -> "메인"
+    FoodServiceRole.OPTION -> "옵션"
+    FoodServiceRole.SIDE -> "사이드"
+}
+
+private fun ReceiptBenefitKind.desktopDisplayName(): String = when (this) {
+    ReceiptBenefitKind.INCLUDED -> "포함"
+    ReceiptBenefitKind.COMPLIMENTARY -> "무료"
+    ReceiptBenefitKind.REVIEW_EVENT -> "리뷰 이벤트"
+    ReceiptBenefitKind.PROMOTION -> "프로모션"
+    ReceiptBenefitKind.OTHER -> "기타"
 }
 
 @Composable

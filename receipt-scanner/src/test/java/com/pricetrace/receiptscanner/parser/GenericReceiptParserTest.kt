@@ -23,6 +23,41 @@ class GenericReceiptParserTest {
     private val parser = GenericReceiptParser()
 
     @Test
+    fun `immediate discount is classified while an uncertain promotional prefix stays in the name`() {
+        val lines = buildList {
+            add(line(0, "정확식당", top = 20))
+            add(line(1, "거래일시 2026-09-15 12:00", top = 55))
+            addAll(rowCells(
+                startIndex = 2,
+                top = 95,
+                "상품명" to (100..400),
+                "수량" to (500..600),
+                "금액" to (800..950),
+            ))
+            addAll(rowCells(
+                startIndex = 5,
+                top = 135,
+                "즉시할인" to (100..400),
+                "1" to (500..600),
+                "-100" to (800..950),
+            ))
+            addAll(rowCells(
+                startIndex = 8,
+                top = 175,
+                "1등! 사과" to (100..400),
+                "1" to (500..600),
+                "1,000" to (800..950),
+            ))
+            add(line(11, "총합계 900원", top = 220))
+        }
+
+        val items = parser.parse(documentOf(*lines.toTypedArray())).lineItems
+
+        assertTrue(items.any { it.type == ReceiptLineType.DISCOUNT && it.netAmountMinor.value == -100L })
+        assertTrue(items.any { it.type == ReceiptLineType.PRODUCT && it.description.value == "1등! 사과" })
+    }
+
+    @Test
     fun `synthetic OCR fixture produces provenance aware structured draft`() {
         val parsed = parser.parse(SyntheticFixtures.ocrDocument())
 

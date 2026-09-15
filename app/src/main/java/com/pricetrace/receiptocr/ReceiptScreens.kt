@@ -97,6 +97,8 @@ import com.pricetrace.receiptscanner.domain.ReceiptPage
 import com.pricetrace.receiptscanner.domain.ReceiptReviewProgress
 import com.pricetrace.receiptscanner.domain.ReceiptValidationResult
 import com.pricetrace.receiptscanner.domain.BusinessKind
+import com.pricetrace.receiptscanner.domain.FoodServiceRole
+import com.pricetrace.receiptscanner.domain.ReceiptBenefitKind
 import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.domain.ReceiptV2LineItem
 import com.pricetrace.receiptscanner.domain.PlaceResolutionStatus
@@ -125,6 +127,7 @@ import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.LocalEvidence
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA
 import com.pricetrace.receiptscanner.publisher.PriceObservationProduct
 import com.pricetrace.receiptscanner.publisher.PriceObservationSource
 import com.pricetrace.receiptscanner.preflight.ReceiptAiReviewStatus
@@ -170,6 +173,14 @@ fun ReceiptOcrContent(
     onCanonicalJsonSubmit: () -> Unit = {},
     onCanonicalJsonRetry: () -> Unit = {},
     onCanonicalBundleArchiveRetry: () -> Unit = {},
+    onCanonicalReviewMerchantNameChanged: (String) -> Unit = {},
+    onCanonicalReviewLineDescriptionChanged: (String, String) -> Unit = { _, _ -> },
+    onCanonicalReviewLineTypeChanged: (String, ReceiptLineType) -> Unit = { _, _ -> },
+    onCanonicalReviewFoodServiceRoleChanged: (String, FoodServiceRole) -> Unit = { _, _ -> },
+    onCanonicalReviewOptionParentChanged: (String, String?) -> Unit = { _, _ -> },
+    onCanonicalReviewEventChanged: (String, Boolean) -> Unit = { _, _ -> },
+    onCanonicalReviewUndo: () -> Unit = {},
+    onCanonicalReviewRedo: () -> Unit = {},
     onSelectSession: (String) -> Unit = {},
     onDeleteSession: (String) -> Unit = {},
     onShowApiSettings: () -> Unit = {},
@@ -405,6 +416,14 @@ fun ReceiptOcrContent(
                     onSubmit = onCanonicalJsonSubmit,
                     onRetry = onCanonicalJsonRetry,
                     onArchiveRetry = onCanonicalBundleArchiveRetry,
+                    onReviewMerchantNameChanged = onCanonicalReviewMerchantNameChanged,
+                    onReviewLineDescriptionChanged = onCanonicalReviewLineDescriptionChanged,
+                    onReviewLineTypeChanged = onCanonicalReviewLineTypeChanged,
+                    onReviewFoodServiceRoleChanged = onCanonicalReviewFoodServiceRoleChanged,
+                    onReviewOptionParentChanged = onCanonicalReviewOptionParentChanged,
+                    onReviewEventChanged = onCanonicalReviewEventChanged,
+                    onReviewUndo = onCanonicalReviewUndo,
+                    onReviewRedo = onCanonicalReviewRedo,
                 )
                 AppScreen.MERCHANT_REVIEW -> uiState.merchantCandidate?.let { candidate ->
                     MerchantCandidateReviewScreen(
@@ -1065,6 +1084,14 @@ private fun CanonicalJsonValidatorScreen(
     onSubmit: () -> Unit,
     onRetry: () -> Unit,
     onArchiveRetry: () -> Unit,
+    onReviewMerchantNameChanged: (String) -> Unit,
+    onReviewLineDescriptionChanged: (String, String) -> Unit,
+    onReviewLineTypeChanged: (String, ReceiptLineType) -> Unit,
+    onReviewFoodServiceRoleChanged: (String, FoodServiceRole) -> Unit,
+    onReviewOptionParentChanged: (String, String?) -> Unit,
+    onReviewEventChanged: (String, Boolean) -> Unit,
+    onReviewUndo: () -> Unit,
+    onReviewRedo: () -> Unit,
 ) {
     var reviewTab by remember { mutableStateOf(ReviewTab.STRUCTURED) }
     val plan = state.plan
@@ -1136,7 +1163,22 @@ private fun CanonicalJsonValidatorScreen(
         }
         item { ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it }) }
         if (reviewTab == ReviewTab.STRUCTURED) {
-            item { AppReviewTable(state.envelope, state.session, state.evidence, state.selectedProjections) }
+            item {
+                AppReviewTable(
+                    envelope = state.envelope,
+                    session = state.session,
+                    evidence = state.evidence,
+                    selectedProjections = state.selectedProjections,
+                    onReviewMerchantNameChanged = onReviewMerchantNameChanged,
+                    onReviewLineDescriptionChanged = onReviewLineDescriptionChanged,
+                    onReviewLineTypeChanged = onReviewLineTypeChanged,
+                    onReviewFoodServiceRoleChanged = onReviewFoodServiceRoleChanged,
+                    onReviewOptionParentChanged = onReviewOptionParentChanged,
+                    onReviewEventChanged = onReviewEventChanged,
+                    onReviewUndo = onReviewUndo,
+                    onReviewRedo = onReviewRedo,
+                )
+            }
         } else {
             item {
                 OutlinedTextField(
@@ -1281,6 +1323,14 @@ private fun AppReviewTable(
     session: com.pricetrace.receiptscanner.ingestion.IngestionSession?,
     evidence: List<LocalEvidence>,
     selectedProjections: Set<com.pricetrace.receiptscanner.ingestion.IngestionProjection>,
+    onReviewMerchantNameChanged: (String) -> Unit,
+    onReviewLineDescriptionChanged: (String, String) -> Unit,
+    onReviewLineTypeChanged: (String, ReceiptLineType) -> Unit,
+    onReviewFoodServiceRoleChanged: (String, FoodServiceRole) -> Unit,
+    onReviewOptionParentChanged: (String, String?) -> Unit,
+    onReviewEventChanged: (String, Boolean) -> Unit,
+    onReviewUndo: () -> Unit,
+    onReviewRedo: () -> Unit,
 ) {
     val model = envelope?.let { ReviewViewModel.fromCanonical(it, session, evidence, selectedProjections) }
     if (model == null) {
@@ -1289,9 +1339,183 @@ private fun AppReviewTable(
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("인식 정보 및 전송 계획 · ${model.schema}", style = MaterialTheme.typography.titleMedium)
+        if (
+            envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA &&
+            envelope.receipt != null
+        ) {
+            CanonicalStructuredReviewEditor(
+                envelope = envelope,
+                onMerchantNameChanged = onReviewMerchantNameChanged,
+                onLineDescriptionChanged = onReviewLineDescriptionChanged,
+                onLineTypeChanged = onReviewLineTypeChanged,
+                onFoodServiceRoleChanged = onReviewFoodServiceRoleChanged,
+                onOptionParentChanged = onReviewOptionParentChanged,
+                onReviewEventChanged = onReviewEventChanged,
+                onUndo = onReviewUndo,
+                onRedo = onReviewRedo,
+            )
+        }
         if (model.rows.isEmpty()) Text("표시할 인식 정보가 없습니다.")
         else model.rows.forEach { row -> AppReviewTableRow(row) }
     }
+}
+
+@Composable
+private fun CanonicalStructuredReviewEditor(
+    envelope: com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope,
+    onMerchantNameChanged: (String) -> Unit,
+    onLineDescriptionChanged: (String, String) -> Unit,
+    onLineTypeChanged: (String, ReceiptLineType) -> Unit,
+    onFoodServiceRoleChanged: (String, FoodServiceRole) -> Unit,
+    onOptionParentChanged: (String, String?) -> Unit,
+    onReviewEventChanged: (String, Boolean) -> Unit,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
+) {
+    val receipt = envelope.receipt ?: return
+    val restaurant = receipt.merchant.businessKind == BusinessKind.FOOD_SERVICE
+    var merchantDraft by remember(receipt.merchant.name) { mutableStateOf(receipt.merchant.name.orEmpty()) }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("구조화 편집", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = onUndo) { Text("실행 취소") }
+                    TextButton(onClick = onRedo) { Text("다시 실행") }
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = merchantDraft,
+                    onValueChange = { merchantDraft = it },
+                    label = { Text("판매처명") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f).testTag("canonical_review_merchant_name"),
+                )
+                MaterialOutlinedButton(
+                    onClick = { onMerchantNameChanged(merchantDraft) },
+                    modifier = Modifier.align(Alignment.CenterVertically),
+                ) { Text("적용") }
+            }
+            receipt.lineItems.forEach { line ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("line ${line.id}", style = MaterialTheme.typography.labelMedium)
+                        var descriptionDraft by remember(line.id, line.description) {
+                            mutableStateOf(line.description.orEmpty())
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedTextField(
+                                value = descriptionDraft,
+                                onValueChange = { descriptionDraft = it },
+                                label = { Text("설명") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                            )
+                            MaterialOutlinedButton(
+                                onClick = { onLineDescriptionChanged(line.id, descriptionDraft) },
+                                modifier = Modifier.align(Alignment.CenterVertically),
+                            ) { Text("적용") }
+                        }
+                        Text("line type", style = MaterialTheme.typography.labelSmall)
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            ReceiptLineType.entries.forEach { type ->
+                                if (line.type == type) {
+                                    MaterialButton(
+                                        onClick = { onLineTypeChanged(line.id, type) },
+                                        modifier = Modifier.heightIn(min = 34.dp),
+                                    ) { Text(type.canonicalDisplayName()) }
+                                } else {
+                                    MaterialOutlinedButton(
+                                        onClick = { onLineTypeChanged(line.id, type) },
+                                        modifier = Modifier.heightIn(min = 34.dp),
+                                    ) { Text(type.canonicalDisplayName()) }
+                                }
+                            }
+                        }
+                        if (restaurant && line.type == ReceiptLineType.PRODUCT) {
+                            Text("food_service role", style = MaterialTheme.typography.labelSmall)
+                            Row(
+                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                FoodServiceRole.entries.forEach { role ->
+                                    val selected = line.foodService?.role == role
+                                    if (selected) {
+                                        MaterialButton(
+                                            onClick = { onFoodServiceRoleChanged(line.id, role) },
+                                            modifier = Modifier.heightIn(min = 34.dp),
+                                        ) { Text(role.canonicalDisplayName()) }
+                                    } else {
+                                        MaterialOutlinedButton(
+                                            onClick = { onFoodServiceRoleChanged(line.id, role) },
+                                            modifier = Modifier.heightIn(min = 34.dp),
+                                        ) { Text(role.canonicalDisplayName()) }
+                                    }
+                                }
+                            }
+                            if (line.foodService?.role == FoodServiceRole.OPTION) {
+                                var parentDraft by remember(line.id, line.foodService?.appliesToLineId) {
+                                    mutableStateOf(line.foodService?.appliesToLineId.orEmpty())
+                                }
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    OutlinedTextField(
+                                        value = parentDraft,
+                                        onValueChange = { parentDraft = it },
+                                        label = { Text("옵션 부모 line id") },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    MaterialOutlinedButton(
+                                        onClick = { onOptionParentChanged(line.id, parentDraft.takeIf(String::isNotBlank)) },
+                                        modifier = Modifier.align(Alignment.CenterVertically),
+                                    ) { Text("적용") }
+                                }
+                            }
+                            val benefit = line.foodService?.benefitKind
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(
+                                    checked = benefit == com.pricetrace.receiptscanner.domain.ReceiptBenefitKind.REVIEW_EVENT,
+                                    onCheckedChange = { checked -> onReviewEventChanged(line.id, checked) },
+                                )
+                                Text("리뷰 이벤트")
+                                benefit?.let { Text(" · 혜택 ${it.canonicalDisplayName()}") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun ReceiptLineType.canonicalDisplayName(): String = when (this) {
+    ReceiptLineType.PRODUCT -> "상품"
+    ReceiptLineType.SERVICE -> "서비스"
+    ReceiptLineType.DISCOUNT -> "할인"
+    ReceiptLineType.FEE -> "수수료"
+    ReceiptLineType.TAX -> "세금"
+    ReceiptLineType.TIP -> "팁"
+    ReceiptLineType.REFUND -> "환불"
+    ReceiptLineType.ROUNDING -> "반올림"
+    ReceiptLineType.OTHER -> "기타"
+}
+
+private fun FoodServiceRole.canonicalDisplayName(): String = when (this) {
+    FoodServiceRole.MAIN -> "메인"
+    FoodServiceRole.OPTION -> "옵션"
+    FoodServiceRole.SIDE -> "사이드"
+}
+
+private fun ReceiptBenefitKind.canonicalDisplayName(): String = when (this) {
+    ReceiptBenefitKind.INCLUDED -> "포함"
+    ReceiptBenefitKind.COMPLIMENTARY -> "무료"
+    ReceiptBenefitKind.REVIEW_EVENT -> "리뷰 이벤트"
+    ReceiptBenefitKind.PROMOTION -> "프로모션"
+    ReceiptBenefitKind.OTHER -> "기타"
 }
 
 @Composable

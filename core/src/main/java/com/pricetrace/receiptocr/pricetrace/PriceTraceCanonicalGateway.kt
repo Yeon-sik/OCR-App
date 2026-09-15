@@ -19,6 +19,7 @@ import com.pricetrace.receiptscanner.ingestion.PriceTraceV4SubmissionReason
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.ingestion.PriceTraceProductIdentityJson
+import com.pricetrace.receiptscanner.ingestion.isNormalPriceObservationCandidate
 import com.pricetrace.receiptscanner.publisher.PriceObservationJson
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
@@ -733,6 +734,11 @@ class PriceTraceCanonicalProjectionSubmitter(
                 }
                 val receipt = envelope.receipt
                     ?: return ProjectionSubmission.Failure("receipt_artifact_missing", retryable = false)
+                if (request.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
+                    receipt.lineItems.none { it.isNormalPriceObservationCandidate() }
+                ) {
+                    return ProjectionSubmission.Failure("price_observation_no_eligible_lines", retryable = false)
+                }
                 when (val result = gateway.submitVerifiedReceipt(request.idempotencyKey, receipt)) {
                     is PriceTraceCanonicalOutcome.Success -> {
                         // Parse at the authority boundary; the raw response remains durable metadata.
@@ -816,8 +822,15 @@ class PriceTraceCanonicalProjectionSubmitter(
         val returnedLineIds = lineResults.mapNotNull { it.stringField("sourceLineId") }.toSet()
         if (lineResults.size != receipt.lineItems.size || returnedLineIds != expectedLineIds) return false
 
-        val observationLines = lineResults.filter { it.stringField("resolutionStatus") != "semantic_only" }
-        return observationLines.isNotEmpty() && observationLines.all { line ->
+        val eligibleLineIds = receipt.lineItems
+            .filter { it.isNormalPriceObservationCandidate() }
+            .map { it.id }
+            .toSet()
+        val observationLines = lineResults.filter {
+            it.stringField("sourceLineId") in eligibleLineIds &&
+                it.stringField("resolutionStatus") != "semantic_only"
+        }
+        return eligibleLineIds.isNotEmpty() && observationLines.isNotEmpty() && observationLines.all { line ->
             val observationId = line.stringField("observationId")
                 ?: line.stringField("restaurantObservationId")
             observationId != null && observationId in observationIds

@@ -31,6 +31,7 @@ import com.pricetrace.receiptscanner.correction.ReceiptCorrectionProvider
 import com.pricetrace.receiptscanner.correction.ReceiptCorrectionRequestFactory
 import com.pricetrace.receiptscanner.correction.ReceiptEvidenceAssessment
 import com.pricetrace.receiptscanner.domain.BusinessKind
+import com.pricetrace.receiptscanner.domain.FoodServiceRole
 import com.pricetrace.receiptscanner.domain.ReceiptLineType
 import com.pricetrace.receiptscanner.domain.ReceiptPage
 import com.pricetrace.receiptscanner.domain.ReceiptReviewProgress
@@ -110,6 +111,7 @@ import com.pricetrace.receiptscanner.preflight.ReceiptPreflightDecision
 import com.pricetrace.receiptscanner.preflight.ReceiptPreflightEvaluator
 import com.pricetrace.receiptscanner.preflight.ReceiptPreflightRoute
 import com.pricetrace.receiptscanner.review.ReceiptReviewController
+import com.pricetrace.receiptscanner.review.CanonicalReviewController
 import com.pricetrace.receiptscanner.review.toFieldCorrection
 import com.pricetrace.receiptscanner.storage.PriceObservationQueueEntry
 import com.pricetrace.receiptscanner.storage.PriceObservationQueueStatus
@@ -677,6 +679,35 @@ class ReceiptAppViewModel(
 
     fun retryCanonicalJsonValidator() =
         runCanonicalJsonValidator(canonicalJsonValidator::retry)
+
+    fun updateCanonicalMerchantName(value: String) =
+        runCanonicalStructuredEdit { it.updateMerchantName(value) }
+
+    fun updateCanonicalLineDescription(lineId: String, value: String) =
+        runCanonicalStructuredEdit { it.updateLineDescription(lineId, value) }
+
+    fun updateCanonicalLineType(lineId: String, value: ReceiptLineType) =
+        runCanonicalStructuredEdit { it.updateLineType(lineId, value) }
+
+    fun updateCanonicalFoodServiceRole(lineId: String, value: FoodServiceRole) =
+        runCanonicalStructuredEdit { it.updateFoodServiceRole(lineId, value) }
+
+    fun updateCanonicalFoodServiceOptionParent(lineId: String, parentLineId: String?) =
+        runCanonicalStructuredEdit { it.updateFoodServiceOptionParent(lineId, parentLineId) }
+
+    fun setCanonicalReviewEvent(lineId: String, checked: Boolean) =
+        runCanonicalStructuredEdit { it.setRestaurantReviewEvent(lineId, checked) }
+
+    fun undoCanonicalStructuredEdit() =
+        runCanonicalStructuredEdit { it.undo() }
+
+    fun redoCanonicalStructuredEdit() =
+        runCanonicalStructuredEdit { it.redo() }
+
+    private fun runCanonicalStructuredEdit(mutation: (CanonicalReviewController) -> Boolean) =
+        runCanonicalJsonValidator { state ->
+            canonicalJsonValidator.reviseStructuredReview(state, mutation)
+        }
 
     private fun runCanonicalJsonValidator(
         operation: suspend (AndroidCanonicalJsonValidatorState) -> AndroidCanonicalJsonValidatorState,

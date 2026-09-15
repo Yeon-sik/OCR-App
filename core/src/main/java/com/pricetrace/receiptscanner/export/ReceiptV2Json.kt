@@ -13,6 +13,7 @@ import com.pricetrace.receiptscanner.domain.ReceiptIdentifier
 import com.pricetrace.receiptscanner.domain.ReceiptLineType
 import com.pricetrace.receiptscanner.domain.ReceiptMerchant
 import com.pricetrace.receiptscanner.domain.ReceiptQuantity
+import com.pricetrace.receiptscanner.domain.ReceiptBenefitKind
 import com.pricetrace.receiptscanner.domain.ReceiptSource
 import com.pricetrace.receiptscanner.domain.ReceiptStatus
 import com.pricetrace.receiptscanner.domain.ReceiptV2
@@ -67,6 +68,11 @@ object ReceiptV2Json {
     fun revisionHash(receipt: ReceiptV2): String = StableIds.sha256(encodeCanonical(receipt))
 
     fun idempotencyKey(receipt: ReceiptV2): String = "receipt:${receipt.document.id ?: "unassigned"}:${revisionHash(receipt)}"
+
+    /** Validates object-level receipt constraints before a canonical envelope is persisted. */
+    fun validate(receipt: ReceiptV2) {
+        validateFoodServiceLinks(receipt)
+    }
 
     fun decode(value: String, localDocumentId: String? = null): ReceiptV2 {
         val root = compactJson.parseToJsonElement(value).jsonObject
@@ -156,6 +162,7 @@ object ReceiptV2Json {
     private fun ReceiptFoodService.toJsonElement() = objectOf(
         "role" to JsonPrimitive(role.wireValue),
         "applies_to_line_id" to appliesToLineId.jsonStringOrNull(),
+        "benefit_kind" to benefitKind?.let { JsonPrimitive(it.wireValue) }.orJsonNull(),
     )
 
     private fun ReceiptV2Totals.toJsonElement() = objectOf(
@@ -278,10 +285,19 @@ object ReceiptV2Json {
         )
     }
     private fun JsonObject.toFoodService(): ReceiptFoodService {
-        requireOnlyKeys("role", "applies_to_line_id")
+        val legacyKeys = setOf("role", "applies_to_line_id")
+        val currentKeys = legacyKeys + "benefit_kind"
+        require(keys == legacyKeys || keys == currentKeys) {
+            "Unexpected or missing keys. Expected=$legacyKeys or $currentKeys actual=$keys"
+        }
         return ReceiptFoodService(
             role = enumValue(requiredString("role"), FoodServiceRole.entries, FoodServiceRole::wireValue),
             appliesToLineId = nullableNonEmptyString("applies_to_line_id"),
+            benefitKind = if (containsKey("benefit_kind")) {
+                nullableEnumValue("benefit_kind", ReceiptBenefitKind.entries, ReceiptBenefitKind::wireValue)
+            } else {
+                null
+            },
         )
     }
 
@@ -429,6 +445,16 @@ object ReceiptV2Json {
 
     private fun JsonObject.requiredEnumString(key: String, allowed: Set<String>): String =
         requiredString(key).also { require(it in allowed) { "Unsupported enum value for $key: $it" } }
+
+    private fun <T> JsonObject.nullableEnumValue(
+        key: String,
+        entries: List<T>,
+        wireValue: (T) -> String,
+    ): T? {
+        require(containsKey(key)) { "Missing key: $key" }
+        if (get(key) == JsonNull) return null
+        return enumValue(requiredString(key), entries, wireValue)
+    }
 
     private fun validateFoodServiceLinks(receipt: ReceiptV2) {
         val byId = receipt.lineItems.associateBy { it.id }
