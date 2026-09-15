@@ -33,6 +33,8 @@ interface AndroidBundleStateStore {
     fun loadActive(): AndroidBundleRecoveryState?
     /** Loads a durable record without reading or changing the active-ingestion pointer. */
     fun load(ingestionId: String): AndroidBundleRecoveryState?
+    /** Lists durable bundle records without changing which ingestion is active. */
+    fun list(): List<AndroidBundleRecoveryState> = emptyList()
     /** Hides the current bundle from automatic restore without deleting its files/session. */
     fun clearActive(): Boolean
 }
@@ -50,6 +52,8 @@ class InMemoryAndroidBundleStateStore : AndroidBundleStateStore {
     override fun loadActive(): AndroidBundleRecoveryState? = activeIngestionId?.let(records::get)
 
     override fun load(ingestionId: String): AndroidBundleRecoveryState? = records[ingestionId]
+
+    override fun list(): List<AndroidBundleRecoveryState> = records.values.toList()
 
     override fun clearActive(): Boolean {
         activeIngestionId = null
@@ -78,6 +82,13 @@ class SharedPreferencesAndroidBundleStateStore(context: Context) : AndroidBundle
         val value = preferences.getString(RECORD_PREFIX + ingestionId, null) ?: return null
         return runCatching { decode(json.parseToJsonElement(value).jsonObject) }.getOrNull()
     }
+
+    override fun list(): List<AndroidBundleRecoveryState> = preferences.all.keys
+        .asSequence()
+        .filter { it.startsWith(RECORD_PREFIX) }
+        .mapNotNull { key -> load(key.removePrefix(RECORD_PREFIX)) }
+        .sortedBy { it.ingestionId }
+        .toList()
 
     override fun clearActive(): Boolean = preferences.edit().remove(ACTIVE_KEY).commit()
 

@@ -27,6 +27,7 @@ fun ReceiptOcrApp(
     val activity = remember(context) { context.findActivity() }
     val uiState by viewModel.uiState.collectAsState()
     val canonicalJsonValidatorState by viewModel.canonicalJsonValidatorState.collectAsState()
+    val canonicalBundleBatchState by viewModel.canonicalBundleBatchState.collectAsState()
     val sessions by viewModel.sessions.collectAsState()
     val pages by viewModel.selectedPages.collectAsState()
 
@@ -86,6 +87,9 @@ fun ReceiptOcrApp(
         onAttachImportImage = { onLaunchImagePicker(true) },
         onCancelImport = viewModel::cancelImportPreview,
         canonicalJsonValidatorState = canonicalJsonValidatorState,
+        canonicalBundleBatchState = canonicalBundleBatchState,
+        onCanonicalBatchItemSelected = viewModel::openCanonicalBundleItem,
+        onCanonicalBatchItemRetry = viewModel::retryCanonicalBundleItem,
         onCanonicalJsonChanged = viewModel::updateCanonicalJsonValidatorRawJson,
         onCanonicalJsonBasisChanged = viewModel::setCanonicalJsonValidatorBasis,
         onCanonicalJsonParse = viewModel::parseCanonicalJsonValidator,

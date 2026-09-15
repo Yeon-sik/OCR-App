@@ -28,6 +28,10 @@
 
 The importer sanitizes receipt IDs/status/source images and nutrition IDs/status/confirmation. The app creates its own fingerprint and local ID. Server IDs, owner IDs, publisher status, revisions, remote receipt IDs, and `user_verified` are never accepted as trust.
 
+## Multiple `.yeonsik` import
+
+Desktop multi-select/drop and Android multi-document selection run the existing single-bundle pipeline once per file, sequentially. Each file keeps its own canonical fingerprint, ingestion ID, local archive, review state, and projection result; an invalid, duplicate, archive, or projection failure does not roll back another item. The format and downstream contracts are unchanged: multiple files are multiple independent ingestion sessions, not a batch canonical envelope or batch API. Import/archive never auto-confirms or submits; the user must open each item and use the existing review/verify/submit flow.
+
 ## Projection state machine
 
 ```text

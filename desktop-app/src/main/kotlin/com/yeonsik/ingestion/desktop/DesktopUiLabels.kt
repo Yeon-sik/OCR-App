@@ -8,6 +8,18 @@ import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 
 /** Korean display names for the Desktop UI. Contract values remain in the domain models. */
 object DesktopUiLabels {
+    fun batchItemStatus(value: DesktopBatchItemStatus): String = when (value) {
+        DesktopBatchItemStatus.QUEUED -> "대기"
+        DesktopBatchItemStatus.IMPORTING -> "가져오는 중"
+        DesktopBatchItemStatus.ARCHIVING -> "보관 중"
+        DesktopBatchItemStatus.REVIEW_REQUIRED -> "검수 필요"
+        DesktopBatchItemStatus.READY_TO_SUBMIT -> "전송 가능"
+        DesktopBatchItemStatus.SUBMITTING -> "전송 중"
+        DesktopBatchItemStatus.COMPLETED -> "완료"
+        DesktopBatchItemStatus.FAILED -> "실패"
+        DesktopBatchItemStatus.DUPLICATE -> "중복"
+    }
+
     fun sourceAttachmentType(value: SourceAttachmentType): String = when (value) {
         SourceAttachmentType.RECEIPT -> "영수증"
         SourceAttachmentType.NUTRITION_LABEL -> "영양성분표"

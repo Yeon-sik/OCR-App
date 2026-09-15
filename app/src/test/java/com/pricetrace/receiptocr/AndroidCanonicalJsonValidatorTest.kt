@@ -486,6 +486,307 @@ class AndroidCanonicalJsonValidatorTest {
             .status == com.pricetrace.receiptscanner.ingestion.ProjectionStatus.DISABLED)
     }
 
+    @Test
+    fun `android batch creates separate V2 and V4 ingestion sessions`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        var sequence = 0
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = SuccessfulArchivePort(),
+            bundleRoot = Files.createTempDirectory("android-batch-v2-v4").toFile(),
+            newLocalDocumentId = { "android-batch-document-${++sequence}" },
+            newIngestionId = { "android-batch-ingestion-${++sequence}" },
+            bundleStateStore = recoveryStore,
+        )
+        val payloads = listOf(
+            "v2.yeonsik" to textOnlyBundle(v2MerchantCanonical(userText = "V2 source")),
+            "v4.yeonsik" to textOnlyBundle(readExample("yeonsik-ocr.v4.purchase.text-only.example.json")),
+        ).toMap()
+        val coordinator = AndroidBundleBatchCoordinator(validator) { input ->
+            ByteArrayInputStream(payloads.getValue(input.sourceName))
+        }
+
+        val result = coordinator.importBundles(
+            inputs = payloads.keys.mapIndexed { index, sourceName ->
+                AndroidBundleBatchInput("item-$index", sourceName, "content://$sourceName")
+            },
+            previous = AndroidCanonicalJsonValidatorState(),
+        )
+
+        assertEquals(2, result.batchState.items.size)
+        assertEquals(2, result.batchState.items.mapNotNull { it.ingestionId }.toSet().size)
+        assertTrue(result.batchState.items.all { it.status == AndroidBundleBatchItemStatus.REVIEW_REQUIRED })
+        assertEquals(
+            setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V4_SCHEMA),
+            result.batchState.items.mapNotNull { it.schema }.toSet(),
+        )
+        assertEquals(2, recoveryStore.list().size)
+    }
+
+    @Test
+    fun `android batch isolates invalid bundle and continues with valid bundle`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = SuccessfulArchivePort(),
+            bundleRoot = Files.createTempDirectory("android-batch-invalid").toFile(),
+            bundleStateStore = recoveryStore,
+        )
+        val valid = textOnlyBundle(readExample("yeonsik-ocr.v4.purchase.text-only.example.json"))
+        val coordinator = AndroidBundleBatchCoordinator(validator) { input ->
+            ByteArrayInputStream(if (input.itemId == "invalid") byteArrayOf(1, 2, 3) else valid)
+        }
+
+        val result = coordinator.importBundles(
+            inputs = listOf(
+                AndroidBundleBatchInput("invalid", "invalid.yeonsik", "content://invalid"),
+                AndroidBundleBatchInput("valid", "valid.yeonsik", "content://valid"),
+            ),
+            previous = AndroidCanonicalJsonValidatorState(),
+        )
+
+        assertEquals(AndroidBundleBatchItemStatus.FAILED, result.batchState.items[0].status)
+        assertTrue(result.batchState.items[0].error.orEmpty().isNotBlank())
+        assertEquals(AndroidBundleBatchItemStatus.REVIEW_REQUIRED, result.batchState.items[1].status)
+        assertNotNull(result.batchState.items[1].ingestionId)
+        assertEquals(1, recoveryStore.list().size)
+    }
+
+    @Test
+    fun `android batch duplicate does not archive a second time`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        val archive = CountingArchivePort()
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = archive,
+            bundleRoot = Files.createTempDirectory("android-batch-duplicate").toFile(),
+            bundleStateStore = recoveryStore,
+        )
+        val bytes = textOnlyBundle(readExample("yeonsik-ocr.v4.purchase.text-only.example.json"))
+        val coordinator = AndroidBundleBatchCoordinator(validator) { ByteArrayInputStream(bytes) }
+
+        val result = coordinator.importBundles(
+            inputs = listOf(
+                AndroidBundleBatchInput("original", "original.yeonsik", "content://original"),
+                AndroidBundleBatchInput("duplicate", "duplicate.yeonsik", "content://duplicate"),
+            ),
+            previous = AndroidCanonicalJsonValidatorState(),
+        )
+
+        val items = result.batchState.items
+        assertEquals(AndroidBundleBatchItemStatus.REVIEW_REQUIRED, items[0].status)
+        assertEquals(AndroidBundleBatchItemStatus.DUPLICATE, items[1].status)
+        assertEquals(items[0].ingestionId, items[1].duplicateOfIngestionId)
+        assertEquals(1, archive.archiveCalls)
+        assertEquals(1, recoveryStore.list().size)
+    }
+
+    @Test
+    fun `android batch continues after archive failure`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        val archive = CountingArchivePort(failuresBeforeSuccess = 1)
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = archive,
+            bundleRoot = Files.createTempDirectory("android-batch-archive-failure").toFile(),
+            bundleStateStore = recoveryStore,
+        )
+        val payloads = mapOf(
+            "first.yeonsik" to evidenceBundle(readExample("yeonsik-ocr.v3.restaurant.example.json")),
+            "second.yeonsik" to textOnlyBundle(readExample("yeonsik-ocr.v4.purchase.text-only.example.json")),
+        )
+        val coordinator = AndroidBundleBatchCoordinator(validator) { input ->
+            ByteArrayInputStream(payloads.getValue(input.sourceName))
+        }
+
+        val result = coordinator.importBundles(
+            inputs = payloads.keys.mapIndexed { index, sourceName ->
+                AndroidBundleBatchInput("item-$index", sourceName, "content://$sourceName")
+            },
+            previous = AndroidCanonicalJsonValidatorState(),
+        )
+
+        assertEquals(AndroidBundleBatchItemStatus.FAILED, result.batchState.items[0].status)
+        assertTrue(result.batchState.items[0].error.orEmpty().contains("archive", ignoreCase = true))
+        assertEquals(AndroidBundleBatchItemStatus.REVIEW_REQUIRED, result.batchState.items[1].status)
+        assertEquals(2, archive.archiveCalls)
+        assertEquals(2, recoveryStore.list().size)
+    }
+
+    @Test
+    fun `android batch keeps text-only and attachment-backed evidence separate`() = runBlocking {
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(InMemoryIngestionSessionStore()),
+            evidenceArchivePort = SuccessfulArchivePort(),
+            bundleRoot = Files.createTempDirectory("android-batch-evidence-types").toFile(),
+            bundleStateStore = recoveryStore,
+        )
+        val payloads = mapOf(
+            "text.yeonsik" to textOnlyBundle(readExample("yeonsik-ocr.v4.purchase.text-only.example.json")),
+            "attachment.yeonsik" to evidenceBundle(readExample("yeonsik-ocr.v3.restaurant.example.json")),
+        )
+        val coordinator = AndroidBundleBatchCoordinator(validator) { input ->
+            ByteArrayInputStream(payloads.getValue(input.sourceName))
+        }
+
+        val result = coordinator.importBundles(
+            inputs = payloads.keys.mapIndexed { index, sourceName ->
+                AndroidBundleBatchInput("item-$index", sourceName, "content://$sourceName")
+            },
+            previous = AndroidCanonicalJsonValidatorState(),
+        )
+
+        val textItem = result.batchState.items[0]
+        val attachmentItem = result.batchState.items[1]
+        assertEquals(AndroidEvidenceArchiveStatus.ARCHIVED, textItem.archiveStatus)
+        assertEquals(AndroidEvidenceArchiveStatus.ARCHIVED, attachmentItem.archiveStatus)
+        assertEquals(YEONSIK_OCR_V4_SCHEMA, textItem.schema)
+        assertEquals("yeonsik-ocr.v3", attachmentItem.schema)
+        assertTrue(recoveryStore.load(requireNotNull(textItem.ingestionId))?.bundle?.evidencePaths?.isEmpty() == true)
+        assertTrue(recoveryStore.load(requireNotNull(attachmentItem.ingestionId))?.bundle?.evidencePaths?.isNotEmpty() == true)
+    }
+
+    @Test
+    fun `android batch revision changes only the selected ingestion`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = SuccessfulArchivePort(),
+            bundleRoot = Files.createTempDirectory("android-batch-revision-isolation").toFile(),
+            bundleStateStore = recoveryStore,
+        )
+        val revisionSource = YeonsikOcrV2Json.decode(
+            readExample("yeonsik-ocr.v2.restaurant.example.json"),
+            "android-batch-revision-source",
+        )
+        val payloads = mapOf(
+            "first.yeonsik" to textOnlyBundle(
+                YeonsikOcrV2Json.encode(
+                    revisionSource.copy(source = revisionSource.source.copy(sourceFiles = emptyList(), userText = "first")),
+                ),
+            ),
+            "second.yeonsik" to textOnlyBundle(
+                YeonsikOcrV2Json.encode(
+                    revisionSource.copy(source = revisionSource.source.copy(sourceFiles = emptyList(), userText = "second")),
+                ),
+            ),
+        )
+        val coordinator = AndroidBundleBatchCoordinator(validator) { input ->
+            ByteArrayInputStream(payloads.getValue(input.sourceName))
+        }
+        val imported = coordinator.importBundles(
+            inputs = payloads.keys.mapIndexed { index, sourceName ->
+                AndroidBundleBatchInput("item-$index", sourceName, "content://$sourceName")
+            },
+            previous = AndroidCanonicalJsonValidatorState(),
+        )
+        val firstId = requireNotNull(imported.batchState.items[0].ingestionId)
+        val secondId = requireNotNull(imported.batchState.items[1].ingestionId)
+        val secondBefore = requireNotNull(sessionStore.get(secondId))
+        val firstState = requireNotNull(validator.restoreBundleState(firstId))
+
+        val revised = validator.reviseStructuredReview(firstState) {
+            it.updateMerchantName("Revision isolated")
+        }
+
+        assertEquals("Revision isolated", revised.envelope?.receipt?.merchant?.name)
+        assertTrue(revised.session!!.revisionSeq > firstState.session!!.revisionSeq)
+        assertEquals(secondBefore, sessionStore.get(secondId))
+    }
+
+    @Test
+    fun `android projection retry updates only the selected ingestion`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        val submitter = FailOnceSubmitter()
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(
+                store = sessionStore,
+                submitters = mapOf(IngestionProjection.CASHOS_TRANSACTION to submitter),
+            ),
+            evidenceArchivePort = SuccessfulArchivePort(),
+            bundleRoot = Files.createTempDirectory("android-batch-projection-isolation").toFile(),
+            bundleStateStore = recoveryStore,
+        )
+        val payloads = mapOf(
+            "first.yeonsik" to textOnlyBundle(readExample("yeonsik-ocr.v4.purchase.text-only.example.json")),
+            "second.yeonsik" to textOnlyBundle(readExample("yeonsik-ocr.v3.text-only-retail.example.json")),
+        )
+        val coordinator = AndroidBundleBatchCoordinator(validator) { input ->
+            ByteArrayInputStream(payloads.getValue(input.sourceName))
+        }
+        val imported = coordinator.importBundles(
+            inputs = payloads.keys.mapIndexed { index, sourceName ->
+                AndroidBundleBatchInput("item-$index", sourceName, "content://$sourceName")
+            },
+            previous = AndroidCanonicalJsonValidatorState(),
+        )
+        val firstId = requireNotNull(imported.batchState.items[0].ingestionId)
+        val secondId = requireNotNull(imported.batchState.items[1].ingestionId)
+        val secondBefore = requireNotNull(sessionStore.get(secondId))
+        var firstState = requireNotNull(validator.restoreBundleState(firstId))
+        firstState = validator.confirm(firstState)
+        val failed = validator.submit(firstState)
+        assertEquals(
+            com.pricetrace.receiptscanner.ingestion.ProjectionStatus.FAILED,
+            failed.session?.projections?.single { it.projection == IngestionProjection.CASHOS_TRANSACTION }?.status,
+        )
+        assertEquals(secondBefore, sessionStore.get(secondId))
+
+        val retried = validator.retry(failed)
+        assertEquals(
+            com.pricetrace.receiptscanner.ingestion.ProjectionStatus.UPLOADED,
+            retried.session?.projections?.single { it.projection == IngestionProjection.CASHOS_TRANSACTION }?.status,
+        )
+        assertEquals(secondBefore, sessionStore.get(secondId))
+    }
+
+    @Test
+    fun `android process recovery lists and restores multiple durable bundle records`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        val bundleRoot = Files.createTempDirectory("android-batch-process-recovery").toFile()
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = SuccessfulArchivePort(),
+            bundleRoot = bundleRoot,
+            bundleStateStore = recoveryStore,
+        )
+        val payloads = mapOf(
+            "first.yeonsik" to textOnlyBundle(readExample("yeonsik-ocr.v4.purchase.text-only.example.json")),
+            "second.yeonsik" to evidenceBundle(readExample("yeonsik-ocr.v3.restaurant.example.json")),
+        )
+        val coordinator = AndroidBundleBatchCoordinator(validator) { input ->
+            ByteArrayInputStream(payloads.getValue(input.sourceName))
+        }
+        coordinator.importBundles(
+            inputs = payloads.keys.mapIndexed { index, sourceName ->
+                AndroidBundleBatchInput("item-$index", sourceName, "content://$sourceName")
+            },
+            previous = AndroidCanonicalJsonValidatorState(),
+        )
+        val persistedIds = recoveryStore.list().map { it.ingestionId }.toSet()
+        val restarted = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = SuccessfulArchivePort(),
+            bundleRoot = bundleRoot,
+            bundleStateStore = recoveryStore,
+        )
+
+        val restoredIds = recoveryStore.list().map { recovery ->
+            requireNotNull(restarted.restoreBundleState(recovery.ingestionId)).ingestionId
+        }.toSet()
+
+        assertEquals(persistedIds, restoredIds)
+        assertEquals(2, recoveryStore.list().size)
+    }
+
     private class RecordingSubmitter(
         private val order: MutableList<IngestionProjection>,
     ) : IngestionProjectionSubmitter {
@@ -512,6 +813,48 @@ class AndroidCanonicalJsonValidatorTest {
             result: String,
             issues: List<String>,
         ): EvidenceVerificationEventResult = EvidenceVerificationEventResult.Success
+    }
+
+    private class CountingArchivePort(
+        private val failuresBeforeSuccess: Int = 0,
+    ) : EvidenceArchivePort {
+        var archiveCalls: Int = 0
+            private set
+
+        override suspend fun archive(
+            request: EvidenceArchiveRequest,
+            checkpoint: EvidenceArchiveCheckpoint,
+        ): EvidenceArchiveResult {
+            archiveCalls += 1
+            val nextCheckpoint = checkpoint.copy(bundleFingerprint = request.bundle.bundleFingerprint)
+            return if (archiveCalls <= failuresBeforeSuccess) {
+                EvidenceArchiveResult.Failure("archive test failure", nextCheckpoint)
+            } else {
+                EvidenceArchiveResult.Success(
+                    nextCheckpoint.copy(canonicalArtifactId = nextCheckpoint.canonicalArtifactId ?: "android-batch-artifact-$archiveCalls"),
+                )
+            }
+        }
+
+        override suspend fun recordVerification(
+            canonicalArtifactId: String,
+            basis: VerificationBasis,
+            result: String,
+            issues: List<String>,
+        ): EvidenceVerificationEventResult = EvidenceVerificationEventResult.Success
+    }
+
+    private class FailOnceSubmitter : IngestionProjectionSubmitter {
+        private var attempts = 0
+
+        override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+            attempts += 1
+            return if (attempts == 1) {
+                ProjectionSubmission.Failure("projection test failure", retryable = true)
+            } else {
+                ProjectionSubmission.Success("android-batch-projection-${request.ingestionId}")
+            }
+        }
     }
 
     private fun textOnlyBundle(canonical: String): ByteArray {

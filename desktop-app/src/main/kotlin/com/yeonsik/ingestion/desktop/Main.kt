@@ -2,6 +2,7 @@ package com.yeonsik.ingestion.desktop
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -68,13 +69,19 @@ fun main() = application {
         onCloseRequest = ::exitApplication,
         title = "영식 영수증 수집 콘솔",
     ) {
-        YeonsikIngestionConsole(DesktopIngestionController())
+        val controller = remember { DesktopIngestionController() }
+        val batchCoordinator = remember(controller) { DesktopBatchCoordinator(controller) }
+        YeonsikIngestionConsole(controller, batchCoordinator)
     }
 }
 
 @Composable
-private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
+private fun YeonsikIngestionConsole(
+    controller: DesktopIngestionController,
+    batchCoordinator: DesktopBatchCoordinator,
+) {
     val state by controller.state.collectAsState()
+    val batchState by batchCoordinator.state.collectAsState()
     val scope = rememberCoroutineScope()
     var evidenceType by remember { mutableStateOf(SourceAttachmentType.RECEIPT) }
     var verificationBasis by remember { mutableStateOf(VerificationBasis.SOURCE_EVIDENCE) }
@@ -86,6 +93,7 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
         .toSet()
     val effectiveSelectedProjections = selectedProjections?.intersect(activeProjections) ?: activeProjections
     val bundleActive = state.bundleMetadata != null || state.bundleValidationStatus != null
+    val anyBusy = state.busy || batchState.busy
     LaunchedEffect(state.ingestionId) {
         selectedProjections = null
     }
@@ -93,7 +101,12 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
         { block -> scope.launch(Dispatchers.IO) { block() } }
     }
     val editStructured: ((CanonicalReviewController) -> Boolean) -> Unit = remember(launchIo) {
-        { mutation -> launchIo { controller.reviseStructuredReview(mutation) } }
+        { mutation ->
+            launchIo {
+                controller.reviseStructuredReview(mutation)
+                batchCoordinator.syncActiveItem()
+            }
+        }
     }
 
     MaterialTheme {
@@ -110,15 +123,15 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
-                            enabled = !state.busy,
+                            enabled = !anyBusy,
                             onClick = {
-                                chooseBundleFile()?.let { file ->
-                                    launchIo { controller.importBundle(file) }
+                                chooseBundleFiles()?.let { files ->
+                                    launchIo { batchCoordinator.importBundles(files) }
                                 }
                             },
-                        ) { Text(".yeonsik 파일 열기") }
+                        ) { Text(".yeonsik 여러 파일 열기") }
                         OutlinedButton(
-                            enabled = !state.busy,
+                            enabled = !anyBusy,
                             onClick = {
                                 chooseJsonFile()?.let { file ->
                                     launchIo { controller.importJson(Files.readString(file)) }
@@ -126,16 +139,20 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                             },
                         ) { Text("새 수집을 위한 JSON 열기") }
                         Button(
-                            enabled = !state.busy && !bundleActive && state.rawJson.isNotBlank(),
+                            enabled = !anyBusy && !bundleActive && state.rawJson.isNotBlank(),
                             onClick = { launchIo { controller.parseJson() } },
                         ) { Text("파싱 및 검증") }
                         OutlinedButton(
-                            enabled = !state.busy,
+                            enabled = !anyBusy,
                             onClick = { launchIo { controller.loadLatest() } },
                         ) { Text("최신 항목 불러오기") }
                     }
+                    BundleDropZone(
+                        enabled = !anyBusy,
+                        onBundles = { files -> launchIo { batchCoordinator.importBundles(files) } },
+                    )
                     JsonDropZone(
-                        enabled = !state.busy,
+                        enabled = !anyBusy,
                         onJson = { value -> launchIo { controller.importJson(value) } },
                     )
                     ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it })
@@ -164,6 +181,12 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                     Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
+                    DesktopBatchCard(
+                        state = batchState,
+                        enabled = !anyBusy,
+                        onSelect = { itemId -> launchIo { batchCoordinator.openItem(itemId) } },
+                        onRetry = { itemId -> launchIo { batchCoordinator.retryItem(itemId) } },
+                    )
                     SummaryCard(state)
                     EvidenceCard(
                         state = state,
@@ -171,15 +194,28 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                         onTypeSelected = { evidenceType = it },
                         onChoose = {
                             chooseEvidenceFiles()?.let { files ->
-                                launchIo { controller.attachEvidence(files, evidenceType) }
+                                launchIo {
+                                    controller.attachEvidence(files, evidenceType)
+                                    batchCoordinator.syncActiveItem()
+                                }
                             }
                         },
-                        onDrop = { files -> launchIo { controller.attachEvidence(files, evidenceType) } },
+                        onDrop = { files ->
+                            launchIo {
+                                controller.attachEvidence(files, evidenceType)
+                                batchCoordinator.syncActiveItem()
+                            }
+                        },
                     )
                     if (state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.FAILED) {
                         Button(
                             enabled = !state.busy,
-                            onClick = { launchIo { controller.archiveEvidence() } },
+                            onClick = {
+                                launchIo {
+                                    controller.archiveEvidence()
+                                    batchCoordinator.syncActiveItem()
+                                }
+                            },
                         ) { Text("보관 / 재시도") }
                     }
                     ReviewCard(state)
@@ -219,6 +255,7 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                                         if (state.bundleMetadata == null) verificationBasis
                                         else VerificationBasis.SOURCE_EVIDENCE,
                                     )
+                                    batchCoordinator.syncActiveItem()
                                 }
                             },
                         ) { Text("검수 완료 처리") }
@@ -229,7 +266,10 @@ private fun YeonsikIngestionConsole(controller: DesktopIngestionController) {
                                     state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED &&
                                         state.bundleMetadata?.verificationEventRecorded == true),
                             onClick = {
-                                launchIo { controller.submit(effectiveSelectedProjections) }
+                                launchIo {
+                                    controller.submit(effectiveSelectedProjections)
+                                    batchCoordinator.syncActiveItem()
+                                }
                             },
                         ) { Text("전송 / 재시도") }
                     }
@@ -498,6 +538,81 @@ private fun ReviewDestinationBadgeText(badge: com.pricetrace.receiptscanner.revi
 }
 
 @Composable
+private fun DesktopBatchCard(
+    state: DesktopBatchState,
+    enabled: Boolean,
+    onSelect: (String) -> Unit,
+    onRetry: (String) -> Unit,
+) {
+    if (state.items.isEmpty()) return
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Text(".yeonsik batch", style = MaterialTheme.typography.titleMedium)
+            val summary = state.summary
+            Text(
+                "전체 ${summary.total} · 대기 ${summary.queued} · 검수 필요 ${summary.reviewRequired} · " +
+                    "완료 ${summary.completed} · 실패 ${summary.failed} · 중복 ${summary.duplicate}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            state.items.forEach { item ->
+                Column(Modifier.fillMaxWidth().border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant))) {
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .clickable(enabled = enabled && item.ingestionId != null) { onSelect(item.itemId) }
+                            .padding(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(item.sourceFileName, style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                DesktopUiLabels.batchItemStatus(item.status),
+                                color = when (item.status) {
+                                    DesktopBatchItemStatus.FAILED -> MaterialTheme.colorScheme.error
+                                    DesktopBatchItemStatus.COMPLETED -> MaterialTheme.colorScheme.primary
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                            item.ingestionId?.let { Text("ingestion · $it", style = MaterialTheme.typography.bodySmall) }
+                            item.schema?.let { schema ->
+                                Text(
+                                    listOfNotNull(schema, item.mode, item.merchantOrPlatform).joinToString(" · "),
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            item.archiveStatus?.let {
+                                Text("archive · ${DesktopUiLabels.evidenceArchiveStatus(it)}", style = MaterialTheme.typography.bodySmall)
+                            }
+                            if (item.projectionSummary.isNotEmpty()) {
+                                Text(
+                                    item.projectionSummary.joinToString(", ") { projection ->
+                                        "${DesktopUiLabels.projection(projection.projection)}=${DesktopUiLabels.projectionStatus(projection.status)}"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            item.duplicateOfIngestionId?.let {
+                                Text("기존 세션 · $it", style = MaterialTheme.typography.bodySmall)
+                            }
+                            item.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                        }
+                        Text("열기", style = MaterialTheme.typography.labelMedium)
+                    }
+                    if (item.status == DesktopBatchItemStatus.FAILED) {
+                        TextButton(
+                            onClick = { onRetry(item.itemId) },
+                            enabled = enabled,
+                            modifier = Modifier.padding(start = 4.dp),
+                        ) { Text("이 항목만 재시도") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SummaryCard(state: DesktopUiState) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -616,6 +731,19 @@ private fun JsonDropZone(enabled: Boolean, onJson: (String) -> Unit) {
 }
 
 @Composable
+private fun BundleDropZone(enabled: Boolean, onBundles: (List<Path>) -> Unit) {
+    DropZone(
+        enabled = enabled,
+        label = ".yeonsik 파일을 여기에 놓으세요",
+        onFiles = { files ->
+            files.filter { it.fileName.toString().lowercase().endsWith(".yeonsik") }
+                .takeIf { it.isNotEmpty() }
+                ?.let(onBundles)
+        },
+    )
+}
+
+@Composable
 private fun EvidenceDropZone(enabled: Boolean, onFiles: (List<Path>) -> Unit) {
     DropZone(enabled = enabled, label = "증거 이미지를 여기에 놓으세요", onFiles = onFiles)
 }
@@ -664,10 +792,13 @@ private fun chooseJsonFile(): Path? = JFileChooser().run {
     if (showOpenDialog(null) == JFileChooser.APPROVE_OPTION) selectedFile?.toPath() else null
 }
 
-private fun chooseBundleFile(): Path? = JFileChooser().run {
+private fun chooseBundleFiles(): List<Path>? = JFileChooser().run {
     fileFilter = FileNameExtensionFilter("영식 번들 파일", "yeonsik")
-    isMultiSelectionEnabled = false
-    if (showOpenDialog(null) == JFileChooser.APPROVE_OPTION) selectedFile?.toPath() else null
+    isMultiSelectionEnabled = true
+    if (showOpenDialog(null) != JFileChooser.APPROVE_OPTION) return@run null
+    selectedFiles?.map { it.toPath() }
+        ?.takeIf { it.isNotEmpty() }
+        ?: selectedFile?.toPath()?.let(::listOf)
 }
 
 private fun chooseEvidenceFiles(): List<Path>? = JFileChooser().run {

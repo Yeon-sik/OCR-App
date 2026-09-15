@@ -88,9 +88,19 @@ class DesktopIngestionController(
         }
     }
 
+    /** Source-compatible single-bundle entry point; batch UI uses the phase-aware overload. */
     suspend fun importBundle(path: Path) {
+        importBundle(path, onPhase = {})
+    }
+
+    suspend fun importBundle(
+        path: Path,
+        onPhase: (DesktopBundleImportPhase) -> Unit,
+    ): DesktopBundleImportResult {
         beginBusy()
         var archiveAfterImport = false
+        var duplicateOfIngestionId: String? = null
+        onPhase(DesktopBundleImportPhase.IMPORTING)
         try {
             val localDocumentId = newLocalDocumentId()
             val ingestionId = newIngestionId()
@@ -121,12 +131,10 @@ class DesktopIngestionController(
                 is CanonicalImportResult.Success -> {
                     if (result.startResult is IngestionStartResult.Duplicate) {
                         materializer.abort()
+                        duplicateOfIngestionId = result.session.ingestionId
                         val existing = store.loadRecord(result.session.ingestionId)
                             ?: error("중복 번들 세션의 영속 레코드를 찾을 수 없습니다.")
                         loadRecord(existing, "중복 번들 지문을 확인해 기존의 변경 불가 세션을 불러왔습니다.")
-                        archiveAfterImport = existing.bundle?.let {
-                            it.archiveStatus != DesktopEvidenceArchiveStatus.ARCHIVED
-                        } == true
                     } else {
                         val metadata = DesktopBundleMetadata(
                         sourcePath = path.toAbsolutePath().normalize().toString(),
@@ -148,6 +156,7 @@ class DesktopIngestionController(
                             metadata,
                         )
                         archiveAfterImport = true
+                        onPhase(DesktopBundleImportPhase.ARCHIVING)
                     }
                 }
             }
@@ -169,6 +178,10 @@ class DesktopIngestionController(
             endBusy()
         }
         if (archiveAfterImport) archiveEvidence()
+        return DesktopBundleImportResult(
+            state = _state.value,
+            duplicateOfIngestionId = duplicateOfIngestionId,
+        )
     }
 
     suspend fun archiveEvidence() {
