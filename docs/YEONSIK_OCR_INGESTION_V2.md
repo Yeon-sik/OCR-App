@@ -47,6 +47,21 @@ offset을 포함한 실제 식사시각이며 receipt 결제시각이나 사진�
 양·단위·confidence와 실제 식사시각을 그대로 보존하며, Fitness가 반환한
 `meal_record_id`만 projection 결과로 저장한다.
 
+## Restaurant nutrition without a receipt
+
+V2의 `restaurant_estimate`는 영수증이 있는 식당 흐름과 영수증이 없는 음식사진 흐름을
+같은 kind로 표현한다. 영수증이 있으면 `line_id`가 실제 `receipt.line_items[].id`여야 하고,
+기존 `links`에도 같은 연결이 있어야 한다. 영수증이 없으면 `mode`는 `restaurant`,
+`merchant_candidate`는 필수이며, `line_id`는 반드시 `null`이다. 이 경우 가짜 receipt나
+receipt line을 만들지 않는다.
+
+영수증 없는 식당 estimate의 source evidence는 `food_photo`다. `menu_photo`나 V3의
+`restaurant_menu_estimate`를 V2에 섞지 않는다. `PRICETRACE_MERCHANT_CANDIDATE`와
+`FITNESS_NUTRITION`은 독립적으로 동시에 계획할 수 있지만, 가격·날짜 근거가 없으므로
+`PRICETRACE_PRICE_OBSERVATION`은 만들지 않는다. 음식사진과 가게/메뉴 텍스트만으로
+`consumption` 또는 `FITNESS_MEAL`을 생성하지 않으며, 사용자가 실제 섭취를 명시한 경우에만
+기존 consumption 검증 규칙을 적용한다.
+
 ## Side dish / meal component
 
 Nutrition kind `meal_component_estimate`는 음식 사진으로 추정한 무료 반찬처럼 receipt에
@@ -85,6 +100,7 @@ UI에서 명시적으로 확정한 뒤에만 `USER_VERIFIED`가 된다.
 
 - `examples/yeonsik-ocr.v2.packaged-product.example.json`
 - `examples/yeonsik-ocr.v2.restaurant.example.json`
+- `examples/yeonsik-ocr.v2.restaurant-food-photo.example.json`
 
 로컬 검증:
 

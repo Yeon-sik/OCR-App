@@ -1,0 +1,67 @@
+{
+  "schema_version": "yeonsik-ocr.v2",
+  "mode": "restaurant",
+  "source": {
+    "producer": "chatgpt",
+    "source_files": [
+      {"id": "food-photo-1", "type": "food_photo", "label": "육회비빔밥 음식 사진"}
+    ],
+    "user_text": "가게: 키키덮밥 / 메뉴: 육회비빔밥"
+  },
+  "merchant_candidate": {
+    "name": "키키덮밥",
+    "business_kind": "food_service",
+    "branch_name": null,
+    "address": null,
+    "phone": null,
+    "business_registration_number": null,
+    "source_attachment_ids": [],
+    "source_namespace": null,
+    "source_location_code": null
+  },
+  "receipt": null,
+  "nutrition": [
+    {
+      "client_key": "food-photo-1",
+      "kind": "restaurant_estimate",
+      "line_id": null,
+      "menu_name": "육회비빔밥",
+      "payload": null,
+      "estimate": {
+        "estimated": true,
+        "confidence": 0.82,
+        "nutrients": {
+          "calories_kcal": 620,
+          "protein_grams": 28,
+          "carbs_grams": 82,
+          "fat_grams": 18,
+          "sodium_mg": 980,
+          "saturated_fat_grams": 4,
+          "sugars_grams": 9,
+          "fiber_grams": 6,
+          "added_sugars_grams": null,
+          "trans_fat_grams": null,
+          "cholesterol_mg": 110
+        },
+        "ranges": {},
+        "provenance": {
+          "calories_kcal": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-photo-1"]},
+          "protein_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-photo-1"]},
+          "carbs_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-photo-1"]},
+          "fat_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-photo-1"]},
+          "sodium_mg": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-photo-1"]},
+          "saturated_fat_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-photo-1"]},
+          "sugars_grams": {"value_status": "estimated", "source_type": "food_image_estimate", "evidence_refs": ["food-photo-1"]}
+        }
+      }
+    }
+  ],
+  "product_candidates": [],
+  "consumption": [],
+  "classification_hints": {
+    "cashos": {"category_hint": null, "institution_hint": null, "payment_method_hint": null}
+  },
+  "links": [],
+  "projection_targets": ["pricetrace_merchant_candidate", "fitness_nutrition"],
+  "review": {"status": "needs_review", "blocking_issues": [], "warnings": []}
+}

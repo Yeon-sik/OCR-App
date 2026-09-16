@@ -981,7 +981,7 @@ sealed interface IngestionNutrition {
 
     data class RestaurantEstimate(
         override val clientKey: String,
-        override val lineId: String,
+        override val lineId: String?,
         val menuName: String,
         val estimate: RestaurantNutritionEstimate,
     ) : IngestionNutrition
