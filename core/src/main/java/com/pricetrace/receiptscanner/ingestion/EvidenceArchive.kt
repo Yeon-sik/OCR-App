@@ -1,5 +1,7 @@
 package com.pricetrace.receiptscanner.ingestion
 
+import com.pricetrace.receiptscanner.domain.StableIds
+import com.pricetrace.receiptscanner.review.CanonicalReviewEdit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -11,7 +13,9 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.JsonNull
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -21,6 +25,7 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 import java.util.Locale
+import java.util.UUID
 
 data class EvidenceSupabaseConfig(
     val url: String = "",
@@ -76,6 +81,9 @@ data class EvidenceArchiveCheckpoint(
     val boundSourceFileIds: Set<String> = emptySet(),
     /** Prevents a checkpoint from being replayed against a different evidence manifest. */
     val bundleFingerprint: String? = null,
+    /** The latest successfully archived materialized canonical revision for this artifact. */
+    val latestRevisionId: String? = null,
+    val latestRevisionSeq: Long = 0,
 )
 
 data class EvidenceArchiveRequest(
@@ -93,6 +101,46 @@ sealed interface EvidenceVerificationEventResult {
     data class Failure(val issue: String) : EvidenceVerificationEventResult
 }
 
+/** One append-only materialized canonical snapshot stored after a typed edit commit. */
+data class CanonicalRevisionSnapshot(
+    val id: String,
+    val ownerId: String? = null,
+    val canonicalArtifactId: String,
+    val revisionSeq: Long,
+    val parentRevisionId: String? = null,
+    val canonicalSha256: String,
+    val canonicalJson: String,
+    val schemaVersion: String,
+    val mode: String,
+    val validationStatus: String,
+    val validationIssues: List<String> = emptyList(),
+    val createdAt: String? = null,
+)
+
+typealias CanonicalRevision = CanonicalRevisionSnapshot
+
+data class CanonicalRevisionArchiveRequest(
+    val canonicalArtifactId: String,
+    val revisionSeq: Long,
+    val parentRevisionId: String? = null,
+    val canonicalSha256: String,
+    val canonicalJson: String,
+    val schemaVersion: String,
+    val mode: String,
+    val validationStatus: String = "valid",
+    val validationIssues: List<String> = emptyList(),
+    val edits: List<CanonicalReviewEdit> = emptyList(),
+)
+
+sealed interface CanonicalRevisionArchiveResult {
+    data class Success(val revisionId: String, val revisionSeq: Long) : CanonicalRevisionArchiveResult
+    data class Failure(
+        val issue: String,
+        val revisionId: String? = null,
+        val revisionSeq: Long? = null,
+    ) : CanonicalRevisionArchiveResult
+}
+
 interface EvidenceArchivePort {
     suspend fun archive(
         request: EvidenceArchiveRequest,
@@ -105,6 +153,29 @@ interface EvidenceArchivePort {
         result: String,
         issues: List<String>,
     ): EvidenceVerificationEventResult
+
+    /**
+     * Archives a materialized revision and its append-only edit events. The default is a hard
+     * failure so an Evidence-backed bundle can never silently treat a local edit as archived.
+     */
+    suspend fun archiveCanonicalRevision(
+        request: CanonicalRevisionArchiveRequest,
+    ): CanonicalRevisionArchiveResult = CanonicalRevisionArchiveResult.Failure(
+        issue = "canonical revision archive is not configured",
+        revisionSeq = request.revisionSeq,
+    )
+
+    /** Compatibility alias for clients that use the shorter operation name. */
+    suspend fun archiveRevision(
+        request: CanonicalRevisionArchiveRequest,
+    ): CanonicalRevisionArchiveResult = archiveCanonicalRevision(request)
+
+    suspend fun latestCanonicalRevision(canonicalArtifactId: String): CanonicalRevisionSnapshot? = null
+
+    suspend fun canonicalEditEvents(
+        canonicalArtifactId: String,
+        revisionId: String,
+    ): List<CanonicalReviewEdit> = emptyList()
 }
 
 data class EvidenceHttpRequest(
@@ -216,6 +287,175 @@ class EvidenceSupabaseArchivePort(
             EvidenceArchiveResult.Success(progress)
         } catch (error: Exception) {
             EvidenceArchiveResult.Failure(error.message ?: error.javaClass.simpleName, progress)
+        }
+    }
+
+    override suspend fun archiveCanonicalRevision(
+        request: CanonicalRevisionArchiveRequest,
+    ): CanonicalRevisionArchiveResult {
+        var revisionId: String? = null
+        return try {
+            require(request.canonicalArtifactId.isNotBlank()) { "canonical artifact id is required" }
+            require(request.revisionSeq > 0) { "canonical revision sequence must start at 1" }
+            require(request.canonicalSha256 == StableIds.sha256(request.canonicalJson.toByteArray(StandardCharsets.UTF_8))) {
+                "canonical revision hash does not match canonical JSON bytes"
+            }
+            val canonicalJson = json.parseToJsonElement(request.canonicalJson)
+            val auth = AuthContext(ensureAuthenticated())
+            val body = buildJsonObject {
+                put("owner_id", auth.config.userId)
+                put("canonical_artifact_id", request.canonicalArtifactId)
+                put("revision_seq", request.revisionSeq)
+                put("parent_revision_id", request.parentRevisionId?.let(::JsonPrimitive) ?: JsonNull)
+                put("canonical_sha256", request.canonicalSha256)
+                put("canonical_json", canonicalJson)
+                put("schema_version", request.schemaVersion)
+                put("mode", request.mode)
+                put("validation_status", request.validationStatus)
+                put("validation_issues", JsonArray(request.validationIssues.map(::JsonPrimitive)))
+            }.encoded()
+            val revisionResponse = executeJson(
+                auth,
+                "POST",
+                "/rest/v1/canonical_revisions?on_conflict=canonical_artifact_id%2Crevision_seq&select=id,revision_seq",
+                body,
+                "resolution=ignore-duplicates,return=representation",
+            ).requireSuccess("canonical revision insert-or-reuse")
+            revisionId = revisionResponse.firstIdOrNull() ?: findRevision(auth, request, canonicalJson)
+            require(revisionId.isNullOrBlank().not()) { "canonical revision response missing id" }
+
+            request.edits.forEachIndexed { index, edit ->
+                val eventId = UUID.nameUUIDFromBytes(
+                    "canonical-edit|${request.canonicalArtifactId}|${request.revisionSeq}|${edit.id}|$index"
+                        .toByteArray(StandardCharsets.UTF_8),
+                ).toString()
+                val eventBody = buildJsonObject {
+                    put("id", eventId)
+                    put("owner_id", auth.config.userId)
+                    put("canonical_artifact_id", request.canonicalArtifactId)
+                    put("canonical_revision_id", revisionId!!)
+                    put("field_path", edit.fieldPath)
+                    put("previous_value", editValue(edit.previousValue, edit.valueType))
+                    put("new_value", editValue(edit.newValue, edit.valueType))
+                    put("provenance", json.parseToJsonElement(edit.provenanceJson))
+                    put("edited_at", edit.editedAt)
+                }.encoded()
+                executeJson(
+                    auth,
+                    "POST",
+                    "/rest/v1/canonical_edit_events?on_conflict=id&select=id",
+                    eventBody,
+                    "resolution=ignore-duplicates,return=representation",
+                ).requireSuccess("canonical edit event archive")
+            }
+            CanonicalRevisionArchiveResult.Success(revisionId!!, request.revisionSeq)
+        } catch (error: Exception) {
+            CanonicalRevisionArchiveResult.Failure(
+                issue = error.message ?: error.javaClass.simpleName,
+                revisionId = revisionId,
+                revisionSeq = request.revisionSeq,
+            )
+        }
+    }
+
+    override suspend fun latestCanonicalRevision(canonicalArtifactId: String): CanonicalRevisionSnapshot? = try {
+        val auth = AuthContext(ensureAuthenticated())
+        val response = executeJson(
+            auth,
+            "GET",
+            "/rest/v1/canonical_revisions?owner_id=eq.${urlEncode(auth.config.userId)}&canonical_artifact_id=eq.${urlEncode(canonicalArtifactId)}&validation_status=eq.valid&order=revision_seq.desc&limit=1&select=id,owner_id,canonical_artifact_id,revision_seq,parent_revision_id,canonical_sha256,canonical_json,schema_version,mode,validation_status,validation_issues,created_at",
+            "",
+            "return=minimal",
+        ).requireSuccess("latest canonical revision lookup")
+        response.firstObjectOrNull()?.toRevisionSnapshot()
+    } catch (_: Exception) {
+        null
+    }
+
+    override suspend fun canonicalEditEvents(
+        canonicalArtifactId: String,
+        revisionId: String,
+    ): List<CanonicalReviewEdit> = try {
+        val auth = AuthContext(ensureAuthenticated())
+        val response = executeJson(
+            auth,
+            "GET",
+            "/rest/v1/canonical_edit_events?owner_id=eq.${urlEncode(auth.config.userId)}&canonical_artifact_id=eq.${urlEncode(canonicalArtifactId)}&canonical_revision_id=eq.${urlEncode(revisionId)}&order=edited_at.asc&select=id,field_path,previous_value,new_value,provenance,edited_at",
+            "",
+            "return=minimal",
+        ).requireSuccess("canonical edit event lookup")
+        response.parseArrayOrNull().orEmpty().mapIndexed { index, element ->
+            val row = element.jsonObject
+            CanonicalReviewEdit(
+                id = row.string("id") ?: "event-$index",
+                fieldPath = row.string("field_path") ?: error("canonical edit event field_path is missing"),
+                previousValue = row.jsonValueAsString("previous_value"),
+                newValue = row.jsonValueAsString("new_value"),
+                provenanceJson = row["provenance"]?.let { json.encodeToString(JsonElement.serializer(), it) }
+                    ?: "{}",
+                editedAt = row.string("edited_at") ?: "",
+            )
+        }
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    private suspend fun findRevision(
+        auth: AuthContext,
+        request: CanonicalRevisionArchiveRequest,
+        canonicalJson: JsonElement,
+    ): String {
+        val response = executeJson(
+            auth,
+            "GET",
+            "/rest/v1/canonical_revisions?owner_id=eq.${urlEncode(auth.config.userId)}&canonical_artifact_id=eq.${urlEncode(request.canonicalArtifactId)}&revision_seq=eq.${request.revisionSeq}&select=id,canonical_sha256,canonical_json,schema_version,mode,validation_status,validation_issues,parent_revision_id",
+            "",
+            "return=minimal",
+        ).requireSuccess("canonical revision lookup")
+        val row = response.firstObjectOrNull() ?: error("canonical revision response missing id")
+        require(row.string("canonical_sha256") == request.canonicalSha256) { "canonical revision hash conflict" }
+        require(row["canonical_json"] == canonicalJson) { "canonical revision JSON conflict" }
+        require(row.string("schema_version") == request.schemaVersion) { "canonical revision schema conflict" }
+        require(row.string("mode") == request.mode) { "canonical revision mode conflict" }
+        require(row.string("validation_status") == request.validationStatus) { "canonical revision validation status conflict" }
+        require(row.string("parent_revision_id") == request.parentRevisionId) { "canonical revision parent conflict" }
+        require(row["validation_issues"] == JsonArray(request.validationIssues.map(::JsonPrimitive))) {
+            "canonical revision validation issues conflict"
+        }
+        return row.string("id") ?: error("canonical revision response missing id")
+    }
+
+    private fun editValue(value: String?, type: com.pricetrace.receiptscanner.review.CanonicalFieldType?): JsonElement {
+        if (value == null) return JsonNull
+        return when (type) {
+            com.pricetrace.receiptscanner.review.CanonicalFieldType.INTEGER,
+            com.pricetrace.receiptscanner.review.CanonicalFieldType.DECIMAL,
+            -> runCatching { json.parseToJsonElement(value) }.getOrElse { JsonPrimitive(value) }
+            else -> JsonPrimitive(value)
+        }
+    }
+
+    private fun JsonObject.toRevisionSnapshot(): CanonicalRevisionSnapshot = CanonicalRevisionSnapshot(
+        id = string("id") ?: error("canonical revision id is missing"),
+        ownerId = string("owner_id"),
+        canonicalArtifactId = string("canonical_artifact_id") ?: error("canonical artifact id is missing"),
+        revisionSeq = string("revision_seq")?.toLongOrNull() ?: error("canonical revision sequence is missing"),
+        parentRevisionId = string("parent_revision_id"),
+        canonicalSha256 = string("canonical_sha256") ?: error("canonical revision hash is missing"),
+        canonicalJson = this["canonical_json"]?.let { json.encodeToString(JsonElement.serializer(), it) }
+            ?: error("canonical revision JSON is missing"),
+        schemaVersion = string("schema_version") ?: error("canonical revision schema is missing"),
+        mode = string("mode") ?: error("canonical revision mode is missing"),
+        validationStatus = string("validation_status") ?: error("canonical revision status is missing"),
+        validationIssues = this["validation_issues"]?.jsonArray.orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull },
+        createdAt = string("created_at"),
+    )
+
+    private fun JsonObject.jsonValueAsString(key: String): String? = when (val value = this[key]) {
+        null, JsonNull -> null
+        else -> when (value) {
+            is JsonPrimitive -> value.contentOrNull
+            else -> json.encodeToString(JsonElement.serializer(), value)
         }
     }
 

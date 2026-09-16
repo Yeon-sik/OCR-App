@@ -47,6 +47,8 @@ import com.pricetrace.receiptscanner.ingestion.EvidenceArchivePort
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveRequest
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveResult
 import com.pricetrace.receiptscanner.ingestion.EvidenceVerificationEventResult
+import com.pricetrace.receiptscanner.ingestion.CanonicalRevisionArchiveRequest
+import com.pricetrace.receiptscanner.ingestion.CanonicalRevisionArchiveResult
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_BUNDLE_VERSION
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifest
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
@@ -701,6 +703,50 @@ class AndroidCanonicalJsonValidatorTest {
     }
 
     @Test
+    fun `android failed revision archive preserves original and retries the exact snapshot`() = runBlocking {
+        val sessionStore = InMemoryIngestionSessionStore()
+        val recoveryStore = InMemoryAndroidBundleStateStore()
+        val archive = CountingArchivePort(revisionFailuresBeforeSuccess = 1)
+        val validator = AndroidCanonicalJsonValidator(
+            useCase = CanonicalIngestionUseCase(sessionStore),
+            evidenceArchivePort = archive,
+            bundleRoot = Files.createTempDirectory("android-revision-retry").toFile(),
+            bundleStateStore = recoveryStore,
+        )
+        val originalCanonical = v2MerchantCanonical(userText = "K비빔밥")
+        val imported = validator.importBundle(
+            ByteArrayInputStream(textOnlyBundle(originalCanonical)),
+            "revision-retry.yeonsik",
+            AndroidCanonicalJsonValidatorState(),
+        )
+
+        val failed = validator.reviseStructuredReview(imported) {
+            it.updateField("merchant_candidate.name", "키키덮밥")
+        }
+
+        assertEquals(originalCanonical, failed.rawJson)
+        assertEquals(originalCanonical, failed.canonicalJson)
+        assertEquals(AndroidCanonicalRevisionArchiveStatus.FAILED, failed.bundle?.revisionArchiveStatus)
+        assertNotNull(failed.bundle?.pendingRevision)
+        assertEquals(1L, failed.bundle?.pendingRevision?.revisionSeq)
+        assertEquals(1, archive.revisionArchiveCalls)
+        assertTrue(runCatching { validator.submit(failed) }.isFailure)
+
+        val retried = validator.retryCanonicalRevision(failed)
+
+        assertEquals("키키덮밥", retried.envelope?.merchantCandidate?.name)
+        assertEquals(originalCanonical, retried.rawJson)
+        assertEquals(AndroidCanonicalRevisionArchiveStatus.ARCHIVED, retried.bundle?.revisionArchiveStatus)
+        assertEquals(null, retried.bundle?.pendingRevision)
+        assertEquals(1L, retried.bundle?.archiveCheckpoint?.latestRevisionSeq)
+        assertEquals("revision-1", retried.bundle?.archiveCheckpoint?.latestRevisionId)
+        assertEquals(listOf("merchant_candidate.name"), retried.reviewEdits.map { it.fieldPath })
+        assertEquals(2, archive.revisionArchiveCalls)
+        assertEquals(imported.session!!.revisionSeq + 1L, retried.session?.revisionSeq)
+        assertEquals(1, recoveryStore.list().size)
+    }
+
+    @Test
     fun `android projection retry updates only the selected ingestion`() = runBlocking {
         val sessionStore = InMemoryIngestionSessionStore()
         val recoveryStore = InMemoryAndroidBundleStateStore()
@@ -807,18 +853,28 @@ class AndroidCanonicalJsonValidatorTest {
             ),
         )
 
-        override suspend fun recordVerification(
-            canonicalArtifactId: String,
-            basis: VerificationBasis,
-            result: String,
-            issues: List<String>,
-        ): EvidenceVerificationEventResult = EvidenceVerificationEventResult.Success
-    }
+       override suspend fun recordVerification(
+           canonicalArtifactId: String,
+           basis: VerificationBasis,
+           result: String,
+           issues: List<String>,
+       ): EvidenceVerificationEventResult = EvidenceVerificationEventResult.Success
+
+        override suspend fun archiveCanonicalRevision(
+            request: CanonicalRevisionArchiveRequest,
+        ): CanonicalRevisionArchiveResult = CanonicalRevisionArchiveResult.Success(
+            revisionId = "revision-${request.revisionSeq}",
+            revisionSeq = request.revisionSeq,
+        )
+   }
 
     private class CountingArchivePort(
         private val failuresBeforeSuccess: Int = 0,
+        private val revisionFailuresBeforeSuccess: Int = 0,
     ) : EvidenceArchivePort {
         var archiveCalls: Int = 0
+            private set
+        var revisionArchiveCalls: Int = 0
             private set
 
         override suspend fun archive(
@@ -836,13 +892,30 @@ class AndroidCanonicalJsonValidatorTest {
             }
         }
 
-        override suspend fun recordVerification(
-            canonicalArtifactId: String,
-            basis: VerificationBasis,
-            result: String,
-            issues: List<String>,
-        ): EvidenceVerificationEventResult = EvidenceVerificationEventResult.Success
-    }
+       override suspend fun recordVerification(
+           canonicalArtifactId: String,
+           basis: VerificationBasis,
+           result: String,
+           issues: List<String>,
+       ): EvidenceVerificationEventResult = EvidenceVerificationEventResult.Success
+
+        override suspend fun archiveCanonicalRevision(
+            request: CanonicalRevisionArchiveRequest,
+        ): CanonicalRevisionArchiveResult {
+            revisionArchiveCalls += 1
+            return if (revisionArchiveCalls <= revisionFailuresBeforeSuccess) {
+                CanonicalRevisionArchiveResult.Failure(
+                    issue = "revision archive test failure",
+                    revisionSeq = request.revisionSeq,
+                )
+            } else {
+                CanonicalRevisionArchiveResult.Success(
+                    revisionId = "revision-${request.revisionSeq}",
+                    revisionSeq = request.revisionSeq,
+                )
+            }
+        }
+   }
 
     private class FailOnceSubmitter : IngestionProjectionSubmitter {
         private var attempts = 0

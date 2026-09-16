@@ -33,13 +33,19 @@ class CanonicalReviewControllerTest {
             ReceiptBenefitKind.REVIEW_EVENT,
             controller.state.value.envelope.receipt!!.lineItems.single().foodService!!.benefitKind,
         )
+        assertTrue(controller.state.value.canUndo)
+        assertFalse(controller.state.value.canRedo)
         assertEquals(10_000L, controller.state.value.envelope.receipt!!.lineItems.single().netAmountMinor)
         assertNotEquals(originalFingerprint, controller.state.value.canonicalFingerprint)
         assertEquals(sourceBinding, controller.state.value.envelope.source)
 
         assertTrue(controller.undo())
+        assertFalse(controller.state.value.canUndo)
+        assertTrue(controller.state.value.canRedo)
         assertNull(controller.state.value.envelope.receipt!!.lineItems.single().foodService!!.benefitKind)
         assertTrue(controller.redo())
+        assertTrue(controller.state.value.canUndo)
+        assertFalse(controller.state.value.canRedo)
         assertEquals(
             ReceiptBenefitKind.REVIEW_EVENT,
             controller.state.value.envelope.receipt!!.lineItems.single().foodService!!.benefitKind,

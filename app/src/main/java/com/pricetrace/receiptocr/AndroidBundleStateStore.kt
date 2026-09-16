@@ -2,8 +2,11 @@ package com.pricetrace.receiptocr
 
 import android.content.Context
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveCheckpoint
+import com.pricetrace.receiptscanner.ingestion.CanonicalRevisionArchiveRequest
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
+import com.pricetrace.receiptscanner.review.CanonicalFieldType
+import com.pricetrace.receiptscanner.review.CanonicalReviewEdit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -16,6 +19,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 /** Durable UI/recovery state for an imported bundle; credentials and runtime tokens are excluded. */
 data class AndroidBundleRecoveryState(
@@ -26,6 +30,7 @@ data class AndroidBundleRecoveryState(
     val selectedProjections: Set<IngestionProjection>,
     val verificationBasis: VerificationBasis,
     val bundle: AndroidBundleState,
+    val reviewEdits: List<CanonicalReviewEdit> = emptyList(),
 )
 
 interface AndroidBundleStateStore {
@@ -106,8 +111,19 @@ class SharedPreferencesAndroidBundleStateStore(context: Context) : AndroidBundle
             )
             put("verification_basis", JsonPrimitive(state.verificationBasis.wireValue))
             put("bundle", encodeBundle(state.bundle))
+            put("review_edits", JsonArray(state.reviewEdits.map(::encodeEdit)))
         },
     )
+
+    private fun encodeEdit(edit: CanonicalReviewEdit): JsonObject = buildJsonObject {
+        put("id", JsonPrimitive(edit.id))
+        put("field_path", JsonPrimitive(edit.fieldPath))
+        putNullable("previous_value", edit.previousValue)
+        putNullable("new_value", edit.newValue)
+        put("provenance_json", JsonPrimitive(edit.provenanceJson))
+        put("edited_at", JsonPrimitive(edit.editedAt))
+        putNullable("value_type", edit.valueType?.wireValue)
+    }
 
     private fun encodeBundle(bundle: AndroidBundleState): JsonObject = buildJsonObject {
         put("source_name", JsonPrimitive(bundle.sourceName))
@@ -124,6 +140,22 @@ class SharedPreferencesAndroidBundleStateStore(context: Context) : AndroidBundle
         put("archive_checkpoint", encodeCheckpoint(bundle.archiveCheckpoint))
         put("verification_event_recorded", JsonPrimitive(bundle.verificationEventRecorded))
         putNullable("archive_error", bundle.archiveError)
+        put("revision_archive_status", JsonPrimitive(bundle.revisionArchiveStatus.name))
+        putNullable("revision_archive_error", bundle.revisionArchiveError)
+        put("pending_revision", bundle.pendingRevision?.let(::encodeRevisionRequest) ?: JsonNull)
+    }
+
+    private fun encodeRevisionRequest(request: CanonicalRevisionArchiveRequest): JsonObject = buildJsonObject {
+        put("canonical_artifact_id", JsonPrimitive(request.canonicalArtifactId))
+        put("revision_seq", JsonPrimitive(request.revisionSeq))
+        putNullable("parent_revision_id", request.parentRevisionId)
+        put("canonical_sha256", JsonPrimitive(request.canonicalSha256))
+        put("canonical_json", JsonPrimitive(request.canonicalJson))
+        put("schema_version", JsonPrimitive(request.schemaVersion))
+        put("mode", JsonPrimitive(request.mode))
+        put("validation_status", JsonPrimitive(request.validationStatus))
+        put("validation_issues", JsonArray(request.validationIssues.map(::JsonPrimitive)))
+        put("edits", JsonArray(request.edits.map(::encodeEdit)))
     }
 
     private fun encodeCheckpoint(checkpoint: EvidenceArchiveCheckpoint): JsonObject = buildJsonObject {
@@ -134,6 +166,8 @@ class SharedPreferencesAndroidBundleStateStore(context: Context) : AndroidBundle
         )
         put("bound_source_file_ids", JsonArray(checkpoint.boundSourceFileIds.sorted().map(::JsonPrimitive)))
         putNullable("bundle_fingerprint", checkpoint.bundleFingerprint)
+        putNullable("latest_revision_id", checkpoint.latestRevisionId)
+        put("latest_revision_seq", JsonPrimitive(checkpoint.latestRevisionSeq))
     }
 
     private fun decode(root: JsonObject): AndroidBundleRecoveryState {
@@ -148,6 +182,23 @@ class SharedPreferencesAndroidBundleStateStore(context: Context) : AndroidBundle
                 .map { IngestionProjection.fromWireValue(it.jsonPrimitive.content) }.toSet(),
             verificationBasis = VerificationBasis.fromWireValue(root.string("verification_basis")),
             bundle = bundle,
+            reviewEdits = (root["review_edits"] as? JsonArray).orEmpty().map(::decodeEdit),
+        )
+    }
+
+    private fun decodeEdit(element: JsonElement): CanonicalReviewEdit {
+        val root = element.jsonObject
+        val valueType = root.nullableString("value_type")?.let { wire ->
+            CanonicalFieldType.entries.firstOrNull { it.wireValue == wire }
+        }
+        return CanonicalReviewEdit(
+            id = root.string("id"),
+            fieldPath = root.string("field_path"),
+            previousValue = root.nullableString("previous_value"),
+            newValue = root.nullableString("new_value"),
+            provenanceJson = root.string("provenance_json"),
+            editedAt = root.string("edited_at"),
+            valueType = valueType,
         )
     }
 
@@ -163,11 +214,33 @@ class SharedPreferencesAndroidBundleStateStore(context: Context) : AndroidBundle
             archiveCheckpoint = decodeCheckpoint(root.objectValue("archive_checkpoint")),
             verificationEventRecorded = root.boolean("verification_event_recorded"),
             archiveError = root.nullableString("archive_error"),
+            revisionArchiveStatus = root.nullableString("revision_archive_status")
+                ?.let(AndroidCanonicalRevisionArchiveStatus::valueOf)
+                ?: AndroidCanonicalRevisionArchiveStatus.NOT_STARTED,
+            revisionArchiveError = root.nullableString("revision_archive_error"),
+            pendingRevision = root["pending_revision"]
+                ?.takeUnless { it == JsonNull }
+                ?.jsonObject
+                ?.let(::decodeRevisionRequest),
         )
         root.nullableString("manifest_sha256")?.let { require(it == bundle.manifestSha256) { "Manifest hash mismatch" } }
         root.nullableString("bundle_fingerprint")?.let { require(it == bundle.bundleFingerprint) { "Bundle fingerprint mismatch" } }
         return bundle
     }
+
+    private fun decodeRevisionRequest(root: JsonObject): CanonicalRevisionArchiveRequest = CanonicalRevisionArchiveRequest(
+        canonicalArtifactId = root.string("canonical_artifact_id"),
+        revisionSeq = root["revision_seq"]?.jsonPrimitive?.longOrNull
+            ?: error("Missing pending revision sequence"),
+        parentRevisionId = root.nullableString("parent_revision_id"),
+        canonicalSha256 = root.string("canonical_sha256"),
+        canonicalJson = root.string("canonical_json"),
+        schemaVersion = root.string("schema_version"),
+        mode = root.string("mode"),
+        validationStatus = root.string("validation_status"),
+        validationIssues = root.arrayValue("validation_issues").map { it.jsonPrimitive.content },
+        edits = root.arrayValue("edits").map(::decodeEdit),
+    )
 
     private fun decodeCheckpoint(root: JsonObject) = EvidenceArchiveCheckpoint(
         canonicalArtifactId = root.nullableString("canonical_artifact_id"),
@@ -176,6 +249,8 @@ class SharedPreferencesAndroidBundleStateStore(context: Context) : AndroidBundle
         boundSourceFileIds = root.arrayValue("bound_source_file_ids")
             .map { it.jsonPrimitive.content }.toSet(),
         bundleFingerprint = root.nullableString("bundle_fingerprint"),
+        latestRevisionId = root.nullableString("latest_revision_id"),
+        latestRevisionSeq = root["latest_revision_seq"]?.jsonPrimitive?.longOrNull ?: 0L,
     )
 
     private fun JsonObjectBuilder.putNullable(key: String, value: String?) {

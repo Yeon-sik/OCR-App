@@ -28,6 +28,8 @@ import com.pricetrace.receiptscanner.ingestion.EvidenceArchivePort
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveRequest
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveResult
 import com.pricetrace.receiptscanner.ingestion.EvidenceVerificationEventResult
+import com.pricetrace.receiptscanner.ingestion.CanonicalRevisionArchiveRequest
+import com.pricetrace.receiptscanner.ingestion.CanonicalRevisionArchiveResult
 import com.pricetrace.receiptscanner.review.ReviewDestination
 import com.pricetrace.receiptscanner.review.ReviewDestinationStatus
 import com.pricetrace.receiptscanner.review.ReviewViewModel
@@ -364,6 +366,63 @@ class DesktopIngestionRegressionTest {
     }
 
     @Test
+    fun `desktop failed revision archive preserves original and restores the retried snapshot`() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-desktop-revision-retry"))
+        val archive = CountingArchivePort(revisionFailuresBeforeSuccess = 1)
+        val controller = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(
+                config = DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")),
+                evidenceArchivePortOverride = archive,
+            ),
+        )
+        val source = writeMerchantBundle(store.directory, "revision-retry", userText = "K비빔밥")
+
+        controller.importBundle(source)
+        controller.verify(VerificationBasis.SOURCE_EVIDENCE)
+        val imported = controller.state.value
+        val originalRawJson = imported.rawJson
+        val originalCanonicalJson = imported.canonicalJson
+
+        controller.reviseStructuredReview {
+            it.updateField("merchant_candidate.name", "키키덮밥")
+        }
+        val failed = controller.state.value
+
+        assertEquals(originalRawJson, failed.rawJson)
+        assertEquals(originalCanonicalJson, failed.canonicalJson)
+        assertEquals(DesktopCanonicalRevisionArchiveStatus.FAILED, failed.bundleMetadata?.revisionArchiveStatus)
+        assertNotNull(failed.bundleMetadata?.pendingRevision)
+        assertEquals(1L, failed.bundleMetadata?.pendingRevision?.revisionSeq)
+        assertEquals(1, archive.revisionArchiveCalls)
+
+        controller.submit()
+        assertTrue(controller.state.value.error.orEmpty().contains("revision", ignoreCase = true))
+
+        controller.retryCanonicalRevision()
+        val retried = controller.state.value
+        assertEquals("키키덮밥", retried.envelope?.merchantCandidate?.name)
+        assertEquals(originalRawJson, retried.rawJson)
+        assertEquals(DesktopCanonicalRevisionArchiveStatus.ARCHIVED, retried.bundleMetadata?.revisionArchiveStatus)
+        assertEquals(null, retried.bundleMetadata?.pendingRevision)
+        assertEquals(1L, retried.bundleMetadata?.archiveCheckpoint?.latestRevisionSeq)
+        assertEquals("revision-1", retried.bundleMetadata?.archiveCheckpoint?.latestRevisionId)
+        assertEquals(listOf("merchant_candidate.name"), retried.reviewEdits.map { it.fieldPath })
+        assertEquals(2, archive.revisionArchiveCalls)
+
+        val restarted = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(
+                config = DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("restarted.env")),
+                evidenceArchivePortOverride = archive,
+            ),
+        )
+        restarted.load(requireNotNull(retried.ingestionId))
+        assertEquals("키키덮밥", restarted.state.value.envelope?.merchantCandidate?.name)
+        assertEquals(listOf("merchant_candidate.name"), restarted.state.value.reviewEdits.map { it.fieldPath })
+    }
+
+    @Test
     fun `desktop batch keeps independent sessions and opens the selected item`() = runBlocking {
         val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-desktop-batch-two"))
         val archive = CountingArchivePort()
@@ -568,18 +627,28 @@ class DesktopIngestionRegressionTest {
             ),
         )
 
-        override suspend fun recordVerification(
-            canonicalArtifactId: String,
-            basis: VerificationBasis,
-            result: String,
-            issues: List<String>,
-        ): EvidenceVerificationEventResult = EvidenceVerificationEventResult.Success
-    }
+       override suspend fun recordVerification(
+           canonicalArtifactId: String,
+           basis: VerificationBasis,
+           result: String,
+           issues: List<String>,
+       ): EvidenceVerificationEventResult = EvidenceVerificationEventResult.Success
+
+        override suspend fun archiveCanonicalRevision(
+            request: CanonicalRevisionArchiveRequest,
+        ): CanonicalRevisionArchiveResult = CanonicalRevisionArchiveResult.Success(
+            revisionId = "revision-${request.revisionSeq}",
+            revisionSeq = request.revisionSeq,
+        )
+   }
 
     private class CountingArchivePort(
         private val failuresBeforeSuccess: Int = 0,
+        private val revisionFailuresBeforeSuccess: Int = 0,
     ) : EvidenceArchivePort {
         var archiveCalls: Int = 0
+            private set
+        var revisionArchiveCalls: Int = 0
             private set
 
         override suspend fun archive(
@@ -597,11 +666,28 @@ class DesktopIngestionRegressionTest {
             }
         }
 
-        override suspend fun recordVerification(
-            canonicalArtifactId: String,
-            basis: VerificationBasis,
-            result: String,
-            issues: List<String>,
-        ): EvidenceVerificationEventResult = EvidenceVerificationEventResult.Success
-    }
+       override suspend fun recordVerification(
+           canonicalArtifactId: String,
+           basis: VerificationBasis,
+           result: String,
+           issues: List<String>,
+       ): EvidenceVerificationEventResult = EvidenceVerificationEventResult.Success
+
+        override suspend fun archiveCanonicalRevision(
+            request: CanonicalRevisionArchiveRequest,
+        ): CanonicalRevisionArchiveResult {
+            revisionArchiveCalls += 1
+            return if (revisionArchiveCalls <= revisionFailuresBeforeSuccess) {
+                CanonicalRevisionArchiveResult.Failure(
+                    issue = "revision archive test failure",
+                    revisionSeq = request.revisionSeq,
+                )
+            } else {
+                CanonicalRevisionArchiveResult.Success(
+                    revisionId = "revision-${request.revisionSeq}",
+                    revisionSeq = request.revisionSeq,
+                )
+            }
+        }
+   }
 }
