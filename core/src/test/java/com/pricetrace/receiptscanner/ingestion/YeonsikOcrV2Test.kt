@@ -68,6 +68,82 @@ class YeonsikOcrV2Test {
     }
 
     @Test
+    fun `v2 receipt-free restaurant merchant evidence does not fall back to food photo`() {
+        val root = JsonSupport.parse(readExample("yeonsik-ocr.v2.restaurant-food-photo.example.json"))
+        val withoutUserText = JsonObject(root.toMutableMap().apply {
+            put("source", JsonObject(root["source"]!!.jsonObject.toMutableMap().apply {
+                put("user_text", JsonNull)
+            }))
+        })
+        val envelope = YeonsikOcrV2Json.decode(
+            Json.encodeToString(JsonElement.serializer(), withoutUserText),
+            "local-v2-restaurant-merchant-food-photo-only",
+        )
+
+        val result = IngestionEvidenceGate.evaluate(
+            envelope = envelope,
+            evidence = listOf(LocalEvidence("food-photo-1", SourceAttachmentType.FOOD_PHOTO, true)),
+            artifactKeys = setOf(IngestionArtifactKeys.MERCHANT_CANDIDATE),
+        )
+
+        assertFalse(result.isAllowed)
+        assertTrue("merchant_candidate_user_text_required" in result.blockingIssues)
+    }
+
+    @Test
+    fun `v2 receipt-free restaurant text merchant evidence cannot bypass nutrition photo`() {
+        val envelope = YeonsikOcrV2Json.decode(
+            readExample("yeonsik-ocr.v2.restaurant-food-photo.example.json"),
+            "local-v2-restaurant-independent-evidence",
+        )
+
+        val merchant = IngestionEvidenceGate.evaluate(
+            envelope = envelope,
+            evidence = emptyList(),
+            artifactKeys = setOf(IngestionArtifactKeys.MERCHANT_CANDIDATE),
+        )
+        val nutrition = IngestionEvidenceGate.evaluate(
+            envelope = envelope,
+            evidence = emptyList(),
+            artifactKeys = setOf(IngestionArtifactKeys.nutrition("food-photo-1")),
+        )
+        val full = IngestionEvidenceGate.evaluate(envelope, emptyList())
+
+        assertTrue(merchant.isAllowed)
+        assertFalse(nutrition.isAllowed)
+        assertFalse(full.isAllowed)
+        assertTrue(
+            full.blockingIssues.any { it == "food_photo_image_required" || it == "source_image_required" },
+        )
+    }
+
+    @Test
+    fun `v2 receipt-free restaurant food photo cannot be declared as merchant evidence`() {
+        val root = JsonSupport.parse(readExample("yeonsik-ocr.v2.restaurant-food-photo.example.json"))
+        val invalid = JsonObject(root.toMutableMap().apply {
+            put("merchant_candidate", JsonObject(root["merchant_candidate"]!!.jsonObject.toMutableMap().apply {
+                put(
+                    "source_attachment_ids",
+                    JsonArray(listOf(JsonPrimitive("food-photo-1"))),
+                )
+            }))
+        })
+        val envelope = YeonsikOcrV2Json.decode(
+            Json.encodeToString(JsonElement.serializer(), invalid),
+            "local-v2-restaurant-food-photo-as-merchant-evidence",
+        )
+
+        val result = IngestionEvidenceGate.evaluate(
+            envelope = envelope,
+            evidence = listOf(LocalEvidence("food-photo-1", SourceAttachmentType.FOOD_PHOTO, true)),
+            artifactKeys = setOf(IngestionArtifactKeys.MERCHANT_CANDIDATE),
+        )
+
+        assertFalse(result.isAllowed)
+        assertTrue(result.blockingIssues.any { it.startsWith("merchant_candidate_food_photo_not_merchant_evidence:") })
+    }
+
+    @Test
     fun `v2 receipt-linked restaurant estimate still requires a real receipt line and link`() {
         val valid = YeonsikOcrV2Json.decode(
             readExample("yeonsik-ocr.v2.restaurant.example.json"),

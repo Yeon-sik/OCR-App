@@ -65,8 +65,9 @@ object IngestionEvidenceGate {
                 IngestionEvidenceResult(false, listOf("manual_canonical_confirmation_required"))
             }
         }
+        val merchantEvidence = evaluateV2MerchantCandidateEvidence(envelope, evidence, artifactKeys)
         val evidenceResults = listOfNotNull(
-            evaluateV2MerchantCandidateEvidence(envelope, artifactKeys),
+            merchantEvidence,
             evaluatePurchaseEvidence(envelope, evidence, artifactKeys),
             if (envelope.schemaVersion == YEONSIK_OCR_V4_SCHEMA) {
                 evaluateProductCandidateEvidence(envelope, evidence, artifactKeys)
@@ -75,7 +76,13 @@ object IngestionEvidenceGate {
             },
         )
         evidenceResults.firstOrNull { !it.isAllowed }?.let { return it }
-        evidenceResults.firstOrNull()?.let { return it }
+        val receiptFreeRestaurantNutrition = isReceiptFreeRestaurantNutrition(envelope)
+        val isMerchantArtifactOnly =
+            artifactKeys == setOf(IngestionArtifactKeys.MERCHANT_CANDIDATE) &&
+                merchantEvidence != null
+        if (!receiptFreeRestaurantNutrition || isMerchantArtifactOnly) {
+            evidenceResults.firstOrNull()?.let { return it }
+        }
         val requiredTypes = requiredEvidenceTypes(envelope, artifactKeys)
         val scopedEvidence = if (artifactKeys == null || requiredTypes.isEmpty()) {
             evidence
@@ -96,27 +103,84 @@ object IngestionEvidenceGate {
     }
 
     /**
-     * A V2 merchant-only bundle may be based solely on an explicit user statement. This is
-     * source evidence in its own right, not a synthetic image attachment; all attachment-backed
-     * V2 flows continue through the existing local-file gate below.
+     * A V2 merchant-only bundle may be based solely on an explicit user statement. The same
+     * source-evidence boundary applies to a receipt-free restaurant merchant candidate. A
+     * restaurant's food photo remains nutrition evidence and cannot satisfy the merchant artifact
+     * unless a separate, non-food-photo attachment is explicitly referenced.
      */
     private fun evaluateV2MerchantCandidateEvidence(
         envelope: YeonsikOcrEnvelope,
+        evidence: List<LocalEvidence>,
         artifactKeys: Set<String>?,
     ): IngestionEvidenceResult? {
         if (envelope.schemaVersion != YEONSIK_OCR_V2_SCHEMA ||
-            envelope.mode != IngestionMode.MERCHANT ||
             envelope.merchantCandidate == null ||
             envelope.receipt != null ||
             (artifactKeys != null && IngestionArtifactKeys.MERCHANT_CANDIDATE !in artifactKeys)
         ) {
             return null
         }
+
+        val receiptFreeRestaurantNutrition = isReceiptFreeRestaurantNutrition(envelope)
+        if (receiptFreeRestaurantNutrition) {
+            val candidate = envelope.merchantCandidate
+            val referencedIds = candidate.sourceAttachmentIds
+            if (referencedIds.isEmpty()) {
+                return if (!envelope.source.userText.isNullOrBlank()) {
+                    IngestionEvidenceResult(isAllowed = true)
+                } else {
+                    IngestionEvidenceResult(false, listOf("merchant_candidate_user_text_required"))
+                }
+            }
+
+            val sourceFilesById = envelope.source.sourceFiles.associateBy(SourceAttachment::id)
+            val missingSourceFiles = referencedIds.filter { it !in sourceFilesById }
+            if (missingSourceFiles.isNotEmpty()) {
+                return IngestionEvidenceResult(
+                    false,
+                    missingSourceFiles.map { "merchant_candidate_source_attachment_required:$it" },
+                )
+            }
+            val localById = evidence.associateBy(LocalEvidence::attachmentId)
+            val foodPhotoIds = referencedIds.filter { id ->
+                sourceFilesById.getValue(id).type == SourceAttachmentType.FOOD_PHOTO ||
+                    localById[id]?.type == SourceAttachmentType.FOOD_PHOTO
+            }
+            if (foodPhotoIds.isNotEmpty()) {
+                return IngestionEvidenceResult(
+                    false,
+                    foodPhotoIds.map { "merchant_candidate_food_photo_not_merchant_evidence:$it" },
+                )
+            }
+            val missing = referencedIds.filter { it !in localById }
+            if (missing.isNotEmpty()) {
+                return IngestionEvidenceResult(
+                    false,
+                    missing.map { "merchant_candidate_evidence_attachment_required:$it" },
+                )
+            }
+            val unreadable = referencedIds.filter { localById[it]?.fileReadable != true }
+            if (unreadable.isNotEmpty()) {
+                return IngestionEvidenceResult(
+                    false,
+                    unreadable.map { "merchant_candidate_evidence_attachment_unreadable:$it" },
+                )
+            }
+            return IngestionEvidenceResult(isAllowed = true)
+        }
+
+        if (envelope.mode != IngestionMode.MERCHANT) return null
         val textBacked = envelope.source.sourceFiles.isEmpty() &&
             envelope.merchantCandidate.sourceAttachmentIds.isEmpty() &&
             !envelope.source.userText.isNullOrBlank()
         return IngestionEvidenceResult(isAllowed = true).takeIf { textBacked }
     }
+
+    private fun isReceiptFreeRestaurantNutrition(envelope: YeonsikOcrEnvelope): Boolean =
+        envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA &&
+            envelope.mode == IngestionMode.RESTAURANT &&
+            envelope.receipt == null &&
+            envelope.nutrition.any { it is IngestionNutrition.RestaurantEstimate }
 
     /**
      * Purchase evidence is not a receipt image: a history screenshot and/or a user statement

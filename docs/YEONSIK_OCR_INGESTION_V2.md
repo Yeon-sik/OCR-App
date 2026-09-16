@@ -62,6 +62,14 @@ receipt line을 만들지 않는다.
 `consumption` 또는 `FITNESS_MEAL`을 생성하지 않으며, 사용자가 실제 섭취를 명시한 경우에만
 기존 consumption 검증 규칙을 적용한다.
 
+현재 receipt-free restaurant merchant fact 경로는 `source.user_text`가 비어 있지 않고
+`merchant_candidate.source_attachment_ids`가 빈 배열인 text-backed evidence다. 이때
+`food_photo`는 영양 추정 evidence로만 사용하며 merchant name evidence로 승격하지 않는다.
+별도의 merchant attachment를 실제로 참조하는 향후 경로는 해당 attachment가 로컬에서
+읽을 수 있을 때만 허용하고, `food_photo`를 merchant source로 취급하지 않는다. Merchant
+artifact를 text로 통과시켜도 full-envelope 검증에서는 `restaurant_estimate`의
+`FOOD_PHOTO` 검사를 별도로 수행한다.
+
 ## Side dish / meal component
 
 Nutrition kind `meal_component_estimate`는 음식 사진으로 추정한 무료 반찬처럼 receipt에
