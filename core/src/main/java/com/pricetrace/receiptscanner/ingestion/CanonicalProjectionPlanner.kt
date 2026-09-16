@@ -88,8 +88,9 @@ object CanonicalProjectionPlanner {
                 add(IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK)
             }
             if (envelope.merchantCandidate != null && envelope.receipt == null &&
-                envelope.priceObservations.isEmpty() && envelope.nutrition.isEmpty() &&
-                envelope.productCandidates.isEmpty() && envelope.consumption.isEmpty()
+                envelope.priceObservations.isEmpty() && envelope.productCandidates.isEmpty() &&
+                ((envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA && envelope.mode == IngestionMode.RESTAURANT) ||
+                    (envelope.nutrition.isEmpty() && envelope.consumption.isEmpty()))
             ) {
                 add(IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE)
             }

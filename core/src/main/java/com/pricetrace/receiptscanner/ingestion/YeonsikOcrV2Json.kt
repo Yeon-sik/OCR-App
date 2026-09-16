@@ -187,7 +187,7 @@ object YeonsikOcrV2Json {
         is IngestionNutrition.RestaurantEstimate -> buildJsonObject {
             put("client_key", JsonPrimitive(item.clientKey))
             put("kind", JsonPrimitive("restaurant_estimate"))
-            put("line_id", JsonPrimitive(item.lineId))
+            put("line_id", item.lineId?.let(::JsonPrimitive) ?: JsonNull)
             put("menu_name", JsonPrimitive(item.menuName))
             put("component_role", JsonNull)
             put("payload", JsonNull)
@@ -396,13 +396,12 @@ object YeonsikOcrV2Json {
                 IngestionNutrition.ProductLabel(clientKey, draft)
             }
             "restaurant_estimate" -> {
-                require(root["line_id"] != JsonNull)
                 require(componentRole == null) { "restaurant_estimate component_role must be null" }
                 require(root["payload"] == JsonNull)
                 require(root["estimate"] != JsonNull)
                 IngestionNutrition.RestaurantEstimate(
                     clientKey = clientKey,
-                    lineId = root.string("line_id"),
+                    lineId = root.nullableString("line_id"),
                     menuName = root.string("menu_name"),
                     estimate = decodeEstimate(root.objectValue("estimate")),
                 )
@@ -637,8 +636,21 @@ object YeonsikOcrV2Json {
         }) { "consumption must contain item-level references to existing nutrition artifacts" }
 
         nutrition.filterIsInstance<IngestionNutrition.RestaurantEstimate>().forEach { item ->
-            require(links.any { it.nutritionClientKey == item.clientKey && it.receiptLineId == item.lineId }) {
-                "restaurant estimates must retain their receipt line link"
+            if (receipt == null) {
+                require(item.lineId == null) {
+                    "receipt-free restaurant estimates must have a null line_id"
+                }
+            } else {
+                val lineId = item.lineId
+                require(!lineId.isNullOrBlank()) {
+                    "restaurant estimates with a receipt require line_id"
+                }
+                require(receipt.lineItems.any { it.id == lineId }) {
+                    "restaurant estimate line_id must reference an existing receipt line"
+                }
+                require(links.any { it.nutritionClientKey == item.clientKey && it.receiptLineId == lineId }) {
+                    "restaurant estimates must retain their receipt line link"
+                }
             }
         }
         nutrition.filterIsInstance<IngestionNutrition.MealComponentEstimate>().forEach { item ->
@@ -658,10 +670,13 @@ object YeonsikOcrV2Json {
                     nutrition.isEmpty() && productCandidates.isEmpty() && consumption.isEmpty() && links.isEmpty(),
             )
             IngestionMode.RESTAURANT -> require(
-                merchant != null && receipt != null &&
-                    receipt.merchant.businessKind == BusinessKind.FOOD_SERVICE &&
+                merchant != null &&
+                    (receipt == null || receipt.merchant.businessKind == BusinessKind.FOOD_SERVICE) &&
                     productCandidates.isEmpty() &&
-                    nutrition.all { it is IngestionNutrition.RestaurantEstimate || it is IngestionNutrition.MealComponentEstimate },
+                    nutrition.all { it is IngestionNutrition.RestaurantEstimate || it is IngestionNutrition.MealComponentEstimate } &&
+                    // Complimentary sides retain their existing receipt-context semantics. The
+                    // new receipt-free path is only for ordinary restaurant estimates.
+                    (receipt != null || nutrition.none { it is IngestionNutrition.MealComponentEstimate }),
             )
             IngestionMode.PACKAGED_PRODUCT -> require(
                 merchant == null && receipt?.merchant?.businessKind != BusinessKind.FOOD_SERVICE &&

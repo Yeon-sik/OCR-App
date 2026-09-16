@@ -25,6 +25,241 @@ import java.io.File
 
 class YeonsikOcrV2Test {
     @Test
+    fun `v2 receipt-free restaurant estimate round trips with merchant and food photo`() {
+        val imported = success(ExternalJsonImporter().import(
+            readExample("yeonsik-ocr.v2.restaurant-food-photo.example.json"),
+            "local-v2-restaurant-food-photo",
+        ))
+        val envelope = (imported.draft as CanonicalDraft.Envelope).value
+        val estimate = envelope.nutrition.single() as IngestionNutrition.RestaurantEstimate
+
+        assertEquals(OcrWorkflowType.FITNESS_NUTRITION, imported.workflowType)
+        assertEquals(IngestionMode.RESTAURANT, envelope.mode)
+        assertEquals("키키덮밥", envelope.merchantCandidate?.name)
+        assertEquals(null, envelope.receipt)
+        assertEquals(null, estimate.lineId)
+        assertEquals("육회비빔밥", estimate.menuName)
+
+        val encoded = JsonSupport.parse(YeonsikOcrV2Json.encode(envelope))
+        assertEquals(JsonNull, encoded["receipt"])
+        assertEquals(
+            JsonNull,
+            encoded["nutrition"]!!.jsonArray.single().jsonObject["line_id"],
+        )
+        assertTrue(
+            IngestionEvidenceGate.evaluate(
+                envelope = envelope,
+                evidence = listOf(LocalEvidence("food-photo-1", SourceAttachmentType.FOOD_PHOTO, true)),
+            ).isAllowed,
+        )
+    }
+
+    @Test
+    fun `v2 receipt-free restaurant estimate requires food photo evidence`() {
+        val envelope = YeonsikOcrV2Json.decode(
+            readExample("yeonsik-ocr.v2.restaurant-food-photo.example.json"),
+            "local-v2-restaurant-food-photo-missing-evidence",
+        )
+
+        val result = IngestionEvidenceGate.evaluate(envelope, emptyList())
+
+        assertFalse(result.isAllowed)
+        assertTrue(result.blockingIssues.toString(), result.blockingIssues.isNotEmpty())
+    }
+
+    @Test
+    fun `v2 receipt-free restaurant merchant evidence does not fall back to food photo`() {
+        val root = JsonSupport.parse(readExample("yeonsik-ocr.v2.restaurant-food-photo.example.json"))
+        val withoutUserText = JsonObject(root.toMutableMap().apply {
+            put("source", JsonObject(root["source"]!!.jsonObject.toMutableMap().apply {
+                put("user_text", JsonNull)
+            }))
+        })
+        val envelope = YeonsikOcrV2Json.decode(
+            Json.encodeToString(JsonElement.serializer(), withoutUserText),
+            "local-v2-restaurant-merchant-food-photo-only",
+        )
+
+        val result = IngestionEvidenceGate.evaluate(
+            envelope = envelope,
+            evidence = listOf(LocalEvidence("food-photo-1", SourceAttachmentType.FOOD_PHOTO, true)),
+            artifactKeys = setOf(IngestionArtifactKeys.MERCHANT_CANDIDATE),
+        )
+
+        assertFalse(result.isAllowed)
+        assertTrue("merchant_candidate_user_text_required" in result.blockingIssues)
+    }
+
+    @Test
+    fun `v2 receipt-free restaurant text merchant evidence cannot bypass nutrition photo`() {
+        val envelope = YeonsikOcrV2Json.decode(
+            readExample("yeonsik-ocr.v2.restaurant-food-photo.example.json"),
+            "local-v2-restaurant-independent-evidence",
+        )
+
+        val merchant = IngestionEvidenceGate.evaluate(
+            envelope = envelope,
+            evidence = emptyList(),
+            artifactKeys = setOf(IngestionArtifactKeys.MERCHANT_CANDIDATE),
+        )
+        val nutrition = IngestionEvidenceGate.evaluate(
+            envelope = envelope,
+            evidence = emptyList(),
+            artifactKeys = setOf(IngestionArtifactKeys.nutrition("food-photo-1")),
+        )
+        val full = IngestionEvidenceGate.evaluate(envelope, emptyList())
+
+        assertTrue(merchant.isAllowed)
+        assertFalse(nutrition.isAllowed)
+        assertFalse(full.isAllowed)
+        assertTrue(
+            full.blockingIssues.any { it == "food_photo_image_required" || it == "source_image_required" },
+        )
+    }
+
+    @Test
+    fun `v2 receipt-free restaurant food photo cannot be declared as merchant evidence`() {
+        val root = JsonSupport.parse(readExample("yeonsik-ocr.v2.restaurant-food-photo.example.json"))
+        val invalid = JsonObject(root.toMutableMap().apply {
+            put("merchant_candidate", JsonObject(root["merchant_candidate"]!!.jsonObject.toMutableMap().apply {
+                put(
+                    "source_attachment_ids",
+                    JsonArray(listOf(JsonPrimitive("food-photo-1"))),
+                )
+            }))
+        })
+        val envelope = YeonsikOcrV2Json.decode(
+            Json.encodeToString(JsonElement.serializer(), invalid),
+            "local-v2-restaurant-food-photo-as-merchant-evidence",
+        )
+
+        val result = IngestionEvidenceGate.evaluate(
+            envelope = envelope,
+            evidence = listOf(LocalEvidence("food-photo-1", SourceAttachmentType.FOOD_PHOTO, true)),
+            artifactKeys = setOf(IngestionArtifactKeys.MERCHANT_CANDIDATE),
+        )
+
+        assertFalse(result.isAllowed)
+        assertTrue(result.blockingIssues.any { it.startsWith("merchant_candidate_food_photo_not_merchant_evidence:") })
+    }
+
+    @Test
+    fun `v2 receipt-linked restaurant estimate still requires a real receipt line and link`() {
+        val valid = YeonsikOcrV2Json.decode(
+            readExample("yeonsik-ocr.v2.restaurant.example.json"),
+            "local-v2-restaurant-receipt-linked",
+        )
+        val linked = valid.nutrition.single { it is IngestionNutrition.RestaurantEstimate }
+            as IngestionNutrition.RestaurantEstimate
+        assertEquals("line-1", linked.lineId)
+        YeonsikOcrV2Json.validate(valid)
+
+        val root = JsonSupport.parse(readExample("yeonsik-ocr.v2.restaurant.example.json"))
+        val invalid = JsonObject(root.toMutableMap().apply {
+            put("nutrition", JsonArray(root["nutrition"]!!.jsonArray.map { element ->
+                if (element.jsonObject["kind"]!!.jsonPrimitive.content == "restaurant_estimate") {
+                    JsonObject(element.jsonObject.toMutableMap().apply { put("line_id", JsonNull) })
+                } else {
+                    element
+                }
+            }))
+        })
+
+        assertThrows(IllegalArgumentException::class.java) {
+            YeonsikOcrV2Json.decode(
+                Json.encodeToString(JsonElement.serializer(), invalid),
+                "local-v2-restaurant-null-receipt-line",
+            )
+        }
+    }
+
+    @Test
+    fun `v2 restaurant nutrition requires a merchant candidate without a receipt`() {
+        val root = JsonSupport.parse(readExample("yeonsik-ocr.v2.restaurant-food-photo.example.json"))
+        val invalid = JsonObject(root.toMutableMap().apply {
+            put("merchant_candidate", JsonNull)
+            put("projection_targets", JsonArray(emptyList<JsonElement>()))
+        })
+
+        assertThrows(IllegalArgumentException::class.java) {
+            YeonsikOcrV2Json.decode(
+                Json.encodeToString(JsonElement.serializer(), invalid),
+                "local-v2-restaurant-no-merchant",
+            )
+        }
+    }
+
+    @Test
+    fun `v2 keeps complimentary side receipt semantics`() {
+        val root = JsonSupport.parse(readExample("yeonsik-ocr.v2.restaurant.example.json"))
+        val invalid = JsonObject(root.toMutableMap().apply {
+            put("receipt", JsonNull)
+            put(
+                "nutrition",
+                JsonArray(root["nutrition"]!!.jsonArray.filter { element ->
+                    element.jsonObject["kind"]!!.jsonPrimitive.content == "meal_component_estimate"
+                }),
+            )
+            put("consumption", JsonArray(emptyList<JsonElement>()))
+            put("links", JsonArray(emptyList<JsonElement>()))
+            put("projection_targets", JsonArray(emptyList<JsonElement>()))
+        })
+
+        assertThrows(IllegalArgumentException::class.java) {
+            YeonsikOcrV2Json.decode(
+                Json.encodeToString(JsonElement.serializer(), invalid),
+                "local-v2-receipt-free-component",
+            )
+        }
+    }
+
+    @Test
+    fun `v2 does not accept the v3 restaurant menu estimate kind`() {
+        val root = JsonSupport.parse(readExample("yeonsik-ocr.v2.restaurant-food-photo.example.json"))
+        val invalid = JsonObject(root.toMutableMap().apply {
+            put("nutrition", JsonArray(root["nutrition"]!!.jsonArray.map { element ->
+                JsonObject(element.jsonObject.toMutableMap().apply {
+                    put("kind", JsonPrimitive("restaurant_menu_estimate"))
+                })
+            }))
+        })
+
+        assertThrows(IllegalStateException::class.java) {
+            YeonsikOcrV2Json.decode(
+                Json.encodeToString(JsonElement.serializer(), invalid),
+                "local-v2-v3-menu-kind",
+            )
+        }
+    }
+
+    @Test
+    fun `v2 local revision revalidates receipt-free restaurant invariants`() = runBlocking {
+        val useCase = CanonicalIngestionUseCase(InMemoryIngestionSessionStore())
+        val imported = useCase.importJson(
+            value = readExample("yeonsik-ocr.v2.restaurant-food-photo.example.json"),
+            localDocumentId = "local-v2-restaurant-revision",
+            ingestionId = "v2-restaurant-revision",
+            evidence = listOf(LocalEvidence("food-photo-1", SourceAttachmentType.FOOD_PHOTO, true)),
+        ) as CanonicalImportResult.Success
+        val invalid = imported.envelope.copy(
+            nutrition = imported.envelope.nutrition.map { item ->
+                (item as IngestionNutrition.RestaurantEstimate).copy(lineId = "missing-receipt-line")
+            },
+        )
+
+        val revised = useCase.reviseCanonicalDraft("v2-restaurant-revision", invalid)
+
+        assertTrue(revised is IngestionStartResult.Failure)
+        assertTrue(
+            (revised as IngestionStartResult.Failure).issues.single().startsWith("canonical_domain_invalid:"),
+        )
+        assertEquals(
+            imported.session.canonicalFingerprint,
+            useCase.session("v2-restaurant-revision")?.canonicalFingerprint,
+        )
+    }
+
+    @Test
     fun `v2 text-only merchant source evidence is explicit without fabricating an image`() {
         val textBacked = v2MerchantEnvelope(userText = "상호명은 사용자 입력으로 확인했습니다.")
 

@@ -17,6 +17,7 @@ class YeonsikOcrExampleTest {
             "yeonsik-ocr.merchant.example.json",
             "yeonsik-ocr.restaurant.example.json",
             "yeonsik-ocr.packaged-product.example.json",
+            "yeonsik-ocr.v2.restaurant-food-photo.example.json",
             "yeonsik-ocr.v3.merchant.example.json",
         )
         val importer = ExternalJsonImporter()
@@ -57,6 +58,19 @@ class YeonsikOcrExampleTest {
         val label = packaged.nutrition.single() as IngestionNutrition.ProductLabel
         assertEquals("parsed", label.draft.status.wireValue)
         assertEquals(null, label.draft.confirmedAt)
+
+        val receiptFreeRestaurant = ((outcomes.getValue("yeonsik-ocr.v2.restaurant-food-photo.example.json") as ExternalJsonImportOutcome.Success)
+            .result.draft as CanonicalDraft.Envelope).value
+        assertEquals(YEONSIK_OCR_V2_SCHEMA, receiptFreeRestaurant.schemaVersion)
+        assertEquals(null, receiptFreeRestaurant.receipt)
+        assertEquals(null, receiptFreeRestaurant.nutrition.single().lineId)
+        assertEquals(
+            setOf(
+                IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE,
+                IngestionProjection.FITNESS_NUTRITION,
+            ),
+            CanonicalProjectionPlanner.plan(receiptFreeRestaurant).eligible,
+        )
 
         val v3 = ((outcomes.getValue("yeonsik-ocr.v3.merchant.example.json") as ExternalJsonImportOutcome.Success)
             .result.draft as CanonicalDraft.Envelope).value

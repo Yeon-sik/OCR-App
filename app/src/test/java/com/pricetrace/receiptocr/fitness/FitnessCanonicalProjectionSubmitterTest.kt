@@ -88,6 +88,54 @@ class FitnessCanonicalProjectionSubmitterTest {
     }
 
     @Test
+    fun receiptFreeRestaurantEstimateUsesMerchantCandidateAndV2NutritionRpcWithoutIdentity() = runTest {
+        val transport = QueueTransport(
+            response("canonical-food-free-1", "food-food-free-1"),
+        )
+        val item = estimate("food-free-1").copy(lineId = null)
+        val envelope = YeonsikOcrEnvelope(
+            mode = com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT,
+            source = IngestionSource(
+                producer = "chatgpt",
+                sourceFiles = listOf(SourceAttachment("food-free-1", SourceAttachmentType.FOOD_PHOTO)),
+            ),
+            merchantCandidate = MerchantCandidate(name = "키키덮밥"),
+            nutrition = listOf(item),
+            schemaVersion = com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA,
+        )
+
+        val result = FitnessCanonicalProjectionSubmitter(
+            NutritionSupabaseGateway(FakeStore(signedIn()), transport),
+        ).submit(
+            ProjectionRequest(
+                ingestionId = "ingestion-food-free-1",
+                projection = IngestionProjection.FITNESS_NUTRITION,
+                canonicalPayload = "{}",
+                resolvedIdentity = null,
+                idempotencyKey = "food-free-key",
+                envelope = envelope,
+                localDocumentId = "ocr-food-free-1",
+                revisionSeq = 1,
+            ),
+        )
+
+        assertTrue(result is ProjectionSubmission.Success)
+        val request = transport.requests.single()
+        assertEquals(
+            "https://nutrition.example.com/rest/v1/rpc/import_canonical_nutrition_v2",
+            request.url,
+        )
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        assertEquals(FOOD_ESTIMATE_V1, body["p_input_contract"]?.jsonPrimitive?.content)
+        assertEquals("키키덮밥", body["p_brand"]?.jsonPrimitive?.content)
+        assertEquals(JsonNull, body["p_pricetrace_identity"])
+        assertEquals(
+            "food_image_estimate",
+            body["p_nutrient_provenance"]!!.jsonObject["calories_kcal"]!!.jsonObject["source_type"]?.jsonPrimitive?.content,
+        )
+    }
+
+    @Test
     fun packagedProductLabelUsesFitnessV3RpcAndExplicitProductHierarchy() = runTest {
         val transport = QueueTransport(
             NutritionHttpResponse(

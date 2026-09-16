@@ -3,6 +3,7 @@ package com.pricetrace.receiptscanner.ingestion
 import com.pricetrace.receiptscanner.importer.CanonicalDraft
 import com.pricetrace.receiptscanner.importer.ExternalJsonImportOutcome
 import com.pricetrace.receiptscanner.importer.ExternalJsonImporter
+import com.pricetrace.receiptscanner.input.InputOrigin
 import com.pricetrace.receiptscanner.nutrition.NutritionDraftStatus
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -11,6 +12,90 @@ import org.junit.Test
 import java.io.File
 
 class YeonsikOcrV2ProjectionTest {
+    @Test
+    fun `v2 receipt-free restaurant fans out merchant and nutrition independently`() = runBlocking {
+        val imported = ExternalJsonImporter().import(
+            readExample("yeonsik-ocr.v2.restaurant-food-photo.example.json"),
+            "local-v2-receipt-free-restaurant-plan",
+        ) as ExternalJsonImportOutcome.Success
+        val envelope = (imported.result.draft as CanonicalDraft.Envelope).value
+        val plan = CanonicalProjectionPlanner.plan(envelope)
+
+        assertEquals(
+            setOf(
+                IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE,
+                IngestionProjection.FITNESS_NUTRITION,
+            ),
+            plan.eligible,
+        )
+        assertTrue(IngestionProjection.PRICETRACE_PRICE_OBSERVATION in plan.disabled)
+        assertTrue(IngestionProjection.CASHOS_RECEIPT in plan.disabled)
+        assertTrue(IngestionProjection.CASHOS_TRANSACTION in plan.disabled)
+        assertTrue(IngestionProjection.FITNESS_MEAL in plan.disabled)
+
+        val store = InMemoryIngestionSessionStore()
+        val requests = mutableListOf<ProjectionRequest>()
+        val orchestrator = IngestionOrchestrator(
+            store = store,
+            submitters = mapOf(
+                IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE to submitter { request ->
+                    requests += request
+                    ProjectionSubmission.Success("merchant-candidate-1")
+                },
+                IngestionProjection.FITNESS_NUTRITION to submitter { request ->
+                    requests += request
+                    ProjectionSubmission.Success("nutrition-food-1")
+                },
+            ),
+            now = { "2026-09-16T00:00:00Z" },
+        )
+        val evidence = listOf(LocalEvidence("food-photo-1", SourceAttachmentType.FOOD_PHOTO, true))
+
+        assertTrue(
+            orchestrator.start(
+                ingestionId = "ingestion-v2-receipt-free-restaurant",
+                localDocumentId = "local-v2-receipt-free-restaurant-plan",
+                envelope = envelope,
+                evidence = evidence,
+            ) is IngestionStartResult.Success,
+        )
+        assertTrue(
+            orchestrator.markNutritionVerified(
+                "ingestion-v2-receipt-free-restaurant",
+                envelope,
+                evidence,
+            ) is IngestionStartResult.Success,
+        )
+        assertTrue(
+            orchestrator.markMerchantCandidateVerified(
+                "ingestion-v2-receipt-free-restaurant",
+                envelope,
+                evidence,
+                InputOrigin.EXTERNAL_JSON,
+            ) is IngestionStartResult.Success,
+        )
+
+        val states = orchestrator.submitAllReadyProjections(
+            "ingestion-v2-receipt-free-restaurant",
+            envelope,
+        )
+
+        assertEquals(
+            setOf(
+                IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE,
+                IngestionProjection.FITNESS_NUTRITION,
+            ),
+            states.filter { it.status == ProjectionStatus.UPLOADED }.map { it.projection }.toSet(),
+        )
+        assertEquals(
+            setOf(
+                IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE,
+                IngestionProjection.FITNESS_NUTRITION,
+            ),
+            requests.map(ProjectionRequest::projection).toSet(),
+        )
+    }
+
     @Test
     fun `v2 incomplete consumption never activates fitness meal`() = runBlocking {
         val imported = ExternalJsonImporter().import(
