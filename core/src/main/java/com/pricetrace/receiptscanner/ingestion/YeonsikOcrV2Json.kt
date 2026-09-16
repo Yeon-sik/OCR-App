@@ -673,7 +673,10 @@ object YeonsikOcrV2Json {
                 merchant != null &&
                     (receipt == null || receipt.merchant.businessKind == BusinessKind.FOOD_SERVICE) &&
                     productCandidates.isEmpty() &&
-                    nutrition.all { it is IngestionNutrition.RestaurantEstimate || it is IngestionNutrition.MealComponentEstimate },
+                    nutrition.all { it is IngestionNutrition.RestaurantEstimate || it is IngestionNutrition.MealComponentEstimate } &&
+                    // Complimentary sides retain their existing receipt-context semantics. The
+                    // new receipt-free path is only for ordinary restaurant estimates.
+                    (receipt != null || nutrition.none { it is IngestionNutrition.MealComponentEstimate }),
             )
             IngestionMode.PACKAGED_PRODUCT -> require(
                 merchant == null && receipt?.merchant?.businessKind != BusinessKind.FOOD_SERVICE &&

@@ -114,6 +114,30 @@ class YeonsikOcrV2Test {
     }
 
     @Test
+    fun `v2 keeps complimentary side receipt semantics`() {
+        val root = JsonSupport.parse(readExample("yeonsik-ocr.v2.restaurant.example.json"))
+        val invalid = JsonObject(root.toMutableMap().apply {
+            put("receipt", JsonNull)
+            put(
+                "nutrition",
+                JsonArray(root["nutrition"]!!.jsonArray.filter { element ->
+                    element.jsonObject["kind"]!!.jsonPrimitive.content == "meal_component_estimate"
+                }),
+            )
+            put("consumption", JsonArray(emptyList<JsonElement>()))
+            put("links", JsonArray(emptyList<JsonElement>()))
+            put("projection_targets", JsonArray(emptyList<JsonElement>()))
+        })
+
+        assertThrows(IllegalArgumentException::class.java) {
+            YeonsikOcrV2Json.decode(
+                Json.encodeToString(JsonElement.serializer(), invalid),
+                "local-v2-receipt-free-component",
+            )
+        }
+    }
+
+    @Test
     fun `v2 does not accept the v3 restaurant menu estimate kind`() {
         val root = JsonSupport.parse(readExample("yeonsik-ocr.v2.restaurant-food-photo.example.json"))
         val invalid = JsonObject(root.toMutableMap().apply {
