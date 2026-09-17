@@ -1602,7 +1602,8 @@ private fun CanonicalTypedReviewField(
                     singleLine = field.type != CanonicalFieldType.DATETIME,
                     keyboardOptions = KeyboardOptions(
                         keyboardType = when (field.type) {
-                            CanonicalFieldType.INTEGER, CanonicalFieldType.DECIMAL -> KeyboardType.Number
+                            CanonicalFieldType.INTEGER -> KeyboardType.Number
+                            CanonicalFieldType.DECIMAL -> KeyboardType.Decimal
                             else -> KeyboardType.Text
                         },
                     ),

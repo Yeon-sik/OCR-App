@@ -437,7 +437,6 @@ class CanonicalReviewController(
         val revisedEnvelope = envelope.copy(
             review = envelope.review.copy(
                 status = IngestionReviewStatus.NEEDS_REVIEW,
-                blockingIssues = emptyList(),
             ),
         )
         val documentId = revisedEnvelope.receipt?.document?.localDocumentId
@@ -639,7 +638,8 @@ class CanonicalReviewController(
                 fieldPath = path,
                 previousValue = previous,
                 newValue = next,
-                valueType = CanonicalFieldRegistry.descriptor(original, path)?.type,
+                valueType = CanonicalFieldRegistry.descriptor(original, path)?.type
+                    ?: if (field == "business_kind") CanonicalFieldType.ENUM else CanonicalFieldType.TEXT,
             )
         }
     }
@@ -955,7 +955,7 @@ class CanonicalReviewController(
             "option_text" -> line.copy(optionText = value as String?)
             "price_status" -> line.copy(priceStatus = (value as? String) ?: error("가격 상태는 필수입니다."))
             "merchant_sku" -> line.copy(merchantSku = value as String?)
-            "quantity" -> line.copy(quantity = (value as Long?)?.toDouble())
+            "quantity" -> line.copy(quantity = value as Double?)
             "unit_price_amount_krw" -> line.copy(unitPriceAmountKrw = value as Long?)
             "gross_amount_krw" -> line.copy(grossAmountKrw = value as Long?)
             "discount_amount_krw" -> line.copy(discountAmountKrw = value as Long?)

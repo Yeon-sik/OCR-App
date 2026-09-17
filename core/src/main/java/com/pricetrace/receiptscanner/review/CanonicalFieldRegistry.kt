@@ -10,7 +10,6 @@ import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.PurchaseKind
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecord
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecordStatus
-import com.pricetrace.receiptscanner.ingestion.PRICETRACE_V4_MAX_INTEGER
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
@@ -102,7 +101,9 @@ object CanonicalFieldRegistry {
             }
         }
 
-        envelope.merchantCandidate?.let {
+        if (envelope.merchantCandidate != null &&
+            !(envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA && envelope.receipt != null)
+        ) {
             add(text("merchant_candidate.name", "상점 후보명", nullable = false))
             add(text("merchant_candidate.branch_name", "상점 후보 지점"))
             add(text("merchant_candidate.address", "상점 후보 주소"))
@@ -283,7 +284,7 @@ object CanonicalFieldRegistry {
             "grand_total_amount_krw" to "총액",
             "paid_amount_krw" to "결제액",
         ).forEach { (name, label) ->
-            fields += integer("$prefix.totals.$name", "${record.clientKey} $label", nullable = true, min = BigDecimal.ZERO, max = BigDecimal.valueOf(PRICETRACE_V4_MAX_INTEGER))
+            fields += integer("$prefix.totals.$name", "${record.clientKey} $label", nullable = true, min = BigDecimal.ZERO)
         }
         fields += enum("$prefix.payment.method", "${record.clientKey} 결제 수단", PAYMENT_METHOD_VALUES)
         fields += text("$prefix.payment.provider", "${record.clientKey} 결제 제공자")
@@ -296,14 +297,14 @@ object CanonicalFieldRegistry {
             fields += text("$linePrefix.option_text", "$key 옵션")
             fields += enum("$linePrefix.price_status", "$key 가격 상태", listOf("itemized", "ambiguous", "unknown"), nullable = false)
             fields += text("$linePrefix.merchant_sku", "$key 판매자 SKU")
-            fields += integer("$linePrefix.quantity", "$key 수량", nullable = true, min = BigDecimal.ONE, max = BigDecimal.valueOf(PRICETRACE_V4_MAX_INTEGER))
+            fields += decimal("$linePrefix.quantity", "$key 수량", nullable = true, min = BigDecimal.ZERO, minExclusive = true)
             listOf(
                 "unit_price_amount_krw" to "단가",
                 "gross_amount_krw" to "공급가",
                 "discount_amount_krw" to "할인",
                 "net_amount_krw" to "결제 금액",
             ).forEach { (name, label) ->
-                fields += integer("$linePrefix.$name", "$key $label", nullable = true, min = BigDecimal.ZERO, max = BigDecimal.valueOf(PRICETRACE_V4_MAX_INTEGER))
+                fields += integer("$linePrefix.$name", "$key $label", nullable = true, min = BigDecimal.ZERO)
             }
         }
         return fields

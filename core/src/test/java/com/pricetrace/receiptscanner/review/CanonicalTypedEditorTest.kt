@@ -2,10 +2,14 @@ package com.pricetrace.receiptscanner.review
 
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV2Json
 import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
+import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus
+import com.pricetrace.receiptscanner.ingestion.PurchaseRecordTotals
+import com.pricetrace.receiptscanner.ingestion.PriceTraceV4SubmissionReason
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV4Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -18,6 +22,7 @@ class CanonicalTypedEditorTest {
         val controller = CanonicalReviewController(original, now = { "2026-09-15T12:00:00+09:00" })
 
         assertTrue(controller.editableFields().none { it.path.endsWith(".sub_brand_name") || it.path.endsWith(".merchant_sku") })
+        assertTrue(controller.editableFields().none { it.path.startsWith("merchant_candidate.") })
 
         assertTrue(controller.updateField("receipt.merchant.name", "수정 식당"))
         assertEquals("수정 식당", controller.state.value.envelope.receipt!!.merchant.name)
@@ -36,6 +41,8 @@ class CanonicalTypedEditorTest {
         assertEquals(IngestionReviewStatus.NEEDS_REVIEW, controller.state.value.envelope.review.status)
 
         val beforeBlockedEdit = controller.state.value.envelope
+        assertFalse(controller.updateField("merchant_candidate.name", "불일치 상점"))
+        assertEquals(beforeBlockedEdit, controller.state.value.envelope)
         assertFalse(controller.updateField("source.user_text", "바꾸면 안 됨"))
         assertEquals(beforeBlockedEdit, controller.state.value.envelope)
         assertTrue(controller.state.value.fieldErrors.containsKey("source.user_text"))
@@ -53,6 +60,23 @@ class CanonicalTypedEditorTest {
         assertEquals(null, editedLine.quantity)
         assertEquals(originalLine.confidence, editedLine.confidence)
         assertEquals(null, controller.state.value.edits.single().newValue)
+    }
+
+    @Test
+    fun `typed edit preserves existing blocking issues while requiring re-verification`() {
+        val imported = YeonsikOcrV2Json.decode(readExample("yeonsik-ocr.v2.restaurant.example.json"), "typed-v2-blocking")
+        val original = imported.copy(
+            review = imported.review.copy(
+                status = IngestionReviewStatus.READY,
+                blockingIssues = listOf("evidence_conflict:merchant"),
+            ),
+        )
+        val controller = CanonicalReviewController(original)
+
+        assertTrue(controller.updateField("receipt.merchant.branch_name", "새 지점"))
+
+        assertEquals(listOf("evidence_conflict:merchant"), controller.state.value.envelope.review.blockingIssues)
+        assertEquals(IngestionReviewStatus.NEEDS_REVIEW, controller.state.value.envelope.review.status)
     }
 
     @Test
@@ -88,24 +112,44 @@ class CanonicalTypedEditorTest {
                         discountAmountKrw = null,
                         netAmountKrw = null,
                     )
-                })
+                }, totals = PurchaseRecordTotals(grandTotalAmountKrw = 0L))
             },
         )
         val controller = CanonicalReviewController(editable, now = { "2026-09-15T12:00:00+09:00" })
 
         assertTrue(controller.editableFields().any { it.path == "purchase_records[purchase-1].platform" })
+        val quantityField = controller.editableFields().single { it.path.endsWith(".line_items[0].quantity") }
+        assertEquals(CanonicalFieldType.DECIMAL, quantityField.type)
+        assertNull(quantityField.max)
+        assertNull(controller.editableFields().single { it.path.endsWith(".totals.grand_total_amount_krw") }.max)
         assertTrue(controller.updateField("purchase_records[purchase-1].platform", "11번가"))
-        val lineUpdated = controller.updateField("purchase_records[purchase-1].line_items[0].quantity", "3")
+        val lineUpdated = controller.updateField("purchase_records[purchase-1].line_items[0].quantity", "0.5")
         assertTrue("line update failed: ${controller.state.value.error}", lineUpdated)
         val edited = controller.state.value.envelope.purchaseRecords.single()
         assertEquals("11번가", edited.platform)
-        assertEquals(3.0, edited.lineItems.single().quantity)
+        assertEquals(0.5, edited.lineItems.single().quantity)
+        assertEquals(CanonicalFieldType.DECIMAL, controller.state.value.edits.last().valueType)
         assertEquals(original.source, controller.state.value.envelope.source)
+
+        assertFalse(edited.priceTraceSubmissionEligible)
+        assertTrue(edited.cashOsTransactionEligible)
+
+        assertTrue(controller.updateField("purchase_records[purchase-1].line_items[0].quantity", "1"))
+        assertTrue(controller.state.value.envelope.purchaseRecords.single().priceTraceSubmissionEligible)
+        assertTrue(controller.updateField("purchase_records[purchase-1].totals.grand_total_amount_krw", "2147483648"))
+        val largeValueEdited = controller.state.value.envelope.purchaseRecords.single()
+        assertEquals(2147483648L, largeValueEdited.totals.grandTotalAmountKrw)
+        assertFalse(largeValueEdited.priceTraceSubmissionEligible)
+        assertEquals(PriceTraceV4SubmissionReason.PAYMENT_AMOUNT_INTEGER_RANGE_REQUIRED, largeValueEdited.priceTraceSubmissionReasonCode)
+        assertTrue(largeValueEdited.cashOsTransactionEligible)
+        assertFalse(IngestionProjection.PRICETRACE_PRICE_OBSERVATION in controller.state.value.plan.eligible)
+        assertTrue(IngestionProjection.PRICETRACE_PRICE_OBSERVATION in controller.state.value.plan.disabled)
+        assertTrue(IngestionProjection.CASHOS_TRANSACTION in controller.state.value.plan.eligible)
 
         val beforeInvalid = controller.state.value.envelope
         assertFalse(controller.updateField("purchase_records[purchase-1].line_items[0].quantity", "0"))
         assertEquals(beforeInvalid, controller.state.value.envelope)
-        assertFalse(controller.updateField("purchase_records[purchase-1].totals.grand_total_amount_krw", "2147483648"))
+        assertFalse(controller.updateField("purchase_records[purchase-1].totals.grand_total_amount_krw", "-1"))
         assertEquals(beforeInvalid, controller.state.value.envelope)
         assertTrue(controller.state.value.fieldErrors.keys.any { it.contains("grand_total_amount_krw") })
         assertFalse(controller.updateField("purchase_records[purchase-1].purchase_kind", "not-a-kind"))
