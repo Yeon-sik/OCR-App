@@ -9,8 +9,11 @@ import com.pricetrace.receiptscanner.ingestion.ProjectionState
 import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveCheckpoint
+import com.pricetrace.receiptscanner.ingestion.CanonicalRevisionArchiveRequest
 import com.pricetrace.receiptscanner.ingestion.bundleFingerprintFor
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleMaterializer
+import com.pricetrace.receiptscanner.review.CanonicalFieldType
+import com.pricetrace.receiptscanner.review.CanonicalReviewEdit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -22,6 +25,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -48,10 +52,12 @@ data class DesktopSessionRecord(
     val canonicalJson: String,
     val evidence: List<DesktopEvidenceAttachment>,
     val bundle: DesktopBundleMetadata? = null,
+    val reviewEdits: List<CanonicalReviewEdit> = emptyList(),
 )
 
 enum class DesktopBundleValidationStatus { VALID, INVALID }
 enum class DesktopEvidenceArchiveStatus { NOT_STARTED, ARCHIVING, ARCHIVED, FAILED }
+enum class DesktopCanonicalRevisionArchiveStatus { NOT_STARTED, ARCHIVING, ARCHIVED, FAILED }
 
 data class DesktopBundleMetadata(
     val sourcePath: String,
@@ -62,6 +68,10 @@ data class DesktopBundleMetadata(
     val archiveCheckpoint: EvidenceArchiveCheckpoint = EvidenceArchiveCheckpoint(),
     val verificationEventRecorded: Boolean = false,
     val archiveError: String? = null,
+    val revisionArchiveStatus: DesktopCanonicalRevisionArchiveStatus = DesktopCanonicalRevisionArchiveStatus.NOT_STARTED,
+    val revisionArchiveError: String? = null,
+    /** Snapshot waiting for a retry after an Evidence revision archive failure. */
+    val pendingRevision: CanonicalRevisionArchiveRequest? = null,
 ) {
     val manifestSha256: String
         get() = MessageDigest.getInstance("SHA-256")
@@ -110,7 +120,7 @@ class DesktopSessionStore(
     }
 
     fun loadRecord(ingestionId: String): DesktopSessionRecord? = runCatching {
-        readJson(sessionFile(ingestionId))
+        recoverInterruptedRevision(readJson(sessionFile(ingestionId)))
     }.getOrNull()
 
     fun latestRecord(): DesktopSessionRecord? = allRecords()
@@ -167,7 +177,7 @@ class DesktopSessionStore(
     private fun allRecords(): List<DesktopSessionRecord> = Files.list(directory).use { stream ->
         stream.filter { it.fileName.toString().endsWith(".json") }
             .toList()
-            .mapNotNull { path -> runCatching { readJson(path) }.getOrNull() }
+            .mapNotNull { path -> runCatching { recoverInterruptedRevision(readJson(path)) }.getOrNull() }
     }
 
     private fun sessionFile(ingestionId: String): Path = directory.resolve("${safeId(ingestionId)}.json")
@@ -186,8 +196,19 @@ class DesktopSessionStore(
             put("session", encodeSession(record.session))
             put("evidence", record.evidence.attachmentsToJson())
             put("bundle", record.bundle?.let(::encodeBundle) ?: JsonNull)
+            put("review_edits", kotlinx.serialization.json.JsonArray(record.reviewEdits.map(::encodeEdit)))
         },
     )
+
+    private fun encodeEdit(edit: CanonicalReviewEdit): JsonObject = buildJsonObject {
+        put("id", JsonPrimitive(edit.id))
+        put("field_path", JsonPrimitive(edit.fieldPath))
+        putNullable("previous_value", edit.previousValue)
+        putNullable("new_value", edit.newValue)
+        put("provenance_json", JsonPrimitive(edit.provenanceJson))
+        put("edited_at", JsonPrimitive(edit.editedAt))
+        putNullable("value_type", edit.valueType?.wireValue)
+    }
 
     private fun readJson(path: Path): DesktopSessionRecord {
         require(Files.isRegularFile(path)) { "session record not found" }
@@ -204,6 +225,23 @@ class DesktopSessionStore(
             bundle = if (schemaVersion in setOf("desktop-ingestion-session.v2", "desktop-ingestion-session.v3")) {
                 root["bundle"]?.takeUnless { it == JsonNull }?.jsonObject?.let(::decodeBundle)
             } else null,
+            reviewEdits = (root["review_edits"] as? kotlinx.serialization.json.JsonArray).orEmpty().map(::decodeEdit),
+        )
+    }
+
+    private fun decodeEdit(element: JsonElement): CanonicalReviewEdit {
+        val root = element.jsonObject
+        val valueType = root.nullableString("value_type")?.let { wire ->
+            CanonicalFieldType.entries.firstOrNull { it.wireValue == wire }
+        }
+        return CanonicalReviewEdit(
+            id = root.string("id"),
+            fieldPath = root.string("field_path"),
+            previousValue = root.nullableString("previous_value"),
+            newValue = root.nullableString("new_value"),
+            provenanceJson = root.string("provenance_json"),
+            editedAt = root.string("edited_at"),
+            valueType = valueType,
         )
     }
 
@@ -225,8 +263,26 @@ class DesktopSessionStore(
             kotlinx.serialization.json.JsonArray(bundle.archiveCheckpoint.boundSourceFileIds.sorted().map(::JsonPrimitive)),
         )
         putNullable("checkpoint_bundle_fingerprint", bundle.archiveCheckpoint.bundleFingerprint)
+        putNullable("latest_revision_id", bundle.archiveCheckpoint.latestRevisionId)
+        put("latest_revision_seq", JsonPrimitive(bundle.archiveCheckpoint.latestRevisionSeq))
         put("verification_event_recorded", JsonPrimitive(bundle.verificationEventRecorded))
         putNullable("archive_error", bundle.archiveError)
+        put("revision_archive_status", JsonPrimitive(bundle.revisionArchiveStatus.name))
+        putNullable("revision_archive_error", bundle.revisionArchiveError)
+        put("pending_revision", bundle.pendingRevision?.let(::encodeRevisionRequest) ?: JsonNull)
+    }
+
+    private fun encodeRevisionRequest(request: CanonicalRevisionArchiveRequest): JsonObject = buildJsonObject {
+        put("canonical_artifact_id", JsonPrimitive(request.canonicalArtifactId))
+        put("revision_seq", JsonPrimitive(request.revisionSeq))
+        putNullable("parent_revision_id", request.parentRevisionId)
+        put("canonical_sha256", JsonPrimitive(request.canonicalSha256))
+        put("canonical_json", JsonPrimitive(request.canonicalJson))
+        put("schema_version", JsonPrimitive(request.schemaVersion))
+        put("mode", JsonPrimitive(request.mode))
+        put("validation_status", JsonPrimitive(request.validationStatus))
+        put("validation_issues", kotlinx.serialization.json.JsonArray(request.validationIssues.map(::JsonPrimitive)))
+        put("edits", kotlinx.serialization.json.JsonArray(request.edits.map(::encodeEdit)))
     }
 
     private fun decodeBundle(root: JsonObject): DesktopBundleMetadata {
@@ -242,13 +298,48 @@ class DesktopSessionStore(
                     .mapValues { (_, value) -> value.jsonPrimitive.content },
                 boundSourceFileIds = root.arrayValue("bound_source_file_ids").map { it.jsonPrimitive.content }.toSet(),
                 bundleFingerprint = root.nullableString("checkpoint_bundle_fingerprint"),
+                latestRevisionId = root.nullableString("latest_revision_id"),
+                latestRevisionSeq = root["latest_revision_seq"]?.jsonPrimitive?.longOrNull ?: 0L,
             ),
             verificationEventRecorded = root.boolean("verification_event_recorded"),
             archiveError = root.nullableString("archive_error"),
+            revisionArchiveStatus = root.nullableString("revision_archive_status")
+                ?.let(DesktopCanonicalRevisionArchiveStatus::valueOf)
+                ?: DesktopCanonicalRevisionArchiveStatus.NOT_STARTED,
+            revisionArchiveError = root.nullableString("revision_archive_error"),
+            pendingRevision = root["pending_revision"]
+                ?.takeUnless { it == JsonNull }
+                ?.jsonObject
+                ?.let(::decodeRevisionRequest),
         )
         root.nullableString("manifest_sha256")?.let { require(it == bundle.manifestSha256) { "manifest hash mismatch" } }
         root.nullableString("bundle_fingerprint")?.let { require(it == bundle.bundleFingerprint) { "bundle fingerprint mismatch" } }
         return bundle
+    }
+
+    private fun decodeRevisionRequest(root: JsonObject): CanonicalRevisionArchiveRequest = CanonicalRevisionArchiveRequest(
+        canonicalArtifactId = root.string("canonical_artifact_id"),
+        revisionSeq = root["revision_seq"]?.jsonPrimitive?.longOrNull
+            ?: error("Missing pending revision sequence"),
+        parentRevisionId = root.nullableString("parent_revision_id"),
+        canonicalSha256 = root.string("canonical_sha256"),
+        canonicalJson = root.string("canonical_json"),
+        schemaVersion = root.string("schema_version"),
+        mode = root.string("mode"),
+        validationStatus = root.string("validation_status"),
+        validationIssues = root.arrayValue("validation_issues").map { it.jsonPrimitive.content },
+        edits = root.arrayValue("edits").map(::decodeEdit),
+    )
+
+    private fun recoverInterruptedRevision(record: DesktopSessionRecord): DesktopSessionRecord {
+        val bundle = record.bundle ?: return record
+        if (bundle.revisionArchiveStatus != DesktopCanonicalRevisionArchiveStatus.ARCHIVING) return record
+        return record.copy(
+            bundle = bundle.copy(
+                revisionArchiveStatus = DesktopCanonicalRevisionArchiveStatus.FAILED,
+                revisionArchiveError = "Revision archive interrupted; retry is available after process recovery.",
+            ),
+        )
     }
 
     private fun encodeSession(session: IngestionSession): JsonObject = buildJsonObject {

@@ -18,10 +18,13 @@ import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveRequest
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveResult
 import com.pricetrace.receiptscanner.ingestion.EvidenceVerificationEventResult
+import com.pricetrace.receiptscanner.ingestion.CanonicalRevisionArchiveRequest
+import com.pricetrace.receiptscanner.ingestion.CanonicalRevisionArchiveResult
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundle
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleReader
 import com.pricetrace.receiptscanner.review.CanonicalReviewController
+import com.pricetrace.receiptscanner.review.CanonicalReviewEdit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -56,6 +59,8 @@ data class DesktopUiState(
     val bundleMetadata: DesktopBundleMetadata? = null,
     /** Keeps a rejected bundle visible even when no trusted manifest metadata exists. */
     val bundleValidationStatus: DesktopBundleValidationStatus? = null,
+    val reviewEdits: List<CanonicalReviewEdit> = emptyList(),
+    val reviewFieldErrors: Map<String, String> = emptyMap(),
     val error: String? = null,
     val notice: String? = null,
     val busy: Boolean = false,
@@ -259,21 +264,66 @@ class DesktopIngestionController(
             val current = _state.value
             val envelope = current.envelope ?: error("편집하려면 정본 JSON을 먼저 가져오세요.")
             val session = current.session ?: error("편집할 ingestion session이 없습니다.")
+            require(current.bundleMetadata?.pendingRevision == null) {
+                "Canonical revision archive failed; retry the preserved revision before making another edit."
+            }
             val controller = structuredReviewController
                 ?.takeIf { it.state.value.envelope == envelope }
-                ?: CanonicalReviewController(envelope, now = now)
+                ?: CanonicalReviewController(envelope, initialEdits = current.reviewEdits, now = now)
             structuredReviewController = controller
             if (!mutation(controller)) {
-                _state.value = current.copy(error = controller.state.value.error ?: "구조화 편집을 저장하지 못했습니다.", notice = null)
+                _state.value = current.copy(
+                    reviewFieldErrors = controller.state.value.fieldErrors,
+                    error = controller.state.value.error ?: "구조화 편집을 저장하지 못했습니다.",
+                    notice = null,
+                )
                 return
             }
             val edited = controller.state.value.envelope
+            val editedJson = YeonsikOcrEnvelopeCodec.encodePersisted(edited)
+            val newEdits = controller.state.value.edits.drop(current.reviewEdits.size)
+           if (newEdits.isEmpty()) {
+                _state.value = current.copy(reviewFieldErrors = emptyMap(), error = null, notice = "변경된 canonical 필드가 없습니다.")
+               return
+           }
+            val bundleMetadata = current.bundleMetadata
+            if (bundleMetadata != null) {
+                if (bundleMetadata.archiveStatus != DesktopEvidenceArchiveStatus.ARCHIVED) {
+                    structuredReviewController = null
+                    _state.value = current.copy(
+                        error = "Evidence archive가 완료된 뒤에만 정본 revision을 저장할 수 있습니다.",
+                        notice = "Archive / Retry를 먼저 완료하세요.",
+                    )
+                    return
+                }
+                val artifactId = bundleMetadata.archiveCheckpoint.canonicalArtifactId
+                    if (artifactId == null) {
+                    structuredReviewController = null
+                    _state.value = current.copy(error = "Evidence canonical artifact id가 없습니다.", notice = null)
+                    return
+                }
+                val revisionSeq = bundleMetadata.archiveCheckpoint.latestRevisionSeq + 1L
+                val request = CanonicalRevisionArchiveRequest(
+                    canonicalArtifactId = artifactId,
+                    revisionSeq = revisionSeq,
+                    parentRevisionId = bundleMetadata.archiveCheckpoint.latestRevisionId,
+                    canonicalSha256 = sha256(editedJson),
+                    canonicalJson = editedJson,
+                    schemaVersion = edited.schemaVersion,
+                    mode = edited.mode.wireValue,
+                    validationStatus = "valid",
+                    validationIssues = emptyList(),
+                    edits = newEdits,
+                )
+                archiveAndMaterializeRevision(current, request, edited, controller.state.value.edits)
+                return
+            }
             when (val result = useCase.reviseCanonicalDraft(session.ingestionId, edited)) {
                 is IngestionStartResult.Failure -> {
                     _state.value = current.copy(error = result.issues.joinToString(", "), notice = null)
                 }
-                is IngestionStartResult.Success -> publishStructuredRevision(current, result.session, edited)
-                is IngestionStartResult.Duplicate -> publishStructuredRevision(current, result.session, edited)
+                is IngestionStartResult.Success -> publishStructuredRevision(current, result.session, edited, null, controller.state.value.edits)
+                is IngestionStartResult.Duplicate -> publishStructuredRevision(current, result.session, edited, null, controller.state.value.edits)
             }
         } catch (error: Exception) {
             _state.value = _state.value.copy(error = error.message ?: error.javaClass.simpleName, notice = null)
@@ -282,15 +332,140 @@ class DesktopIngestionController(
         }
     }
 
+    /** Retries the exact failed revision snapshot; it never asks the user to retype the edit. */
+    suspend fun retryCanonicalRevision() {
+        beginBusy()
+        try {
+            val current = _state.value
+            val metadata = requireNotNull(current.bundleMetadata) {
+                "Canonical revisions are only archived for bundles."
+            }
+            val request = requireNotNull(metadata.pendingRevision) {
+                "There is no pending canonical revision to retry."
+            }
+            val artifactId = requireNotNull(metadata.archiveCheckpoint.canonicalArtifactId) {
+                "Evidence canonical artifact id is missing."
+            }
+            require(request.canonicalArtifactId == artifactId) { "Pending revision belongs to a different artifact." }
+            require(request.canonicalSha256 == sha256(request.canonicalJson)) {
+                "Pending revision hash does not match its canonical JSON."
+            }
+            val localDocumentId = requireNotNull(current.localDocumentId) { "Local document id is missing." }
+            val edited = YeonsikOcrEnvelopeCodec.decode(
+                value = request.canonicalJson,
+                localDocumentId = localDocumentId,
+                preservePersistedVerification = true,
+            )
+            require(edited.schemaVersion == request.schemaVersion) { "Pending revision schema does not match." }
+            require(edited.mode.wireValue == request.mode) { "Pending revision mode does not match." }
+            archiveAndMaterializeRevision(
+                previous = current,
+                request = request,
+                edited = edited,
+                allEdits = current.reviewEdits + request.edits,
+            )
+        } catch (error: Exception) {
+            _state.value = _state.value.copy(error = error.message ?: error.javaClass.simpleName, notice = null)
+        } finally {
+            endBusy()
+        }
+    }
+
+    private suspend fun archiveAndMaterializeRevision(
+        previous: DesktopUiState,
+        request: CanonicalRevisionArchiveRequest,
+        edited: YeonsikOcrEnvelope,
+        allEdits: List<CanonicalReviewEdit>,
+    ) {
+        val session = requireNotNull(previous.session) { "Ingestion session is missing." }
+        val metadata = requireNotNull(previous.bundleMetadata)
+        val archiving = metadata.copy(
+            revisionArchiveStatus = DesktopCanonicalRevisionArchiveStatus.ARCHIVING,
+            revisionArchiveError = null,
+            pendingRevision = request,
+        )
+        _state.value = previous.copy(
+            bundleMetadata = archiving,
+            error = null,
+            notice = "정본 revision을 Evidence에 보관하는 중입니다.",
+        )
+        persistRecord(session, previous.rawJson, previous.canonicalJson, previous.evidence, archiving, previous.reviewEdits)
+        val archive = runCatching {
+            bundle.evidenceArchivePort.archiveCanonicalRevision(request)
+        }.getOrElse { error ->
+            CanonicalRevisionArchiveResult.Failure(error.message ?: error.javaClass.simpleName, revisionSeq = request.revisionSeq)
+        }
+        if (archive is CanonicalRevisionArchiveResult.Failure) {
+            structuredReviewController = null
+            val failed = previous.copy(
+                bundleMetadata = archiving.copy(
+                    revisionArchiveStatus = DesktopCanonicalRevisionArchiveStatus.FAILED,
+                    revisionArchiveError = archive.issue,
+                    pendingRevision = request,
+                ),
+                error = "Canonical revision archive 실패: ${archive.issue}",
+                notice = "수정 snapshot은 보존되었습니다. Revision / Retry로 다시 시도하세요.",
+            )
+            _state.value = failed
+            persistRecord(session, previous.rawJson, previous.canonicalJson, previous.evidence, failed.bundleMetadata, previous.reviewEdits)
+            return
+        }
+        val success = archive as? CanonicalRevisionArchiveResult.Success
+            ?: error("Evidence returned an unknown canonical revision result.")
+        require(success.revisionSeq == request.revisionSeq) { "Evidence returned a different canonical revision sequence." }
+        val archived = metadata.copy(
+            revisionArchiveStatus = DesktopCanonicalRevisionArchiveStatus.ARCHIVED,
+            revisionArchiveError = null,
+            pendingRevision = null,
+            archiveCheckpoint = metadata.archiveCheckpoint.copy(
+                latestRevisionId = success.revisionId,
+                latestRevisionSeq = success.revisionSeq,
+            ),
+        )
+        try {
+            when (val result = useCase.reviseCanonicalDraft(session.ingestionId, edited)) {
+                is IngestionStartResult.Failure -> {
+                    val failed = previous.copy(
+                        bundleMetadata = archived.copy(
+                            revisionArchiveStatus = DesktopCanonicalRevisionArchiveStatus.FAILED,
+                            revisionArchiveError = result.issues.joinToString(", "),
+                            pendingRevision = request,
+                        ),
+                        error = result.issues.joinToString(", "),
+                        notice = "Revision은 보관되었지만 local materialization이 실패했습니다. Retry로 재개하세요.",
+                    )
+                    _state.value = failed
+                    persistRecord(session, previous.rawJson, previous.canonicalJson, previous.evidence, failed.bundleMetadata, previous.reviewEdits)
+                }
+                is IngestionStartResult.Success -> publishStructuredRevision(previous, result.session, edited, archived, allEdits)
+                is IngestionStartResult.Duplicate -> publishStructuredRevision(previous, result.session, edited, archived, allEdits)
+            }
+        } catch (error: Exception) {
+            val failed = previous.copy(
+                bundleMetadata = archived.copy(
+                    revisionArchiveStatus = DesktopCanonicalRevisionArchiveStatus.FAILED,
+                    revisionArchiveError = error.message ?: error.javaClass.simpleName,
+                    pendingRevision = request,
+                ),
+                error = error.message ?: error.javaClass.simpleName,
+                notice = "Revision은 보관되었지만 local materialization이 실패했습니다. Retry로 재개하세요.",
+            )
+            _state.value = failed
+            persistRecord(session, previous.rawJson, previous.canonicalJson, previous.evidence, failed.bundleMetadata, previous.reviewEdits)
+        }
+    }
+
     private fun publishStructuredRevision(
         previous: DesktopUiState,
         session: IngestionSession,
         envelope: YeonsikOcrEnvelope,
+        bundleMetadata: DesktopBundleMetadata?,
+        reviewEdits: List<CanonicalReviewEdit>,
     ) {
         val canonicalJson = YeonsikOcrEnvelopeCodec.encodePersisted(envelope)
         val rawJson = if (previous.bundleMetadata == null) canonicalJson else previous.rawJson
-        persistRecord(session, rawJson, canonicalJson, previous.evidence, previous.bundleMetadata)
-        publish(
+       persistRecord(session, rawJson, canonicalJson, previous.evidence, bundleMetadata, reviewEdits)
+       publish(
             session = session,
             envelope = envelope,
             rawJson = rawJson,
@@ -298,7 +473,8 @@ class DesktopIngestionController(
             evidence = previous.evidence,
             notice = "구조화 편집을 저장했습니다. 이전 검증 상태는 무효화되어 다시 확정해야 합니다.",
             error = null,
-            bundleMetadata = previous.bundleMetadata,
+            bundleMetadata = bundleMetadata,
+            reviewEdits = reviewEdits,
         )
     }
 
@@ -326,6 +502,7 @@ class DesktopIngestionController(
                     artifacts = emptyList(),
                     bundleMetadata = null,
                     bundleValidationStatus = null,
+                    reviewEdits = emptyList(),
                     error = null,
                     notice = null,
                 )
@@ -428,6 +605,14 @@ class DesktopIngestionController(
         try {
             val currentState = _state.value
             val currentSession = currentState.session ?: error("검수하려면 JSON을 먼저 가져오세요.")
+            currentState.bundleMetadata?.let { metadata ->
+                require(metadata.pendingRevision == null &&
+                    (currentState.reviewEdits.isEmpty() ||
+                        metadata.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.ARCHIVED)
+                ) {
+                    "Canonical revision archive를 완료해야 검수할 수 있습니다."
+                }
+            }
             val confirmation = useCase.confirm(
                 ingestionId = currentSession.ingestionId,
                 envelope = currentEnvelope(),
@@ -515,6 +700,14 @@ class DesktopIngestionController(
                     "보관 / 재시도를 완료해야 전송할 수 있습니다."
                 }
                 require(metadata.verificationEventRecorded) { "전송 전에 검수 이벤트를 보관해야 합니다." }
+                if (currentState.reviewEdits.isNotEmpty() || metadata.pendingRevision != null) {
+                    require(metadata.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.ARCHIVED) {
+                        "Canonical revision archive를 완료해야 전송할 수 있습니다."
+                    }
+                    require(metadata.pendingRevision == null) {
+                        "실패한 canonical revision archive를 먼저 재시도해야 전송할 수 있습니다."
+                    }
+                }
             }
             if (session.verifiedCanonicalFingerprint != session.canonicalFingerprint) {
                 error("전송하려면 검수한 자료를 먼저 검수 완료 처리하세요.")
@@ -638,6 +831,7 @@ class DesktopIngestionController(
             notice = notice,
             error = null,
             bundleMetadata = record.bundle,
+            reviewEdits = record.reviewEdits,
         )
     }
 
@@ -647,6 +841,7 @@ class DesktopIngestionController(
         canonicalJson: String,
         evidence: List<DesktopEvidenceAttachment>,
         bundleMetadata: DesktopBundleMetadata? = _state.value.bundleMetadata,
+        reviewEdits: List<CanonicalReviewEdit> = _state.value.reviewEdits,
     ) {
         store.saveRecord(
             DesktopSessionRecord(
@@ -655,6 +850,7 @@ class DesktopIngestionController(
                 canonicalJson = canonicalJson,
                 evidence = evidence,
                 bundle = bundleMetadata,
+                reviewEdits = reviewEdits,
             ),
         )
     }
@@ -668,6 +864,7 @@ class DesktopIngestionController(
         notice: String?,
         error: String?,
         bundleMetadata: DesktopBundleMetadata? = _state.value.bundleMetadata,
+        reviewEdits: List<CanonicalReviewEdit> = _state.value.reviewEdits,
     ) {
         _state.value = DesktopUiState(
             rawJson = rawJson,
@@ -681,6 +878,7 @@ class DesktopIngestionController(
             artifacts = artifactStates(envelope, session, localEvidence(evidence)),
             bundleMetadata = bundleMetadata,
             bundleValidationStatus = bundleMetadata?.validationStatus,
+            reviewEdits = reviewEdits,
             error = error,
             notice = notice,
             busy = true,
@@ -763,6 +961,10 @@ class DesktopIngestionController(
         "false" -> "아니오"
         else -> "알 수 없음"
     }
+
+    private fun sha256(value: String): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
 
     private fun failWithSession(message: String) {
         _state.value = _state.value.copy(error = message, notice = null)

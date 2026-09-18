@@ -757,6 +757,13 @@ class ReceiptAppViewModel(
                         )
                         canonicalJsonValidator.archiveBundle(restored)
                     }
+                    restored.bundle?.pendingRevision != null -> {
+                        mutableCanonicalBundleBatchState.value = batch.withItemStatus(
+                            itemId,
+                            AndroidBundleBatchItemStatus.REVIEW_REQUIRED,
+                        )
+                        canonicalJsonValidator.retryCanonicalRevision(restored)
+                    }
                     restored.session?.let { it.verifiedCanonicalFingerprint == it.canonicalFingerprint } == true -> {
                         mutableCanonicalBundleBatchState.value = batch.withItemStatus(
                             itemId,
@@ -783,6 +790,8 @@ class ReceiptAppViewModel(
     }
 
     fun retryCanonicalBundleArchive() = runCanonicalJsonValidator(canonicalJsonValidator::archiveBundle)
+
+    fun retryCanonicalBundleRevision() = runCanonicalJsonValidator(canonicalJsonValidator::retryCanonicalRevision)
 
     private fun loadCanonicalBundleItem(ingestionId: String) {
         val current = mutableCanonicalJsonValidatorState.value
@@ -825,6 +834,9 @@ class ReceiptAppViewModel(
 
     fun updateCanonicalMerchantName(value: String) =
         runCanonicalStructuredEdit { it.updateMerchantName(value) }
+
+    fun updateCanonicalField(fieldPath: String, value: String?) =
+        runCanonicalStructuredEdit { it.updateField(fieldPath, value) }
 
     fun updateCanonicalLineDescription(lineId: String, value: String) =
         runCanonicalStructuredEdit { it.updateLineDescription(lineId, value) }

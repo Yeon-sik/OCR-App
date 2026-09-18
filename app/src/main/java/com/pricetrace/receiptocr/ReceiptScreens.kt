@@ -138,6 +138,10 @@ import com.pricetrace.receiptscanner.storage.PriceObservationQueueStatus
 import com.pricetrace.receiptscanner.storage.ReceiptSession
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
 import com.pricetrace.receiptscanner.review.ReviewDestinationBadge
+import com.pricetrace.receiptscanner.review.CanonicalEditableField
+import com.pricetrace.receiptscanner.review.CanonicalFieldRegistry
+import com.pricetrace.receiptscanner.review.CanonicalFieldType
+import com.pricetrace.receiptscanner.review.CanonicalReviewEdit
 import com.pricetrace.receiptscanner.review.ReviewRow
 import com.pricetrace.receiptscanner.review.ReviewViewModel
 import kotlinx.coroutines.Dispatchers
@@ -176,7 +180,9 @@ fun ReceiptOcrContent(
     onCanonicalJsonSubmit: () -> Unit = {},
     onCanonicalJsonRetry: () -> Unit = {},
     onCanonicalBundleArchiveRetry: () -> Unit = {},
+    onCanonicalBundleRevisionRetry: () -> Unit = {},
     onCanonicalReviewMerchantNameChanged: (String) -> Unit = {},
+    onCanonicalReviewFieldChanged: ((String, String?) -> Unit)? = null,
     onCanonicalReviewLineDescriptionChanged: (String, String) -> Unit = { _, _ -> },
     onCanonicalReviewLineTypeChanged: (String, ReceiptLineType) -> Unit = { _, _ -> },
     onCanonicalReviewFoodServiceRoleChanged: (String, FoodServiceRole) -> Unit = { _, _ -> },
@@ -422,7 +428,9 @@ fun ReceiptOcrContent(
                     onSubmit = onCanonicalJsonSubmit,
                     onRetry = onCanonicalJsonRetry,
                     onArchiveRetry = onCanonicalBundleArchiveRetry,
+                    onRevisionRetry = onCanonicalBundleRevisionRetry,
                     onReviewMerchantNameChanged = onCanonicalReviewMerchantNameChanged,
+                    onReviewFieldChanged = onCanonicalReviewFieldChanged,
                     onReviewLineDescriptionChanged = onCanonicalReviewLineDescriptionChanged,
                     onReviewLineTypeChanged = onCanonicalReviewLineTypeChanged,
                     onReviewFoodServiceRoleChanged = onCanonicalReviewFoodServiceRoleChanged,
@@ -1093,7 +1101,9 @@ private fun CanonicalJsonValidatorScreen(
     onSubmit: () -> Unit,
     onRetry: () -> Unit,
     onArchiveRetry: () -> Unit,
+    onRevisionRetry: () -> Unit,
     onReviewMerchantNameChanged: (String) -> Unit,
+    onReviewFieldChanged: ((String, String?) -> Unit)?,
     onReviewLineDescriptionChanged: (String, String) -> Unit,
     onReviewLineTypeChanged: (String, ReceiptLineType) -> Unit,
     onReviewFoodServiceRoleChanged: (String, FoodServiceRole) -> Unit,
@@ -1107,6 +1117,10 @@ private fun CanonicalJsonValidatorScreen(
     val eligible = plan?.eligible.orEmpty().sortedBy(IngestionProjection::wireValue)
     val disabled = plan?.disabled.orEmpty().sortedBy(IngestionProjection::wireValue)
     val bundleActive = state.bundle != null || state.bundleValidationStatus != null
+    val revisionReady = state.bundle?.let { bundle ->
+        bundle.pendingRevision == null &&
+            (state.reviewEdits.isEmpty() || bundle.revisionArchiveStatus == AndroidCanonicalRevisionArchiveStatus.ARCHIVED)
+    } ?: true
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("canonical_json_validator"),
         contentPadding = PaddingValues(20.dp),
@@ -1165,6 +1179,12 @@ private fun CanonicalJsonValidatorScreen(
                         if (bundle != null) {
                             Text("Evidence archive · ${bundle.archiveStatus.name}")
                             bundle.archiveError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                            if (state.reviewEdits.isNotEmpty() || bundle.pendingRevision != null) {
+                                Text("Canonical revision archive · ${bundle.revisionArchiveStatus.name}")
+                                bundle.revisionArchiveError?.let {
+                                    Text(it, color = MaterialTheme.colorScheme.error)
+                                }
+                            }
                         }
                         if (bundle?.archiveStatus == AndroidEvidenceArchiveStatus.FAILED) {
                             MaterialOutlinedButton(
@@ -1172,6 +1192,15 @@ private fun CanonicalJsonValidatorScreen(
                                 enabled = !state.busy,
                                 modifier = Modifier.fillMaxWidth().testTag("canonical_bundle_archive_retry"),
                             ) { Text("Archive / Retry") }
+                        }
+                        if (bundle?.pendingRevision != null ||
+                            bundle?.revisionArchiveStatus == AndroidCanonicalRevisionArchiveStatus.FAILED
+                        ) {
+                            MaterialOutlinedButton(
+                                onClick = onRevisionRetry,
+                                enabled = !state.busy,
+                                modifier = Modifier.fillMaxWidth().testTag("canonical_revision_archive_retry"),
+                            ) { Text("Revision / Retry") }
                         }
                     }
                 }
@@ -1185,7 +1214,10 @@ private fun CanonicalJsonValidatorScreen(
                     session = state.session,
                     evidence = state.evidence,
                     selectedProjections = state.selectedProjections,
+                    reviewEdits = state.reviewEdits,
+                    fieldErrors = state.reviewFieldErrors,
                     onReviewMerchantNameChanged = onReviewMerchantNameChanged,
+                   onReviewFieldChanged = onReviewFieldChanged,
                     onReviewLineDescriptionChanged = onReviewLineDescriptionChanged,
                     onReviewLineTypeChanged = onReviewLineTypeChanged,
                     onReviewFoodServiceRoleChanged = onReviewFoodServiceRoleChanged,
@@ -1221,7 +1253,8 @@ private fun CanonicalJsonValidatorScreen(
                     onClick = onConfirm,
                     enabled = !state.busy && state.envelope != null && state.session != null &&
                         state.bundleValidationStatus != AndroidBundleValidationStatus.INVALID &&
-                        (state.bundle == null || state.bundle.archiveStatus == AndroidEvidenceArchiveStatus.ARCHIVED),
+                        (state.bundle == null || state.bundle.archiveStatus == AndroidEvidenceArchiveStatus.ARCHIVED) &&
+                        revisionReady,
                     modifier = Modifier.weight(1f).testTag("canonical_json_confirm_button"),
                 ) { Text("검수 확정") }
             }
@@ -1289,14 +1322,16 @@ private fun CanonicalJsonValidatorScreen(
                         enabled = !state.busy && state.session != null && state.selectedProjections.isNotEmpty() &&
                             state.bundleValidationStatus != AndroidBundleValidationStatus.INVALID &&
                             state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint &&
-                            (state.bundle == null || state.bundle.verificationEventRecorded),
+                            (state.bundle == null || state.bundle.verificationEventRecorded) &&
+                            revisionReady,
                         modifier = Modifier.weight(1f).testTag("canonical_json_submit_button"),
                     ) { Text("선택 제출") }
                     MaterialOutlinedButton(
                         onClick = onRetry,
                         enabled = !state.busy && state.session != null && state.selectedProjections.isNotEmpty() &&
                             state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint &&
-                            (state.bundle == null || state.bundle.verificationEventRecorded),
+                            (state.bundle == null || state.bundle.verificationEventRecorded) &&
+                            revisionReady,
                         modifier = Modifier.weight(1f).testTag("canonical_json_retry_button"),
                     ) { Text("재시도") }
                 }
@@ -1422,7 +1457,10 @@ private fun AppReviewTable(
     session: com.pricetrace.receiptscanner.ingestion.IngestionSession?,
     evidence: List<LocalEvidence>,
     selectedProjections: Set<com.pricetrace.receiptscanner.ingestion.IngestionProjection>,
+    reviewEdits: List<CanonicalReviewEdit>,
+    fieldErrors: Map<String, String>,
     onReviewMerchantNameChanged: (String) -> Unit,
+    onReviewFieldChanged: ((String, String?) -> Unit)?,
     onReviewLineDescriptionChanged: (String, String) -> Unit,
     onReviewLineTypeChanged: (String, ReceiptLineType) -> Unit,
     onReviewFoodServiceRoleChanged: (String, FoodServiceRole) -> Unit,
@@ -1436,26 +1474,154 @@ private fun AppReviewTable(
         Text("JSON을 파싱하면 인식 정보와 전송 계획을 여기에서 확인할 수 있습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         return
     }
+    val legacyLinePath = Regex("""receipt\.line_items\[([^]]+)]\.(.+)""")
+    val fieldChanged: (String, String?) -> Unit = onReviewFieldChanged ?: { path: String, value: String? ->
+        when {
+            path == "receipt.merchant.name" -> onReviewMerchantNameChanged(value.orEmpty())
+            else -> legacyLinePath.matchEntire(path)?.let { match ->
+                val lineId = match.groupValues[1]
+                when (match.groupValues[2]) {
+                    "description" -> onReviewLineDescriptionChanged(lineId, value.orEmpty())
+                    "type" -> ReceiptLineType.entries.firstOrNull { it.wireValue == value }
+                        ?.let { onReviewLineTypeChanged(lineId, it) }
+                    "food_service.role" -> FoodServiceRole.entries.firstOrNull { it.wireValue == value }
+                        ?.let { onReviewFoodServiceRoleChanged(lineId, it) }
+                    "food_service.applies_to_line_id" -> onReviewOptionParentChanged(lineId, value)
+                    "food_service.benefit_kind" -> onReviewEventChanged(
+                        lineId,
+                        value == ReceiptBenefitKind.REVIEW_EVENT.wireValue,
+                    )
+                }
+            }
+        }
+    }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("인식 정보 및 전송 계획 · ${model.schema}", style = MaterialTheme.typography.titleMedium)
-        if (
-            envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA &&
-            envelope.receipt != null
-        ) {
-            CanonicalStructuredReviewEditor(
+        if (CanonicalFieldRegistry.fields(envelope).isNotEmpty()) {
+            CanonicalTypedReviewEditor(
                 envelope = envelope,
-                onMerchantNameChanged = onReviewMerchantNameChanged,
-                onLineDescriptionChanged = onReviewLineDescriptionChanged,
-                onLineTypeChanged = onReviewLineTypeChanged,
-                onFoodServiceRoleChanged = onReviewFoodServiceRoleChanged,
-                onOptionParentChanged = onReviewOptionParentChanged,
-                onReviewEventChanged = onReviewEventChanged,
+                edits = reviewEdits,
+                fieldErrors = fieldErrors,
+                onFieldChanged = fieldChanged,
                 onUndo = onReviewUndo,
                 onRedo = onReviewRedo,
             )
         }
         if (model.rows.isEmpty()) Text("표시할 인식 정보가 없습니다.")
         else model.rows.forEach { row -> AppReviewTableRow(row) }
+    }
+}
+
+@Composable
+private fun CanonicalTypedReviewEditor(
+    envelope: com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope,
+    edits: List<CanonicalReviewEdit>,
+    fieldErrors: Map<String, String>,
+    onFieldChanged: (String, String?) -> Unit,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
+) {
+    val fields = CanonicalFieldRegistry.fields(envelope)
+    Card(Modifier.fillMaxWidth().testTag("canonical_typed_review_editor")) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("schema-aware 구조화 편집", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = onUndo) { Text("실행 취소") }
+                    TextButton(onClick = onRedo) { Text("다시 실행") }
+                }
+            }
+            Text(
+                "허용된 typed field만 편집됩니다. source/evidence/식별자/전송 대상은 변경할 수 없습니다.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            fields.forEach { field ->
+                CanonicalTypedReviewField(
+                    field = field,
+                    modified = CanonicalFieldRegistry.isModified(field, edits),
+                    initialValue = edits.firstOrNull { it.fieldPath == field.path }?.previousValue,
+                    error = fieldErrors[field.path],
+                    onApply = { value -> onFieldChanged(field.path, value) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CanonicalTypedReviewField(
+    field: CanonicalEditableField,
+    modified: Boolean,
+    initialValue: String?,
+    error: String?,
+    onApply: (String?) -> Unit,
+) {
+    var draft by remember(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
+    val fieldTag = if (field.path == "receipt.merchant.name") {
+        "canonical_review_merchant_name"
+    } else {
+        "canonical_review_field_" + field.path.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+    }
+    Column(Modifier.fillMaxWidth().testTag(fieldTag), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(field.label, style = MaterialTheme.typography.labelMedium)
+            Text(
+                field.type.wireValue + if (modified) " · 수정됨" else "",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (modified) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (modified) {
+            Text(
+                "최초값: ${initialValue ?: "없음"}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (field.type == CanonicalFieldType.ENUM) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (field.nullable) {
+                    if (field.value == null) MaterialButton(onClick = { onApply(null) }) { Text("없음") }
+                    else MaterialOutlinedButton(onClick = { onApply(null) }) { Text("없음") }
+                }
+                field.enumValues.forEach { option ->
+                    if (field.value == option) MaterialButton(onClick = { onApply(option) }) { Text(option) }
+                    else MaterialOutlinedButton(onClick = { onApply(option) }) { Text(option) }
+                }
+            }
+        } else {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    label = { Text(field.type.wireValue) },
+                    singleLine = field.type != CanonicalFieldType.DATETIME,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = when (field.type) {
+                            CanonicalFieldType.INTEGER -> KeyboardType.Number
+                            CanonicalFieldType.DECIMAL -> KeyboardType.Decimal
+                            else -> KeyboardType.Text
+                        },
+                    ),
+                    modifier = Modifier.weight(1f),
+                )
+                MaterialOutlinedButton(
+                    onClick = { onApply(draft.takeIf(String::isNotBlank)) },
+                    modifier = Modifier.align(Alignment.CenterVertically),
+                ) { Text("적용") }
+                if (field.nullable) {
+                    TextButton(
+                        onClick = { draft = ""; onApply(null) },
+                        modifier = Modifier.align(Alignment.CenterVertically),
+                    ) { Text("지움") }
+                }
+            }
+        }
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
     }
 }
 

@@ -1,5 +1,9 @@
 package com.pricetrace.receiptscanner.ingestion
 
+import com.pricetrace.receiptscanner.review.CanonicalFieldType
+import com.pricetrace.receiptscanner.review.CanonicalReviewEdit
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -214,6 +218,47 @@ class EvidenceSupabaseArchivePortTest {
         assertTrue(transport.requests.single { "/storage/v1/object/" in it.url }.url.endsWith("/${item.sha256}.jpg"))
         assertEquals("new-access", transport.requests.first { "/rest/v1/canonical_artifacts" in it.url && it.headers["Authorization"]?.contains("new-access") == true }
             .headers["Authorization"]?.substringAfter("Bearer "))
+    }
+
+    @Test
+    fun canonicalRevisionArchivesSnapshotAndTypedEditValues() = runTest {
+        val canonicalJson = "{\"schema_version\":\"yeonsik-ocr.v4\"}"
+        val edit = CanonicalReviewEdit(
+            id = "edit-1",
+            fieldPath = "purchase_records[purchase-1].totals.grand_total_amount_krw",
+            previousValue = "100.00",
+            newValue = "120.00",
+            provenanceJson = "{\"user_modified\":true}",
+            editedAt = "2026-09-16T12:00:00+09:00",
+            valueType = CanonicalFieldType.DECIMAL,
+        )
+        val transport = ScriptedTransport(
+            mutableListOf(
+                EvidenceHttpResponse(201, "[{\"id\":\"revision-1\",\"revision_seq\":1}]"),
+                EvidenceHttpResponse(201, "[{\"id\":\"event-1\"}]"),
+            ),
+        )
+        val port = EvidenceSupabaseArchivePort(SignedInStore(), transport)
+
+        val result = port.archiveCanonicalRevision(
+            CanonicalRevisionArchiveRequest(
+                canonicalArtifactId = "artifact-1",
+                revisionSeq = 1,
+                canonicalSha256 = digest(canonicalJson.toByteArray()),
+                canonicalJson = canonicalJson,
+                schemaVersion = "yeonsik-ocr.v4",
+                mode = "purchase",
+                edits = listOf(edit),
+            ),
+        )
+
+        assertEquals(CanonicalRevisionArchiveResult.Success("revision-1", 1), result)
+        val revisionBody = Json.parseToJsonElement(transport.requests[0].body!!.toString(Charsets.UTF_8)).jsonObject
+        assertEquals("artifact-1", revisionBody["canonical_artifact_id"]?.toString()?.trim('"'))
+        val eventBody = Json.parseToJsonElement(transport.requests[1].body!!.toString(Charsets.UTF_8)).jsonObject
+        assertEquals("100.0", eventBody["previous_value"]?.toString())
+        assertEquals("120.0", eventBody["new_value"]?.toString())
+        assertEquals("{\"user_modified\":true}", eventBody["provenance"]?.toString())
     }
 
     private suspend fun archiveWithUploadResponse(response: EvidenceHttpResponse): Pair<EvidenceArchiveResult, ScriptedTransport> {

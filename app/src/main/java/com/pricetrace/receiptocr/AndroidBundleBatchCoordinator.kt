@@ -192,6 +192,7 @@ class AndroidBundleBatchCoordinator(
             state.duplicateOfIngestionId != null -> AndroidBundleBatchItemStatus.DUPLICATE
             session == null -> AndroidBundleBatchItemStatus.FAILED
             state.bundle?.archiveStatus == AndroidEvidenceArchiveStatus.FAILED -> AndroidBundleBatchItemStatus.FAILED
+            state.bundle?.pendingRevision != null -> AndroidBundleBatchItemStatus.FAILED
             allUploaded -> AndroidBundleBatchItemStatus.COMPLETED
             projectionFailure -> AndroidBundleBatchItemStatus.FAILED
             verified && (state.bundle == null ||
@@ -211,7 +212,7 @@ class AndroidBundleBatchCoordinator(
                 AndroidBundleBatchProjectionSummary(it.projection, it.status, it.lastError)
             },
             duplicateOfIngestionId = state.duplicateOfIngestionId,
-            error = state.error ?: state.bundle?.archiveError ?: activeProjections
+            error = state.error ?: state.bundle?.archiveError ?: state.bundle?.revisionArchiveError ?: activeProjections
                 .firstOrNull { it.lastError != null }
                 ?.lastError,
         )
@@ -236,6 +237,7 @@ internal fun AndroidBundleBatchItem.fromRecovery(
         session == null -> AndroidBundleBatchItemStatus.FAILED
         recovery.bundle.archiveStatus == AndroidEvidenceArchiveStatus.ARCHIVING ||
             recovery.bundle.archiveStatus == AndroidEvidenceArchiveStatus.FAILED -> AndroidBundleBatchItemStatus.FAILED
+        recovery.bundle.pendingRevision != null -> AndroidBundleBatchItemStatus.FAILED
         allUploaded -> AndroidBundleBatchItemStatus.COMPLETED
         projectionFailure -> AndroidBundleBatchItemStatus.FAILED
         verified && recovery.bundle.archiveStatus == AndroidEvidenceArchiveStatus.ARCHIVED &&
@@ -255,7 +257,8 @@ internal fun AndroidBundleBatchItem.fromRecovery(
         projectionSummary = activeProjections.map {
             AndroidBundleBatchProjectionSummary(it.projection, it.status, it.lastError)
         },
-        error = recovery.bundle.archiveError ?: activeProjections.firstOrNull { it.lastError != null }?.lastError,
+        error = recovery.bundle.archiveError ?: recovery.bundle.revisionArchiveError
+            ?: activeProjections.firstOrNull { it.lastError != null }?.lastError,
     )
 }
 

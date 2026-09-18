@@ -49,6 +49,10 @@ import com.pricetrace.receiptscanner.domain.FoodServiceRole
 import com.pricetrace.receiptscanner.domain.ReceiptBenefitKind
 import com.pricetrace.receiptscanner.domain.ReceiptLineType
 import com.pricetrace.receiptscanner.review.CanonicalReviewController
+import com.pricetrace.receiptscanner.review.CanonicalEditableField
+import com.pricetrace.receiptscanner.review.CanonicalFieldRegistry
+import com.pricetrace.receiptscanner.review.CanonicalFieldType
+import com.pricetrace.receiptscanner.review.CanonicalReviewEdit
 import com.pricetrace.receiptscanner.review.ReviewViewModel
 import com.pricetrace.receiptscanner.review.ReviewRow
 import kotlinx.coroutines.Dispatchers
@@ -93,6 +97,10 @@ private fun YeonsikIngestionConsole(
         .toSet()
     val effectiveSelectedProjections = selectedProjections?.intersect(activeProjections) ?: activeProjections
     val bundleActive = state.bundleMetadata != null || state.bundleValidationStatus != null
+    val revisionReady = state.bundleMetadata?.let { metadata ->
+        metadata.pendingRevision == null &&
+            (state.reviewEdits.isEmpty() || metadata.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.ARCHIVED)
+    } ?: true
     val anyBusy = state.busy || batchState.busy
     LaunchedEffect(state.ingestionId) {
         selectedProjections = null
@@ -218,6 +226,26 @@ private fun YeonsikIngestionConsole(
                             },
                         ) { Text("보관 / 재시도") }
                     }
+                    if (state.bundleMetadata?.pendingRevision != null ||
+                        state.bundleMetadata?.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.FAILED
+                    ) {
+                        Text(
+                            "Canonical revision archive · ${state.bundleMetadata?.revisionArchiveStatus?.name}",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                        state.bundleMetadata?.revisionArchiveError?.let {
+                            Text(it, color = MaterialTheme.colorScheme.error)
+                        }
+                        OutlinedButton(
+                            enabled = !state.busy,
+                            onClick = {
+                                launchIo {
+                                    controller.retryCanonicalRevision()
+                                    batchCoordinator.syncActiveItem()
+                                }
+                            },
+                        ) { Text("Revision / Retry") }
+                    }
                     ReviewCard(state)
                     ProjectionCard(
                         state = state,
@@ -248,7 +276,8 @@ private fun YeonsikIngestionConsole(
                         Button(
                             enabled = !state.busy && state.session != null &&
                                 (state.bundleMetadata == null ||
-                                    state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED),
+                                    state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED) &&
+                                revisionReady,
                             onClick = {
                                 launchIo {
                                     controller.verify(
@@ -264,7 +293,8 @@ private fun YeonsikIngestionConsole(
                                 state.session?.verifiedCanonicalFingerprint == state.session?.canonicalFingerprint &&
                                 (state.bundleMetadata == null ||
                                     state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED &&
-                                        state.bundleMetadata?.verificationEventRecorded == true),
+                                        state.bundleMetadata?.verificationEventRecorded == true) &&
+                                revisionReady,
                             onClick = {
                                 launchIo {
                                     controller.submit(effectiveSelectedProjections)
@@ -314,15 +344,111 @@ private fun DesktopReviewTable(
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("인식 정보 및 전송 계획 · ${model.schema}", style = MaterialTheme.typography.titleMedium)
-        if (
-            state.envelope.schemaVersion == "yeonsik-ocr.v2" &&
-            state.envelope.receipt != null
-        ) {
-            DesktopStructuredReviewEditor(state.envelope, onEdit)
+        if (CanonicalFieldRegistry.fields(state.envelope).isNotEmpty()) {
+            DesktopTypedReviewEditor(state.envelope, state.reviewEdits, state.reviewFieldErrors, onEdit)
         }
         ReviewTableHeader()
         if (model.rows.isEmpty()) Text("표시할 인식 정보가 없습니다.")
         else model.rows.forEach { row -> DesktopReviewTableRow(row) }
+    }
+}
+
+@Composable
+private fun DesktopTypedReviewEditor(
+    envelope: com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope,
+    edits: List<CanonicalReviewEdit>,
+    fieldErrors: Map<String, String>,
+    onEdit: (((CanonicalReviewController) -> Boolean) -> Unit),
+) {
+    val fields = CanonicalFieldRegistry.fields(envelope)
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("schema-aware 구조화 편집", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = { onEdit { it.undo() } }) { Text("실행 취소") }
+                    TextButton(onClick = { onEdit { it.redo() } }) { Text("다시 실행") }
+                }
+            }
+            Text(
+                "허용된 typed field만 편집됩니다. source/evidence/식별자/전송 대상은 변경할 수 없습니다.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            fields.forEach { field ->
+                DesktopTypedReviewField(
+                    field = field,
+                    modified = CanonicalFieldRegistry.isModified(field, edits),
+                    initialValue = edits.firstOrNull { it.fieldPath == field.path }?.previousValue,
+                    error = fieldErrors[field.path],
+                    onApply = { value -> onEdit { it.updateField(field.path, value) } },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DesktopTypedReviewField(
+    field: CanonicalEditableField,
+    modified: Boolean,
+    initialValue: String?,
+    error: String?,
+    onApply: (String?) -> Unit,
+) {
+    var draft by remember(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(field.label, style = MaterialTheme.typography.labelMedium)
+            Text(
+                field.type.wireValue + if (modified) " · 수정됨" else "",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (modified) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (modified) {
+            Text(
+                "최초값: ${initialValue ?: "없음"}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (field.type == CanonicalFieldType.ENUM) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (field.nullable) {
+                    if (field.value == null) Button(onClick = { onApply(null) }) { Text("없음") }
+                    else OutlinedButton(onClick = { onApply(null) }) { Text("없음") }
+                }
+                field.enumValues.forEach { option ->
+                    if (field.value == option) Button(onClick = { onApply(option) }) { Text(option) }
+                    else OutlinedButton(onClick = { onApply(option) }) { Text(option) }
+                }
+            }
+        } else {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    label = { Text(field.type.wireValue) },
+                    modifier = Modifier.weight(1f),
+                    singleLine = field.type != CanonicalFieldType.DATETIME,
+                )
+                OutlinedButton(
+                    onClick = { onApply(draft.takeIf(String::isNotBlank)) },
+                    modifier = Modifier.align(Alignment.CenterVertically),
+                ) { Text("적용") }
+                if (field.nullable) {
+                    TextButton(
+                        onClick = { draft = ""; onApply(null) },
+                        modifier = Modifier.align(Alignment.CenterVertically),
+                    ) { Text("지움") }
+                }
+            }
+        }
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
     }
 }
 

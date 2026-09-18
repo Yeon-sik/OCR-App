@@ -16,11 +16,14 @@ import com.pricetrace.receiptscanner.ingestion.EvidenceArchivePort
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveRequest
 import com.pricetrace.receiptscanner.ingestion.EvidenceArchiveResult
 import com.pricetrace.receiptscanner.ingestion.EvidenceVerificationEventResult
+import com.pricetrace.receiptscanner.ingestion.CanonicalRevisionArchiveRequest
+import com.pricetrace.receiptscanner.ingestion.CanonicalRevisionArchiveResult
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundle
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleMaterializer
 import com.pricetrace.receiptscanner.ingestion.YeonsikBundleReader
 import com.pricetrace.receiptscanner.review.CanonicalReviewController
+import com.pricetrace.receiptscanner.review.CanonicalReviewEdit
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -45,6 +48,8 @@ data class AndroidCanonicalJsonValidatorState(
     val duplicateOfIngestionId: String? = null,
     /** Keeps a rejected bundle visible even when no trusted manifest metadata exists. */
     val bundleValidationStatus: AndroidBundleValidationStatus? = null,
+    val reviewEdits: List<CanonicalReviewEdit> = emptyList(),
+    val reviewFieldErrors: Map<String, String> = emptyMap(),
     val busy: Boolean = false,
     val error: String? = null,
     val notice: String? = null,
@@ -52,6 +57,7 @@ data class AndroidCanonicalJsonValidatorState(
 
 enum class AndroidBundleValidationStatus { VALID, INVALID }
 enum class AndroidEvidenceArchiveStatus { NOT_STARTED, ARCHIVING, ARCHIVED, FAILED }
+enum class AndroidCanonicalRevisionArchiveStatus { NOT_STARTED, ARCHIVING, ARCHIVED, FAILED }
 
 data class AndroidBundleState(
     val sourceName: String,
@@ -63,6 +69,10 @@ data class AndroidBundleState(
     val archiveCheckpoint: EvidenceArchiveCheckpoint = EvidenceArchiveCheckpoint(),
     val verificationEventRecorded: Boolean = false,
     val archiveError: String? = null,
+    val revisionArchiveStatus: AndroidCanonicalRevisionArchiveStatus = AndroidCanonicalRevisionArchiveStatus.NOT_STARTED,
+    val revisionArchiveError: String? = null,
+    /** Snapshot waiting for a retry after an Evidence revision archive failure. */
+    val pendingRevision: CanonicalRevisionArchiveRequest? = null,
 ) {
     val manifestSha256: String
         get() = MessageDigest.getInstance("SHA-256")
@@ -134,6 +144,7 @@ class AndroidCanonicalJsonValidator(
                         bundle = null,
                         duplicateOfIngestionId = null,
                         bundleValidationStatus = AndroidBundleValidationStatus.INVALID,
+                        reviewEdits = emptyList(),
                         error = result.error?.detail ?: result.issues.joinToString(", "),
                         notice = null,
                     )
@@ -175,6 +186,7 @@ class AndroidCanonicalJsonValidator(
                         ),
                         duplicateOfIngestionId = null,
                         bundleValidationStatus = AndroidBundleValidationStatus.VALID,
+                        reviewEdits = emptyList(),
                         error = null,
                         notice = "Bundle 검증 및 evidence 자동 binding 완료. archive를 시작합니다.",
                     )
@@ -198,6 +210,7 @@ class AndroidCanonicalJsonValidator(
                 bundle = null,
                 duplicateOfIngestionId = null,
                 bundleValidationStatus = AndroidBundleValidationStatus.INVALID,
+                reviewEdits = emptyList(),
                 error = "Bundle invalid: ${error.message ?: error.javaClass.simpleName}",
                 notice = null,
             )
@@ -282,6 +295,7 @@ class AndroidCanonicalJsonValidator(
             bundle = null,
             duplicateOfIngestionId = null,
             bundleValidationStatus = null,
+            reviewEdits = emptyList(),
         ) else previous
         val localDocumentId = if (startNewIngestion) newLocalDocumentId() else base.localDocumentId ?: newLocalDocumentId()
         val ingestionId = if (startNewIngestion) newIngestionId() else base.ingestionId ?: newIngestionId()
@@ -328,52 +342,245 @@ class AndroidCanonicalJsonValidator(
         mutation: (CanonicalReviewController) -> Boolean,
     ): AndroidCanonicalJsonValidatorState {
         require(state.bundleValidationStatus != AndroidBundleValidationStatus.INVALID) { "Bundle is invalid." }
+        require(state.bundle?.pendingRevision == null) {
+            "Canonical revision archive failed; retry the preserved revision before making another edit."
+        }
         val envelope = requireNotNull(state.envelope) { "Import JSON before editing." }
         val ingestionId = requireNotNull(state.ingestionId) { "Ingestion id is missing." }
         val controller = structuredReviewController
             ?.takeIf { it.state.value.envelope == envelope }
-            ?: CanonicalReviewController(envelope)
+            ?: CanonicalReviewController(envelope, initialEdits = state.reviewEdits)
         structuredReviewController = controller
         if (!mutation(controller)) {
-            return state.copy(error = controller.state.value.error ?: "구조화 편집을 저장하지 못했습니다.", notice = null)
-        }
-        val edited = controller.state.value.envelope
-        return when (val result = useCase.reviseCanonicalDraft(ingestionId, edited)) {
-            is IngestionStartResult.Failure -> state.copy(
-                error = result.issues.joinToString(", "),
+            return state.copy(
+                reviewFieldErrors = controller.state.value.fieldErrors,
+                error = controller.state.value.error ?: "구조화 편집을 저장하지 못했습니다.",
                 notice = null,
             )
-            is IngestionStartResult.Success -> {
-                val plan = useCase.plan(edited)
-                val canonical = YeonsikOcrEnvelopeCodec.encodePersisted(edited)
-                state.copy(
-                    // A bundle's raw JSON is the manifest-bound immutable artifact; structured
-                    // edits live in canonicalJson while evidence bytes/bindings remain unchanged.
-                    rawJson = if (state.bundle == null) canonical else state.rawJson,
-                    canonicalJson = canonical,
-                    envelope = edited,
-                    session = result.session,
-                    plan = plan,
-                    selectedProjections = state.selectedProjections.intersect(plan.eligible),
-                    error = null,
-                    notice = "구조화 편집을 저장했습니다. 이전 검증 상태는 무효화되어 다시 확정해야 합니다.",
-                ).also(::persistBundleState)
-            }
-            is IngestionStartResult.Duplicate -> {
-                val plan = useCase.plan(edited)
-                val canonical = YeonsikOcrEnvelopeCodec.encodePersisted(edited)
-                state.copy(
-                    rawJson = if (state.bundle == null) canonical else state.rawJson,
-                    canonicalJson = canonical,
-                    envelope = edited,
-                    session = result.session,
-                    plan = plan,
-                    selectedProjections = state.selectedProjections.intersect(plan.eligible),
-                    error = null,
-                    notice = "구조화 편집을 저장했습니다. 이전 검증 상태는 무효화되어 다시 확정해야 합니다.",
-                ).also(::persistBundleState)
-            }
         }
+        val edited = controller.state.value.envelope
+        val editedJson = YeonsikOcrEnvelopeCodec.encodePersisted(edited)
+        val newEdits = controller.state.value.edits.drop(state.reviewEdits.size)
+        if (newEdits.isEmpty()) {
+            return state.copy(reviewFieldErrors = emptyMap(), error = null, notice = "변경된 canonical 필드가 없습니다.")
+        }
+
+        val bundle = state.bundle
+        if (bundle != null) {
+            if (bundle.archiveStatus != AndroidEvidenceArchiveStatus.ARCHIVED) {
+                structuredReviewController = null
+                return state.copy(
+                    error = "Evidence archive가 완료된 뒤에만 정본 revision을 저장할 수 있습니다.",
+                    notice = "Archive / Retry를 먼저 완료하세요.",
+                )
+            }
+            val artifactId = bundle.archiveCheckpoint.canonicalArtifactId
+                ?: return state.copy(error = "Evidence canonical artifact id가 없습니다.", notice = null)
+            val revisionSeq = bundle.archiveCheckpoint.latestRevisionSeq + 1L
+            val request = CanonicalRevisionArchiveRequest(
+                canonicalArtifactId = artifactId,
+                revisionSeq = revisionSeq,
+                parentRevisionId = bundle.archiveCheckpoint.latestRevisionId,
+                canonicalSha256 = sha256(editedJson),
+                canonicalJson = editedJson,
+                schemaVersion = edited.schemaVersion,
+                mode = edited.mode.wireValue,
+                validationStatus = "valid",
+                validationIssues = emptyList(),
+                edits = newEdits,
+            )
+            return archiveAndMaterializeRevision(
+                state = state,
+                request = request,
+                edited = edited,
+                allEdits = controller.state.value.edits,
+            )
+        }
+
+        return materializeRevision(
+            state = state,
+            startResult = useCase.reviseCanonicalDraft(ingestionId, edited),
+            edited = edited,
+            reviewEdits = controller.state.value.edits,
+            bundle = null,
+        )
+    }
+
+    /** Retries the exact failed revision snapshot; it never asks the user to retype the edit. */
+    suspend fun retryCanonicalRevision(
+        state: AndroidCanonicalJsonValidatorState,
+    ): AndroidCanonicalJsonValidatorState {
+        require(state.bundleValidationStatus != AndroidBundleValidationStatus.INVALID) { "Bundle is invalid." }
+        val bundle = requireNotNull(state.bundle) { "Canonical revisions are only archived for bundles." }
+        val request = requireNotNull(bundle.pendingRevision) {
+            "There is no pending canonical revision to retry."
+        }
+        val artifactId = requireNotNull(bundle.archiveCheckpoint.canonicalArtifactId) {
+            "Evidence canonical artifact id is missing."
+        }
+        require(request.canonicalArtifactId == artifactId) { "Pending revision belongs to a different artifact." }
+        require(request.canonicalSha256 == sha256(request.canonicalJson)) {
+            "Pending revision hash does not match its canonical JSON."
+        }
+        val localDocumentId = requireNotNull(state.localDocumentId) { "Local document id is missing." }
+        val edited = useCase.strictDecode(
+            request.canonicalJson,
+            localDocumentId,
+            preservePersistedVerification = true,
+        )
+        require(edited.schemaVersion == request.schemaVersion) { "Pending revision schema does not match." }
+        require(edited.mode.wireValue == request.mode) { "Pending revision mode does not match." }
+        return archiveAndMaterializeRevision(
+            state = state,
+            request = request,
+            edited = edited,
+            allEdits = state.reviewEdits + request.edits,
+        )
+    }
+
+    private suspend fun archiveAndMaterializeRevision(
+        state: AndroidCanonicalJsonValidatorState,
+        request: CanonicalRevisionArchiveRequest,
+        edited: YeonsikOcrEnvelope,
+        allEdits: List<CanonicalReviewEdit>,
+    ): AndroidCanonicalJsonValidatorState {
+        val bundle = requireNotNull(state.bundle)
+        val archiving = bundle.copy(
+            revisionArchiveStatus = AndroidCanonicalRevisionArchiveStatus.ARCHIVING,
+            revisionArchiveError = null,
+            pendingRevision = request,
+        )
+        val archivingState = state.copy(
+            bundle = archiving,
+            error = null,
+            notice = "정본 revision을 Evidence에 보관하는 중입니다.",
+        )
+        persistBundleState(archivingState)
+        val archive = runCatching {
+            requireNotNull(evidenceArchivePort) { "Evidence archive is not configured." }
+                .archiveCanonicalRevision(request)
+        }.getOrElse { error ->
+            CanonicalRevisionArchiveResult.Failure(error.message ?: error.javaClass.simpleName, revisionSeq = request.revisionSeq)
+        }
+        if (archive is CanonicalRevisionArchiveResult.Failure) {
+            structuredReviewController = null
+            return state.copy(
+                bundle = archiving.copy(
+                    revisionArchiveStatus = AndroidCanonicalRevisionArchiveStatus.FAILED,
+                    revisionArchiveError = archive.issue,
+                    pendingRevision = request,
+                ),
+                error = "Canonical revision archive 실패: ${archive.issue}",
+                notice = "수정 snapshot은 보존되었습니다. Revision / Retry로 다시 시도하세요.",
+            ).also(::persistBundleState)
+        }
+        val success = archive as? CanonicalRevisionArchiveResult.Success
+            ?: error("Evidence returned an unknown canonical revision result.")
+        require(success.revisionSeq == request.revisionSeq) { "Evidence returned a different canonical revision sequence." }
+        val archived = bundle.copy(
+            revisionArchiveStatus = AndroidCanonicalRevisionArchiveStatus.ARCHIVED,
+            revisionArchiveError = null,
+            pendingRevision = null,
+            archiveCheckpoint = bundle.archiveCheckpoint.copy(
+                latestRevisionId = success.revisionId,
+                latestRevisionSeq = success.revisionSeq,
+            ),
+        )
+        return try {
+            val ingestionId = requireNotNull(state.ingestionId) { "Ingestion id is missing." }
+            val result = useCase.reviseCanonicalDraft(ingestionId, edited)
+            when (result) {
+                is IngestionStartResult.Failure -> state.copy(
+                    bundle = archived.copy(
+                        revisionArchiveStatus = AndroidCanonicalRevisionArchiveStatus.FAILED,
+                        revisionArchiveError = result.issues.joinToString(", "),
+                        pendingRevision = request,
+                    ),
+                    error = result.issues.joinToString(", "),
+                    notice = "Revision은 보관되었지만 local materialization이 실패했습니다. Retry로 재개하세요.",
+                ).also(::persistBundleState)
+            is IngestionStartResult.Success -> materializeStartedRevision(
+                state,
+                result.session,
+                edited,
+                allEdits,
+                archived,
+            )
+            is IngestionStartResult.Duplicate -> materializeStartedRevision(
+                state,
+                result.session,
+                edited,
+                allEdits,
+                archived,
+            )
+            }
+        } catch (error: Exception) {
+            state.copy(
+                bundle = archived.copy(
+                    revisionArchiveStatus = AndroidCanonicalRevisionArchiveStatus.FAILED,
+                    revisionArchiveError = error.message ?: error.javaClass.simpleName,
+                    pendingRevision = request,
+                ),
+                error = error.message ?: error.javaClass.simpleName,
+                notice = "Revision은 보관되었지만 local materialization이 실패했습니다. Retry로 재개하세요.",
+            ).also(::persistBundleState)
+        }
+    }
+
+    private fun materializeRevision(
+        state: AndroidCanonicalJsonValidatorState,
+        startResult: IngestionStartResult,
+        edited: YeonsikOcrEnvelope,
+        reviewEdits: List<CanonicalReviewEdit>,
+        bundle: AndroidBundleState?,
+    ): AndroidCanonicalJsonValidatorState {
+        return when (startResult) {
+            is IngestionStartResult.Failure -> state.copy(
+                bundle = bundle,
+                error = startResult.issues.joinToString(", "),
+                notice = null,
+            )
+            is IngestionStartResult.Success -> materializeStartedRevision(
+                state,
+                startResult.session,
+                edited,
+                reviewEdits,
+                bundle,
+            )
+            is IngestionStartResult.Duplicate -> materializeStartedRevision(
+                state,
+                startResult.session,
+                edited,
+                reviewEdits,
+                bundle,
+            )
+        }
+    }
+
+    private fun materializeStartedRevision(
+        state: AndroidCanonicalJsonValidatorState,
+        session: IngestionSession,
+        edited: YeonsikOcrEnvelope,
+        reviewEdits: List<CanonicalReviewEdit>,
+        bundle: AndroidBundleState?,
+    ): AndroidCanonicalJsonValidatorState {
+        val editedJson = YeonsikOcrEnvelopeCodec.encodePersisted(edited)
+        val plan = useCase.plan(edited)
+        return state.copy(
+            // A bundle's raw JSON is the manifest-bound immutable artifact; structured
+            // edits live in canonicalJson while evidence bytes/bindings remain unchanged.
+            rawJson = if (state.bundle == null) editedJson else state.rawJson,
+            canonicalJson = editedJson,
+            envelope = edited,
+            session = session,
+            plan = plan,
+            selectedProjections = state.selectedProjections.intersect(plan.eligible),
+            reviewEdits = reviewEdits,
+            reviewFieldErrors = emptyMap(),
+            bundle = bundle,
+            error = null,
+            notice = "구조화 편집을 저장했습니다. 이전 검증 상태는 무효화되어 다시 확정해야 합니다.",
+        ).also(::persistBundleState)
     }
 
     /** Restores durable bundle metadata and re-validates all paths before exposing the bundle again. */
@@ -411,12 +618,17 @@ class AndroidCanonicalJsonValidator(
             preservePersistedVerification = true,
         )
         val plan = useCase.plan(envelope)
-        val recoveredBundle = if (recovery.bundle.archiveStatus == AndroidEvidenceArchiveStatus.ARCHIVING) {
-            recovery.bundle.copy(
+        val recoveredBundle = when {
+            recovery.bundle.archiveStatus == AndroidEvidenceArchiveStatus.ARCHIVING -> recovery.bundle.copy(
                 archiveStatus = AndroidEvidenceArchiveStatus.FAILED,
                 archiveError = "Archive interrupted; retry is available after process recovery.",
             )
-        } else recovery.bundle
+            recovery.bundle.revisionArchiveStatus == AndroidCanonicalRevisionArchiveStatus.ARCHIVING -> recovery.bundle.copy(
+                revisionArchiveStatus = AndroidCanonicalRevisionArchiveStatus.FAILED,
+                revisionArchiveError = "Revision archive interrupted; retry is available after process recovery.",
+            )
+            else -> recovery.bundle
+        }
         val restored = AndroidCanonicalJsonValidatorState(
             rawJson = recovery.rawJson,
             canonicalJson = recovery.canonicalJson,
@@ -429,10 +641,13 @@ class AndroidCanonicalJsonValidator(
             selectedProjections = recovery.selectedProjections.intersect(plan.eligible),
             verificationBasis = recovery.verificationBasis,
             bundle = recoveredBundle,
+            reviewEdits = recovery.reviewEdits,
             duplicateOfIngestionId = null,
             bundleValidationStatus = recoveredBundle.validationStatus,
             notice = if (recoveredBundle.archiveStatus == AndroidEvidenceArchiveStatus.FAILED) {
                 "저장된 bundle을 복구했습니다. Archive / Retry로 중단된 작업을 재개하세요."
+            } else if (recoveredBundle.revisionArchiveStatus == AndroidCanonicalRevisionArchiveStatus.FAILED) {
+                "저장된 bundle을 복구했습니다. Revision / Retry로 중단된 편집 보관을 재개하세요."
             } else "저장된 bundle 상태를 복구했습니다.",
         )
         persistBundleState(restored)
@@ -453,6 +668,7 @@ class AndroidCanonicalJsonValidator(
                 selectedProjections = state.selectedProjections,
                 verificationBasis = state.verificationBasis,
                 bundle = bundle,
+                reviewEdits = state.reviewEdits,
             ),
         )) { "Android bundle recovery state could not be persisted" }
     }
@@ -461,6 +677,13 @@ class AndroidCanonicalJsonValidator(
         state: AndroidCanonicalJsonValidatorState,
     ): AndroidCanonicalJsonValidatorState {
         require(state.bundleValidationStatus != AndroidBundleValidationStatus.INVALID) { "Bundle is invalid." }
+        state.bundle?.let { bundle ->
+            require(bundle.pendingRevision == null &&
+                (state.reviewEdits.isEmpty() || bundle.revisionArchiveStatus == AndroidCanonicalRevisionArchiveStatus.ARCHIVED)
+            ) {
+                "Canonical revision archive must complete before confirmation."
+            }
+        }
         val envelope = requireNotNull(state.envelope) { "Import JSON before confirmation." }
         val ingestionId = requireNotNull(state.ingestionId) { "Ingestion id is missing." }
         val confirmation = useCase.confirm(
@@ -536,6 +759,14 @@ class AndroidCanonicalJsonValidator(
                 "Archive / Retry must complete before Submit."
             }
             require(bundle.verificationEventRecorded) { "Verification event must be archived before Submit." }
+            if (state.reviewEdits.isNotEmpty() || bundle.pendingRevision != null) {
+                require(bundle.revisionArchiveStatus == AndroidCanonicalRevisionArchiveStatus.ARCHIVED) {
+                    "Canonical revision archive must complete before Submit."
+                }
+                require(bundle.pendingRevision == null) {
+                    "A failed canonical revision archive must be retried before Submit."
+                }
+            }
         }
         val ingestionId = requireNotNull(state.ingestionId) { "Ingestion id is missing." }
         val plan = useCase.plan(envelope)
@@ -559,6 +790,10 @@ class AndroidCanonicalJsonValidator(
         }
         return submitted
     }
+
+    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(StandardCharsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
 }
 
 private class AndroidBundleMaterializer(private val root: File) : YeonsikBundleMaterializer {

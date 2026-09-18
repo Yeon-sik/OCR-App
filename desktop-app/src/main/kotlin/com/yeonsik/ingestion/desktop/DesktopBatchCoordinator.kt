@@ -202,6 +202,7 @@ class DesktopBatchCoordinator(
         controller.load(item.ingestionId)
         var currentState = controller.state.value
         val archiveFailed = currentState.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.FAILED
+        val revisionFailed = currentState.bundleMetadata?.pendingRevision != null
         val verified = currentState.session?.let { session ->
             session.verifiedCanonicalFingerprint == session.canonicalFingerprint
         } == true
@@ -210,6 +211,12 @@ class DesktopBatchCoordinator(
                 items = items.replace(index, item.copy(status = DesktopBatchItemStatus.ARCHIVING, error = null))
                 publish(items, busy = true)
                 controller.archiveEvidence()
+                currentState = controller.state.value
+            }
+            revisionFailed -> {
+                items = items.replace(index, item.copy(status = DesktopBatchItemStatus.REVIEW_REQUIRED, error = null))
+                publish(items, busy = true)
+                controller.retryCanonicalRevision()
                 currentState = controller.state.value
             }
             verified -> {
@@ -270,6 +277,7 @@ class DesktopBatchCoordinator(
             duplicateOfIngestionId != null -> DesktopBatchItemStatus.DUPLICATE
             session == null -> DesktopBatchItemStatus.FAILED
             archiveStatus == DesktopEvidenceArchiveStatus.FAILED -> DesktopBatchItemStatus.FAILED
+            state.bundleMetadata?.pendingRevision != null -> DesktopBatchItemStatus.FAILED
             allUploaded -> DesktopBatchItemStatus.COMPLETED
             projectionFailure -> DesktopBatchItemStatus.FAILED
             verified && (state.bundleMetadata == null ||
@@ -289,7 +297,7 @@ class DesktopBatchCoordinator(
                 DesktopBatchProjectionSummary(it.projection, it.status, it.lastError)
             },
             duplicateOfIngestionId = duplicateOfIngestionId,
-            error = state.error ?: state.bundleMetadata?.archiveError ?: activeProjections
+            error = state.error ?: state.bundleMetadata?.archiveError ?: state.bundleMetadata?.revisionArchiveError ?: activeProjections
                 .firstOrNull { it.lastError != null }
                 ?.lastError,
         )
