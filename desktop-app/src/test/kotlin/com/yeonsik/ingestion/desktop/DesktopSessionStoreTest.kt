@@ -22,6 +22,28 @@ import java.nio.file.Files
 
 class DesktopSessionStoreTest {
     @Test
+    fun `recent records are newest first and honor the requested limit`() = runBlocking {
+        val directory = Files.createTempDirectory("yeonsik-desktop-recents")
+        val store = DesktopSessionStore(directory)
+        val older = sampleSession().copy(
+            ingestionId = "desktop-older",
+            updatedAt = "2026-09-01T00:00:00Z",
+        )
+        val newer = sampleSession().copy(
+            ingestionId = "desktop-newer",
+            updatedAt = "2026-09-02T00:00:00Z",
+        )
+        store.saveRecord(DesktopSessionRecord(older, "{}", "{}", emptyList()))
+        store.saveRecord(DesktopSessionRecord(newer, "{}", "{}", emptyList()))
+
+        assertEquals(listOf("desktop-newer"), store.recentRecords(1).map { it.session.ingestionId })
+        assertEquals(
+            listOf("desktop-newer", "desktop-older"),
+            store.recentRecords(8).map { it.session.ingestionId },
+        )
+    }
+
+    @Test
     fun `session record round trips and never persists runtime credentials`() = runBlocking {
         val directory = Files.createTempDirectory("yeonsik-desktop-session")
         val evidencePath = directory.resolve("receipt.jpg").also { Files.writeString(it, "local evidence") }

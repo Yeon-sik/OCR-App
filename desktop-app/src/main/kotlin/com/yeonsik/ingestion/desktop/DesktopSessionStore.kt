@@ -126,6 +126,17 @@ class DesktopSessionStore(
     fun latestRecord(): DesktopSessionRecord? = allRecords()
         .maxByOrNull { record -> record.session.updatedAt }
 
+    /**
+     * Presentation-only local history. It is deliberately limited to persisted session metadata;
+     * credentials and raw evidence bytes never leave the store through this API.
+     */
+    fun recentRecords(limit: Int = 8): List<DesktopSessionRecord> {
+        require(limit > 0) { "recent session limit must be positive" }
+        return allRecords()
+            .sortedByDescending { it.session.updatedAt }
+            .take(limit)
+    }
+
     fun saveRecord(record: DesktopSessionRecord) {
         require(record.session.ingestionId.isNotBlank()) { "ingestionId is required" }
         require(record.evidence.all { it.attachmentId.isNotBlank() && it.path.isAbsolute }) {

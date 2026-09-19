@@ -45,6 +45,17 @@ data class DesktopArtifactState(
     val evidenceIssues: List<String>,
 )
 
+/** Safe, display-only metadata for the Windows Inbox. */
+data class DesktopRecentSession(
+    val ingestionId: String,
+    val title: String,
+    val schema: String,
+    val updatedAt: String,
+    val reviewStatus: com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus,
+    val hasError: Boolean,
+    val completed: Boolean,
+)
+
 data class DesktopUiState(
     val rawJson: String = "",
     val canonicalJson: String = "",
@@ -81,6 +92,50 @@ class DesktopIngestionController(
         now = now,
     )
     private var structuredReviewController: CanonicalReviewController? = null
+
+    /** Lists recent local work without surfacing canonical JSON in the standard UI. */
+    fun recentSessions(limit: Int = 8): List<DesktopRecentSession> = store.recentRecords(limit).map { record ->
+        val envelope = runCatching {
+            YeonsikOcrEnvelopeCodec.decode(
+                value = record.canonicalJson,
+                localDocumentId = record.session.localDocumentId,
+                preservePersistedVerification = true,
+            )
+        }.getOrNull()
+        val title = envelope?.receipt?.merchant?.name
+            ?: envelope?.merchantCandidate?.name
+            ?: envelope?.productCandidates?.firstOrNull()?.productName
+            ?: envelope?.nutrition?.firstOrNull()?.clientKey
+            ?: envelope?.purchaseRecords?.firstOrNull()?.seller
+            ?: "복구가 필요한 수집"
+        DesktopRecentSession(
+            ingestionId = record.session.ingestionId,
+            title = title,
+            schema = envelope?.schemaVersion ?: "확인 필요",
+            updatedAt = record.session.updatedAt,
+            reviewStatus = record.session.reviewStatus,
+            hasError = record.bundle?.archiveStatus == DesktopEvidenceArchiveStatus.FAILED ||
+                record.bundle?.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.FAILED ||
+                record.session.projections.any { it.status == ProjectionStatus.FAILED },
+            completed = record.session.projections.filterNot { it.status == ProjectionStatus.DISABLED }
+                .let { projections -> projections.isNotEmpty() && projections.all { it.status == ProjectionStatus.UPLOADED } },
+        )
+    }
+
+    /** Restores a persisted session at launch without turning an empty Inbox into an error. */
+    suspend fun restoreLatestIfAvailable(): Boolean {
+        val record = store.latestRecord() ?: return false
+        beginBusy()
+        return try {
+            loadRecord(record, "최근 로컬 수집을 불러왔습니다.")
+            true
+        } catch (error: Exception) {
+            _state.value = _state.value.copy(error = error.message ?: error.javaClass.simpleName, notice = null)
+            false
+        } finally {
+            endBusy()
+        }
+    }
 
     fun updateRawJson(value: String) {
         if (_state.value.bundleMetadata != null || _state.value.bundleValidationStatus != null) {
