@@ -39,13 +39,19 @@
 | `prep_state`, `cooking_method` | `unspecified` |
 | 필수 영양소 | `calories_kcal`, `protein_grams`, `carbs_grams`, `fat_grams`, `sodium_mg`, `saturated_fat_grams`, `sugars_grams` |
 | 선택 영양소 | `fiber_grams`, `added_sugars_grams`, `trans_fat_grams`, `cholesterol_mg`; 모름은 JSON `null` |
-| `source_type` | `product_label_ocr` |
-| `source_reference` | `ocr-document:<document-id>` |
-| `source_version` | `nutrition-label-parser.v2` |
+| `source_type` | OCR label: `product_label_ocr`; text lookup: `external_reference` |
+| `source_reference` | OCR label: `ocr-document:<document-id>`; text lookup: public `http`/`https` nutrition URL |
+| `source_version` | OCR label: `nutrition-label-parser.v2`; text lookup: `external-nutrition-lookup.v1` |
 | `data_version` | `2` |
 | `visibility` | `private` |
 
 서버 payload에는 원본 이미지, 전체 OCR 문자열, bounding box, OCR evidence, Gemini 키, 비밀번호 또는 PriceTrace 상품 ID를 넣지 않습니다.
+
+첨부 없는 v2 `packaged_product` text lookup은 `fitness-nutrition-draft.v1` payload를 그대로
+사용하되 `external_reference` provenance를 보존합니다. Fitness projection은 이 경우
+hierarchy-aware v3 RPC에 `external-reference.v1` input contract와 공개 URL evidence
+reference를 전송하고, 추정치나 `estimation_evidence`를 만들지 않습니다. 기존
+`product_label_ocr` 라벨 경로는 `nutrition-label.v1` 계약과 V2 RPC를 유지합니다.
 
 ## 앱 설정과 사용
 

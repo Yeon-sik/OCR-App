@@ -1,7 +1,10 @@
 package com.pricetrace.receiptscanner.nutrition
 
+import java.net.URI
+
 const val FITNESS_NUTRITION_DRAFT_SCHEMA = "fitness-nutrition-draft.v1"
 const val FITNESS_NUTRITION_PARSER_VERSION = "nutrition-label-parser.v2"
+const val EXTERNAL_NUTRITION_LOOKUP_VERSION = "external-nutrition-lookup.v1"
 const val FITNESS_NUTRITION_DATA_VERSION = 2
 
 enum class NutritionDraftStatus(val wireValue: String) {
@@ -50,6 +53,10 @@ data class NutritionFieldEvidence(
 data class NutritionLabelDraft(
     val documentId: String,
     val parserVersion: String = FITNESS_NUTRITION_PARSER_VERSION,
+    /** Provenance values are source facts and must survive import, revision, and projection. */
+    val sourceType: String = NutritionContract.SOURCE_TYPE,
+    val sourceReference: String = NutritionContract.defaultSourceReference(documentId),
+    val sourceVersion: String = parserVersion,
     val productName: String = "",
     val brand: String? = null,
     val category: String = NutritionContract.DEFAULT_CATEGORY,
@@ -62,7 +69,6 @@ data class NutritionLabelDraft(
     val confirmedAt: String? = null,
 ) {
     val foodId: String get() = "ocr-nutrition:$documentId"
-    val sourceReference: String get() = "ocr-document:$documentId"
 
     fun value(field: NutritionField): Double? = nutrients[field]
 
@@ -95,6 +101,70 @@ object NutritionContract {
     const val COOKING_UNSPECIFIED = "unspecified"
     const val VISIBILITY_PRIVATE = "private"
     const val SOURCE_TYPE = "product_label_ocr"
+    const val EXTERNAL_REFERENCE_SOURCE_TYPE = "external_reference"
+
+    val sourceTypes: Set<String> = setOf(SOURCE_TYPE, EXTERNAL_REFERENCE_SOURCE_TYPE)
+
+    fun defaultSourceReference(documentId: String): String = "ocr-document:$documentId"
+
+    /**
+     * Validates only the provenance contract. Nutrient completeness remains the responsibility
+     * of [NutritionLabelValidator]. The URL check is intentionally syntactic: OCR-App never
+     * fetches or trusts a remote page during import.
+     */
+    fun provenanceErrors(
+        sourceType: String,
+        sourceReference: String,
+        parserVersion: String,
+        sourceVersion: String,
+    ): List<String> = buildList {
+        if (sourceType !in sourceTypes) {
+            add("지원하지 않는 영양성분 출처 유형입니다: $sourceType")
+        }
+        if (sourceReference.isBlank()) {
+            add("영양성분 출처 참조는 비어 있을 수 없습니다.")
+        }
+        if (parserVersion.isBlank()) {
+            add("영양성분 parser_version은 비어 있을 수 없습니다.")
+        }
+        if (sourceVersion.isBlank()) {
+            add("영양성분 source_version은 비어 있을 수 없습니다.")
+        }
+        if (sourceType == EXTERNAL_REFERENCE_SOURCE_TYPE) {
+            if (!isPublicHttpUrl(sourceReference)) {
+                add("external_reference source_reference는 공개 http/https URL이어야 합니다.")
+            }
+            if (parserVersion != EXTERNAL_NUTRITION_LOOKUP_VERSION) {
+                add("external_reference parser_version은 $EXTERNAL_NUTRITION_LOOKUP_VERSION 이어야 합니다.")
+            }
+            if (sourceVersion != EXTERNAL_NUTRITION_LOOKUP_VERSION) {
+                add("external_reference source_version은 $EXTERNAL_NUTRITION_LOOKUP_VERSION 이어야 합니다.")
+            }
+        }
+    }
+
+    private fun isPublicHttpUrl(value: String): Boolean {
+        val trimmed = value.trim()
+        if (trimmed != value) return false
+        val uri = runCatching { URI(trimmed) }.getOrNull() ?: return false
+        val scheme = uri.scheme?.lowercase() ?: return false
+        val host = uri.host?.lowercase() ?: return false
+        if (scheme !in setOf("http", "https") || uri.userInfo != null || host.isBlank()) return false
+        if (host == "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return false
+        if (host == "::1" || host == "0.0.0.0" || host == "127.0.0.1") return false
+        val octets = host.split('.')
+        if (octets.size == 4 && octets.all { it.toIntOrNull()?.toString() == it }) {
+            val values = octets.map(String::toInt)
+            val first = values[0]
+            val second = values[1]
+            if (first == 0 || first == 10 || first == 127 ||
+                (first == 169 && second == 254) ||
+                (first == 172 && second in 16..31) ||
+                (first == 192 && second == 168)
+            ) return false
+        }
+        return true
+    }
 
     val categories: Set<String> = setOf(
         "meat",
@@ -154,6 +224,14 @@ object NutritionUnit {
 object NutritionLabelValidator {
     fun validate(draft: NutritionLabelDraft): NutritionValidationResult {
         val errors = buildList {
+            addAll(
+                NutritionContract.provenanceErrors(
+                    sourceType = draft.sourceType,
+                    sourceReference = draft.sourceReference,
+                    parserVersion = draft.parserVersion,
+                    sourceVersion = draft.sourceVersion,
+                ),
+            )
             if (draft.productName.isBlank()) add("상품명을 입력하세요.")
             if (draft.category !in NutritionContract.categories) {
                 add("Fitness App 계약에 등록된 상품 분류를 선택하세요.")

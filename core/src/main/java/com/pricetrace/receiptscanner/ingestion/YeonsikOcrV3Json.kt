@@ -522,9 +522,14 @@ object YeonsikOcrV3Json {
                 val encoded = json.encodeToString(JsonElement.serializer(), payload)
                 val draft = if (preservePersistedVerification) NutritionLabelJson.decode(encoded) else {
                     val imported = ExternalJsonImporter().import(encoded, "envelope-$clientKey", OcrWorkflowType.FITNESS_NUTRITION)
-                    val result = imported as? ExternalJsonImportOutcome.Success
-                        ?: error("product_label payload must be fitness-nutrition-draft.v1")
-                    (result.result.draft as CanonicalDraft.Nutrition).value
+                    val result = when (imported) {
+                        is ExternalJsonImportOutcome.Success -> imported.result
+                        is ExternalJsonImportOutcome.Failure -> error(
+                            "product_label payload import failed: ${imported.error.code}: " +
+                                (imported.error.detail ?: "no validation detail"),
+                        )
+                    }
+                    (result.draft as CanonicalDraft.Nutrition).value
                 }
                 IngestionNutrition.ProductLabel(clientKey, draft, productClientKey = productClientKey)
             }

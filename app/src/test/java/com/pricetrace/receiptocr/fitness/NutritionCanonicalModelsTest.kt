@@ -12,6 +12,7 @@ import com.pricetrace.receiptscanner.nutrition.NutritionFieldEvidence
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
@@ -113,6 +114,57 @@ class NutritionCanonicalModelsTest {
         assertEquals("Test cereal", v3["p_product_name"]?.jsonPrimitive?.content)
         assertFalse(v3.containsKey("p_category_hierarchy"))
         assertFalse(v3.toString().contains("product_label_hierarchy"))
+    }
+
+    @Test
+    fun externalReferenceProductLabelUsesDedicatedContractAndPublicUrlEvidence() {
+        val candidate = ProductCandidate(
+            clientKey = "product-1",
+            productName = "Test cereal",
+            brand = "Brand",
+            manufacturer = "Test Foods",
+            sourceAttachmentIds = emptyList(),
+            evidence = listOf(
+                ProductCandidateEvidence(
+                    sourceType = "user_statement",
+                    sourceRef = "user-statement:sha256:abc",
+                    field = "product_name",
+                    observedValue = "Test cereal",
+                ),
+            ),
+        )
+        val draft = verifiedDraft().copy(
+            parserVersion = com.pricetrace.receiptscanner.nutrition.EXTERNAL_NUTRITION_LOOKUP_VERSION,
+            sourceType = com.pricetrace.receiptscanner.nutrition.NutritionContract.EXTERNAL_REFERENCE_SOURCE_TYPE,
+            sourceReference = "https://nutrition.example.com/products/test-cereal",
+            sourceVersion = com.pricetrace.receiptscanner.nutrition.EXTERNAL_NUTRITION_LOOKUP_VERSION,
+        )
+
+        val payload = CanonicalNutritionPayloadFactory.fromProductLabel(
+            localDocumentId = "text-lookup-session",
+            revisionSeq = 2,
+            idempotencyKey = "external-reference-key",
+            draft = draft,
+            productCandidate = candidate,
+        )
+        val root = Json.parseToJsonElement(payload.toRpcJson(includeHierarchyFields = true)).jsonObject
+
+        assertEquals(EXTERNAL_REFERENCE_V1, root["p_input_contract"]?.jsonPrimitive?.content)
+        assertEquals(
+            EXTERNAL_REFERENCE_V1,
+            root["p_provenance"]!!.jsonObject["canonical_input_contract"]?.jsonPrimitive?.content,
+        )
+        assertEquals(JsonNull, root["p_estimation_evidence"])
+        assertEquals("Test Foods", root["p_manufacturer_name"]?.jsonPrimitive?.content)
+        NutritionField.requiredFields.forEach { field ->
+            val item = root["p_nutrient_provenance"]!!.jsonObject[field.wireKey]!!.jsonObject
+            assertEquals("observed", item["value_status"]?.jsonPrimitive?.content)
+            assertEquals("external_reference", item["source_type"]?.jsonPrimitive?.content)
+            assertEquals(
+                listOf("https://nutrition.example.com/products/test-cereal"),
+                item["evidence_refs"]!!.jsonArray.map { it.jsonPrimitive.content },
+            )
+        }
     }
 
     @Test

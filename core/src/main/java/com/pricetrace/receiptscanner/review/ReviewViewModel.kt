@@ -18,6 +18,7 @@ import com.pricetrace.receiptscanner.ingestion.SourceAttachment
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.nutrition.NutritionField
+import com.pricetrace.receiptscanner.nutrition.NutritionContract
 import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 
 /** Single source of truth for destination identity colors. UI layers convert these hex values to Color. */
@@ -437,7 +438,20 @@ data class ReviewViewModel(
                 nutrients[NutritionField.SODIUM_MG]?.let { ReviewDetail("나트륨", "${number(it)} mg") },
                 nutrients[NutritionField.SUGARS_GRAMS]?.let { ReviewDetail("당류", "${number(it)} g") },
                 nutrients[NutritionField.SATURATED_FAT_GRAMS]?.let { ReviewDetail("포화지방", "${number(it)} g") },
-            ) + provenance.map { (field, source) -> ReviewDetail("provenance ${field.koreanLabel}", source) }
+            ) + provenance.map { (field, source) -> ReviewDetail("provenance ${field.koreanLabel}", source) } +
+                when (nutrition) {
+                    is IngestionNutrition.ProductLabel -> if (
+                        nutrition.draft.sourceType == NutritionContract.EXTERNAL_REFERENCE_SOURCE_TYPE
+                    ) {
+                        listOf(
+                            ReviewDetail("출처 유형", nutrition.draft.sourceType),
+                            ReviewDetail("출처 URL", nutrition.draft.sourceReference),
+                        )
+                    } else {
+                        emptyList()
+                    }
+                    else -> emptyList()
+                }
             val nutritionEvidenceRefs = when (nutrition) {
                 is IngestionNutrition.ProductLabel -> nutrition.draft.evidence.values.flatten().map { it.pageId }
                 is IngestionNutrition.RestaurantEstimate -> nutrition.estimate.nutrientProvenance.values.flatMap { it.evidenceRefs }

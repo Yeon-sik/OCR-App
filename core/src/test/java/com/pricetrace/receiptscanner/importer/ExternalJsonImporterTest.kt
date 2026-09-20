@@ -153,6 +153,29 @@ class ExternalJsonImporterTest {
     }
 
     @Test
+    fun `external nutrition provenance survives importer sanitation`() {
+        val result = success(
+            nutritionJson()
+                .replace("\"parser_version\":\"test-parser\"", "\"parser_version\":\"external-nutrition-lookup.v1\"")
+                .replace("\"source_type\":\"product_label_ocr\"", "\"source_type\":\"external_reference\"")
+                .replace(
+                    "\"source_reference\":\"ocr-document:upstream-nutrition-1\"",
+                    "\"source_reference\":\"https://nutrition.example.com/products/test-cereal\"",
+                )
+                .replace("\"source_version\":\"v1\"", "\"source_version\":\"external-nutrition-lookup.v1\""),
+            workflow = OcrWorkflowType.FITNESS_NUTRITION,
+        )
+        val draft = (result.draft as CanonicalDraft.Nutrition).value
+
+        assertEquals("external_reference", draft.sourceType)
+        assertEquals("https://nutrition.example.com/products/test-cereal", draft.sourceReference)
+        assertEquals("external-nutrition-lookup.v1", draft.parserVersion)
+        assertEquals("external-nutrition-lookup.v1", draft.sourceVersion)
+        assertEquals("parsed", draft.status.wireValue)
+        assertNull(draft.confirmedAt)
+    }
+
+    @Test
     fun `same semantic input has stable fingerprint`() {
         val first = success(receiptJson(extra = "\"user_verified\":false,"))
         val second = success(receiptJson(extra = "\"user_verified\":true,\"owner_id\":\"ignored\","))

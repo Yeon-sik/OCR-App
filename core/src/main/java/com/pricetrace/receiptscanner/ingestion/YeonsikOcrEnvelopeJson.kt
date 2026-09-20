@@ -199,8 +199,13 @@ object YeonsikOcrEnvelopeJson {
                         "envelope-$clientKey",
                         OcrWorkflowType.FITNESS_NUTRITION,
                     )
-                    val result = (imported as? ExternalJsonImportOutcome.Success)?.result
-                        ?: error("product_label payload must be fitness-nutrition-draft.v1")
+                    val result = when (imported) {
+                        is ExternalJsonImportOutcome.Success -> imported.result
+                        is ExternalJsonImportOutcome.Failure -> error(
+                            "product_label payload import failed: ${imported.error.code}: " +
+                                (imported.error.detail ?: "no validation detail"),
+                        )
+                    }
                     IngestionNutrition.ProductLabel(clientKey, (result.draft as CanonicalDraft.Nutrition).value)
                 }
             }

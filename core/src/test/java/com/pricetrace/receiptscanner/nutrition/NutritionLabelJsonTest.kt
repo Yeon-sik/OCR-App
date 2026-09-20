@@ -27,6 +27,27 @@ class NutritionLabelJsonTest {
     }
 
     @Test
+    fun externalReferenceProvenanceRoundTripsWithoutFallingBackToOcr() {
+        val original = completeDraft().copy(
+            parserVersion = EXTERNAL_NUTRITION_LOOKUP_VERSION,
+            sourceType = NutritionContract.EXTERNAL_REFERENCE_SOURCE_TYPE,
+            sourceReference = "https://nutrition.example.com/products/test-cereal",
+            sourceVersion = EXTERNAL_NUTRITION_LOOKUP_VERSION,
+        )
+
+        val decoded = NutritionLabelJson.decode(NutritionLabelJson.encode(original))
+
+        assertEquals(original, decoded)
+        val wire = Json.parseToJsonElement(NutritionLabelJson.encode(decoded)).jsonObject
+        assertEquals("external_reference", wire["source_type"]?.toString()?.trim('"'))
+        assertEquals(
+            "https://nutrition.example.com/products/test-cereal",
+            wire["source_reference"]?.toString()?.trim('"'),
+        )
+        assertEquals(EXTERNAL_NUTRITION_LOOKUP_VERSION, wire["source_version"]?.toString()?.trim('"'))
+    }
+
+    @Test
     fun serverRowContainsLatestFitnessColumnsButNoPrivateOcrEvidence() {
         val verified = completeDraft().asUserVerified("2026-08-11T10:00:00+09:00")
         val encoded = NutritionLabelJson.encodeServerRow(

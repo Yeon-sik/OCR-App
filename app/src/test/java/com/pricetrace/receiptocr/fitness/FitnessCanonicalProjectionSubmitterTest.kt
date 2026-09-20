@@ -17,6 +17,7 @@ import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import com.pricetrace.receiptscanner.ingestion.SourceAttachment
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
+import com.pricetrace.receiptscanner.nutrition.EXTERNAL_NUTRITION_LOOKUP_VERSION
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import kotlinx.coroutines.test.runTest
@@ -221,6 +222,83 @@ class FitnessCanonicalProjectionSubmitterTest {
     }
 
     @Test
+    fun textBackedExternalReferenceUsesDedicatedContractAndPublicUrlEvidence() = runTest {
+        val transport = QueueTransport(
+            NutritionHttpResponse(
+                200,
+                """[{"canonical_import_id":"canonical-external-1","idempotent_replay":false,"nutrition_food_id":"food-external-1","input_contract":"external-reference.v1","projection_source_type":"ocr_app","projection_import_id":"canonical-external-1-projection","catalog_product_id":null,"estimation_evidence_id":null,"visibility":"private"}]""",
+            ),
+        )
+        val candidate = ProductCandidate(
+            clientKey = "text-product-1",
+            productName = "Test cereal",
+            brand = "Brand",
+            manufacturer = "Test Foods",
+            sourceAttachmentIds = emptyList(),
+            evidence = listOf(
+                ProductCandidateEvidence(
+                    sourceType = "user_statement",
+                    sourceRef = "user-statement:sha256:text",
+                    field = "product_name",
+                    observedValue = "Test cereal",
+                ),
+            ),
+        )
+        val envelope = YeonsikOcrEnvelope(
+            mode = com.pricetrace.receiptscanner.ingestion.IngestionMode.PACKAGED_PRODUCT,
+            source = IngestionSource(
+                producer = "chatgpt",
+                sourceFiles = emptyList(),
+                userText = "공식 영양성분 공개 페이지를 확인했습니다.",
+            ),
+            productCandidates = listOf(candidate),
+            nutrition = listOf(
+                IngestionNutrition.ProductLabel(
+                    clientKey = "text-product-1",
+                    draft = externalDraft(),
+                ),
+            ),
+            schemaVersion = com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA,
+        )
+
+        val result = FitnessCanonicalProjectionSubmitter(
+            NutritionSupabaseGateway(FakeStore(signedIn()), transport),
+        ).submit(
+            ProjectionRequest(
+                ingestionId = "ingestion-external-1",
+                projection = IngestionProjection.FITNESS_NUTRITION,
+                canonicalPayload = "{}",
+                envelope = envelope,
+                localDocumentId = "text-external-1",
+                revisionSeq = 1,
+                idempotencyKey = "external-key",
+            ),
+        )
+
+        assertTrue(result is ProjectionSubmission.Success)
+        val request = transport.requests.single()
+        assertEquals(
+            "https://nutrition.example.com/rest/v1/rpc/import_canonical_nutrition_v3",
+            request.url,
+        )
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        assertEquals(EXTERNAL_REFERENCE_V1, body["p_input_contract"]?.jsonPrimitive?.content)
+        assertEquals(
+            EXTERNAL_REFERENCE_V1,
+            body["p_provenance"]!!.jsonObject["canonical_input_contract"]?.jsonPrimitive?.content,
+        )
+        assertEquals("external_reference", body["p_nutrient_provenance"]!!.jsonObject
+            .getValue("calories_kcal").jsonObject["source_type"]?.jsonPrimitive?.content)
+        assertEquals(
+            "https://nutrition.example.com/products/test-cereal",
+            body["p_nutrient_provenance"]!!.jsonObject
+                .getValue("calories_kcal").jsonObject["evidence_refs"]!!.jsonArray.single().jsonPrimitive.content,
+        )
+        assertEquals("Test Foods", body["p_manufacturer_name"]?.jsonPrimitive?.content)
+        assertEquals(JsonNull, body["p_estimation_evidence"])
+    }
+
+    @Test
     fun restaurantBundlePublishesEveryEstimateThroughIndependentCanonicalRpcCalls() = runTest {
         val store = FakeStore(signedIn())
         val transport = QueueTransport(response("canonical-1", "food-1"), response("canonical-2", "food-2"))
@@ -345,6 +423,20 @@ class FitnessCanonicalProjectionSubmitterTest {
         assertEquals("product-1", sentIdentity?.get("lines")?.jsonArray?.single()?.jsonObject?.get("productId")?.jsonPrimitive?.content)
         assertEquals(PriceTraceIdentityJson.encode(identity), sentIdentity)
     }
+
+    private fun externalDraft() = NutritionLabelDraft(
+        documentId = "external-label-1",
+        parserVersion = EXTERNAL_NUTRITION_LOOKUP_VERSION,
+        sourceType = "external_reference",
+        sourceReference = "https://nutrition.example.com/products/test-cereal",
+        sourceVersion = EXTERNAL_NUTRITION_LOOKUP_VERSION,
+        productName = "Test cereal",
+        brand = "Brand",
+        category = "processed",
+        basisAmount = 100.0,
+        basisUnit = "g",
+        nutrients = NutritionField.requiredFields.associateWith { 10.0 },
+    ).asUserVerified("2026-09-19T10:00:00+09:00")
 
     private fun estimate(clientKey: String): IngestionNutrition.RestaurantEstimate {
         val provenance = NutritionField.requiredFields.associateWith { field ->

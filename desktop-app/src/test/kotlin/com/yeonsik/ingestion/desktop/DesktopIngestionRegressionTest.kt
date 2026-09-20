@@ -146,6 +146,37 @@ class DesktopIngestionRegressionTest {
     }
 
     @Test
+    fun `desktop batch imports v2 text nutrition lookup without synthetic evidence`() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-v2-text-nutrition"))
+        val controller = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(
+                config = DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")),
+                evidenceArchivePortOverride = SuccessfulArchivePort(),
+            ),
+        )
+        val coordinator = DesktopBatchCoordinator(controller)
+        val source = writeCanonicalBundle(
+            store.directory,
+            "text-nutrition",
+            readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json"),
+        )
+
+        coordinator.importBundles(listOf(source))
+
+        val item = coordinator.state.value.items.single()
+        assertEquals(DesktopBatchItemStatus.REVIEW_REQUIRED, item.status)
+        assertTrue(item.error == null)
+        assertEquals(YEONSIK_OCR_V2_SCHEMA, controller.state.value.schema)
+        assertTrue(controller.state.value.evidence.isEmpty())
+        assertTrue(controller.state.value.canonicalJson.contains("external_reference"))
+
+        controller.verify(VerificationBasis.SOURCE_EVIDENCE)
+        assertEquals(IngestionReviewStatus.READY, controller.state.value.session?.reviewStatus)
+        assertTrue(controller.state.value.error == null)
+    }
+
+    @Test
     fun `v1 and v2 examples use the shared importer and persist active projections`() = runBlocking {
         val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-console-regression"))
         val bundle = DesktopProjectionBundle(DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")))
@@ -608,6 +639,26 @@ class DesktopIngestionRegressionTest {
                 zip.write(evidenceBytes)
                 zip.closeEntry()
             }
+        }
+        return path
+    }
+
+    private fun writeCanonicalBundle(directory: Path, name: String, canonical: String): Path {
+        val canonicalBytes = canonical.toByteArray()
+        val manifest = YeonsikBundleManifest(
+            bundleVersion = YEONSIK_BUNDLE_VERSION,
+            canonicalPath = "canonical.json",
+            canonicalSha256 = sha256(canonicalBytes),
+            evidence = emptyList(),
+        )
+        val path = directory.resolve("$name.yeonsik")
+        ZipOutputStream(Files.newOutputStream(path)).use { zip ->
+            zip.putNextEntry(ZipEntry("canonical.json"))
+            zip.write(canonicalBytes)
+            zip.closeEntry()
+            zip.putNextEntry(ZipEntry("manifest.json"))
+            zip.write(YeonsikBundleManifestCodec.encode(manifest).toByteArray())
+            zip.closeEntry()
         }
         return path
     }

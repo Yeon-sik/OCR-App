@@ -1,6 +1,7 @@
 package com.pricetrace.receiptscanner.ingestion
 
 import com.pricetrace.receiptscanner.input.InputOrigin
+import com.pricetrace.receiptscanner.nutrition.NutritionContract
 import com.pricetrace.receiptscanner.verification.VerifiedDraftGate
 
 data class LocalEvidence(
@@ -84,6 +85,12 @@ object IngestionEvidenceGate {
             evidenceResults.firstOrNull()?.let { return it }
         }
         val requiredTypes = requiredEvidenceTypes(envelope, artifactKeys)
+        if (isTextBackedV2NutritionReview(envelope, artifactKeys)) {
+            // User text plus a validated public nutrition reference is source-backed review input.
+            // This only satisfies the evidence gate; confirmation still has to be explicit and
+            // therefore never creates USER_VERIFIED state here.
+            return IngestionEvidenceResult(isAllowed = true)
+        }
         val scopedEvidence = if (artifactKeys == null || requiredTypes.isEmpty()) {
             evidence
         } else {
@@ -278,7 +285,11 @@ object IngestionEvidenceGate {
             .filter { artifactKeys == null || IngestionArtifactKeys.nutrition(it.clientKey) in artifactKeys }
             .forEach { item ->
                 when (item) {
-                    is IngestionNutrition.ProductLabel -> add(SourceAttachmentType.NUTRITION_LABEL)
+                    is IngestionNutrition.ProductLabel -> {
+                        if (item.draft.sourceType != NutritionContract.EXTERNAL_REFERENCE_SOURCE_TYPE) {
+                            add(SourceAttachmentType.NUTRITION_LABEL)
+                        }
+                    }
                     is IngestionNutrition.RestaurantEstimate -> add(SourceAttachmentType.FOOD_PHOTO)
                     is IngestionNutrition.RestaurantMenuEstimate -> add(SourceAttachmentType.MENU_PHOTO)
                     is IngestionNutrition.MealComponentEstimate -> add(SourceAttachmentType.FOOD_PHOTO)
@@ -287,10 +298,23 @@ object IngestionEvidenceGate {
         if (artifactKeys == null || artifactKeys.any { it.startsWith("${IngestionArtifactKeys.CONSUMPTION}:") }) {
             if (envelope.consumption.isNotEmpty()) add(SourceAttachmentType.FOOD_PHOTO)
         }
-        if (envelope.schemaVersion != YEONSIK_OCR_V4_SCHEMA &&
-            (artifactKeys == null || artifactKeys.any { it.startsWith("${IngestionArtifactKeys.PRODUCT_CANDIDATE}:") })
-        ) {
-            if (envelope.productCandidates.isNotEmpty()) add(SourceAttachmentType.PRODUCT_PHOTO)
+        if (envelope.schemaVersion != YEONSIK_OCR_V4_SCHEMA) {
+            val productArtifactSelected = artifactKeys == null || artifactKeys.any { key ->
+                key.startsWith("${IngestionArtifactKeys.PRODUCT_CANDIDATE}:")
+            }
+            val selectedCandidates = envelope.productCandidates.filter { candidate ->
+                artifactKeys == null || IngestionArtifactKeys.productCandidate(candidate.clientKey) in artifactKeys
+            }
+            val productPhotoRequired = if (envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA) {
+                selectedCandidates.any { candidate -> candidate.effectiveSourceAttachmentIds.isNotEmpty() }
+            } else {
+                // Preserve the established V1/V3 candidate gate. Only V2 text-backed
+                // candidates are explicitly exempted by the route-specific branch above.
+                envelope.productCandidates.isNotEmpty()
+            }
+            if (productArtifactSelected && productPhotoRequired) {
+                add(SourceAttachmentType.PRODUCT_PHOTO)
+            }
         }
         envelope.priceObservations
             .filter { observation -> artifactKeys == null || IngestionArtifactKeys.priceObservation(observation.clientKey) in artifactKeys }
@@ -302,5 +326,37 @@ object IngestionEvidenceGate {
                     },
                 )
             }
+    }
+
+    private fun isTextBackedV2NutritionReview(
+        envelope: YeonsikOcrEnvelope,
+        artifactKeys: Set<String>?,
+    ): Boolean {
+        if (envelope.schemaVersion != YEONSIK_OCR_V2_SCHEMA ||
+            envelope.mode != IngestionMode.PACKAGED_PRODUCT ||
+            envelope.source.sourceFiles.isNotEmpty() ||
+            envelope.source.userText.isNullOrBlank() ||
+            envelope.consumption.isNotEmpty()
+        ) return false
+
+        val selectedNutrition = envelope.nutrition.filter { item ->
+            artifactKeys == null || IngestionArtifactKeys.nutrition(item.clientKey) in artifactKeys
+        }
+        val selectedCandidates = envelope.productCandidates.filter { candidate ->
+            artifactKeys == null || IngestionArtifactKeys.productCandidate(candidate.clientKey) in artifactKeys
+        }
+        if (selectedNutrition.isEmpty() && selectedCandidates.isEmpty()) return false
+        val nutritionIsTextBacked = selectedNutrition.all { item ->
+            item is IngestionNutrition.ProductLabel &&
+                item.draft.sourceType == NutritionContract.EXTERNAL_REFERENCE_SOURCE_TYPE
+        }
+        val candidatesAreTextBacked = selectedCandidates.all { candidate ->
+            candidate.effectiveSourceAttachmentIds.isEmpty() &&
+                candidate.evidence.isNotEmpty() &&
+                candidate.evidence.all { evidence ->
+                    evidence.sourceType == "user_statement" && evidence.sourceAttachmentIds.isEmpty()
+                }
+        }
+        return nutritionIsTextBacked && candidatesAreTextBacked
     }
 }

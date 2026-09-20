@@ -2,11 +2,13 @@ package com.pricetrace.receiptscanner.ingestion
 
 import com.pricetrace.receiptscanner.domain.BusinessKind
 import com.pricetrace.receiptscanner.domain.ReceiptV2
+import com.pricetrace.receiptscanner.domain.StableIds
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.importer.CanonicalDraft
 import com.pricetrace.receiptscanner.importer.ExternalJsonImporter
 import com.pricetrace.receiptscanner.importer.ExternalJsonImportOutcome
 import com.pricetrace.receiptscanner.nutrition.NutritionField
+import com.pricetrace.receiptscanner.nutrition.NutritionContract
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelJson
 import com.pricetrace.receiptscanner.workflow.OcrWorkflowType
 import kotlinx.serialization.json.Json
@@ -57,7 +59,15 @@ object YeonsikOcrV2Json {
             }
         }
         val nutrition = root.arrayValue("nutrition").map { decodeNutrition(it, preservePersistedVerification) }
-        val productCandidates = root.arrayValue("product_candidates").map(::decodeProductCandidate)
+        val textBackedProductRoute = mode == IngestionMode.PACKAGED_PRODUCT &&
+            source.sourceFiles.isEmpty() && !source.userText.isNullOrBlank()
+        val productCandidates = root.arrayValue("product_candidates").map { element ->
+            decodeProductCandidate(
+                element = element,
+                allowTextBacked = textBackedProductRoute,
+                sourceUserText = source.userText,
+            )
+        }
         val consumption = root["consumption"]?.jsonArray?.map {
             decodeConsumption(it.jsonObject, preservePersistedVerification)
         }.orEmpty()
@@ -232,19 +242,38 @@ object YeonsikOcrV2Json {
         }.toMap()))
     }
 
-    private fun decodeProductCandidate(element: JsonElement): ProductCandidate {
+    private fun decodeProductCandidate(
+        element: JsonElement,
+        allowTextBacked: Boolean,
+        sourceUserText: String?,
+    ): ProductCandidate {
         val root = element.jsonObject
         return when {
-            root.keys == PROJECT_PRODUCT_CANDIDATE_KEYS -> decodeProjectProductCandidate(root)
-            root.keys == LEGACY_PRODUCT_CANDIDATE_KEYS -> decodeLegacyProductCandidate(root)
+            root.keys == PROJECT_PRODUCT_CANDIDATE_KEYS -> decodeProjectProductCandidate(
+                root = root,
+                allowTextBacked = allowTextBacked,
+                sourceUserText = sourceUserText,
+            )
+            root.keys == LEGACY_PRODUCT_CANDIDATE_KEYS -> decodeLegacyProductCandidate(
+                root = root,
+                allowTextBacked = allowTextBacked,
+                sourceUserText = sourceUserText,
+            )
             else -> throw IllegalArgumentException("Unexpected product candidate keys")
         }
     }
 
     /** Converts the Project's fact-only shape into the existing internal evidence contract. */
-    private fun decodeProjectProductCandidate(root: JsonObject): ProductCandidate {
+    private fun decodeProjectProductCandidate(
+        root: JsonObject,
+        allowTextBacked: Boolean,
+        sourceUserText: String?,
+    ): ProductCandidate {
         val sourceAttachmentIds = root.arrayValue("source_attachment_ids").strings()
-        require(sourceAttachmentIds.isNotEmpty()) { "product candidates require source_attachment_ids" }
+        val textBacked = sourceAttachmentIds.isEmpty()
+        require(!textBacked || (allowTextBacked && !sourceUserText.isNullOrBlank())) {
+            "text-backed product candidates require packaged_product source.user_text"
+        }
         val barcodes = root.arrayValue("barcodes").map { barcodeElement ->
             val barcode = barcodeElement.jsonObject
             requireKeys(barcode, PROJECT_BARCODE_KEYS)
@@ -271,6 +300,8 @@ object YeonsikOcrV2Json {
             barcodes = barcodes,
             evidence = projectProductEvidence(
                 sourceAttachmentIds = sourceAttachmentIds,
+                sourceType = if (textBacked) "user_statement" else "product_photo",
+                sourceRef = if (textBacked) userStatementSourceRef(sourceUserText) else sourceAttachmentIds.first(),
                 productName = productName,
                 brand = brand,
                 manufacturer = manufacturer,
@@ -287,7 +318,11 @@ object YeonsikOcrV2Json {
     }
 
     /** Reads the pre-Project v2 shape retained for persisted/example compatibility. */
-    private fun decodeLegacyProductCandidate(root: JsonObject): ProductCandidate {
+    private fun decodeLegacyProductCandidate(
+        root: JsonObject,
+        allowTextBacked: Boolean,
+        sourceUserText: String?,
+    ): ProductCandidate {
         val evidence = root.arrayValue("evidence").map { evidenceElement ->
             val item = evidenceElement.jsonObject
             requireKeys(item, EVIDENCE_KEYS)
@@ -300,6 +335,15 @@ object YeonsikOcrV2Json {
                 observedValue = item.nullableString("observed_value"),
                 contentHash = item.nullableString("content_hash"),
             )
+        }
+        val sourceAttachmentIds = evidence.flatMap { it.sourceAttachmentIds }.distinct()
+        if (sourceAttachmentIds.isEmpty()) {
+            require(allowTextBacked && !sourceUserText.isNullOrBlank()) {
+                "text-backed product candidates require packaged_product source.user_text"
+            }
+            require(evidence.all { it.sourceType == "user_statement" && it.sourceAttachmentIds.isEmpty() }) {
+                "text-backed product candidate evidence must use user_statement"
+            }
         }
         return ProductCandidate(
             clientKey = root.string("client_key"),
@@ -322,12 +366,14 @@ object YeonsikOcrV2Json {
             evidence = evidence,
             candidateType = root.string("candidate_type"),
             sourceVersion = root.nullableString("source_version"),
-            sourceAttachmentIds = evidence.flatMap { it.sourceAttachmentIds }.distinct(),
+            sourceAttachmentIds = sourceAttachmentIds,
         )
     }
 
     private fun projectProductEvidence(
         sourceAttachmentIds: List<String>,
+        sourceType: String,
+        sourceRef: String,
         productName: String,
         brand: String?,
         manufacturer: String?,
@@ -355,13 +401,18 @@ object YeonsikOcrV2Json {
         return facts.map { (field, observedValue) ->
             ProductCandidateEvidence(
                 sourceAttachmentIds = sourceAttachmentIds,
-                sourceType = "product_photo",
-                sourceRef = sourceAttachmentIds.first(),
+                sourceType = sourceType,
+                sourceRef = sourceRef,
                 field = field,
                 observedValue = observedValue,
             )
         }
     }
+
+    private fun userStatementSourceRef(sourceUserText: String?): String =
+        sourceUserText?.trim()?.takeIf(String::isNotBlank)?.let {
+            "user-statement:sha256:${StableIds.sha256(it)}"
+        } ?: error("text-backed product candidate requires source.user_text")
 
     private fun decodeNutrition(element: JsonElement, preservePersistedVerification: Boolean): IngestionNutrition {
         val root = element.jsonObject
@@ -389,8 +440,13 @@ object YeonsikOcrV2Json {
                         "envelope-$clientKey",
                         OcrWorkflowType.FITNESS_NUTRITION,
                     )
-                    val result = (imported as? ExternalJsonImportOutcome.Success)?.result
-                        ?: error("product_label payload must be fitness-nutrition-draft.v1")
+                    val result = when (imported) {
+                        is ExternalJsonImportOutcome.Success -> imported.result
+                        is ExternalJsonImportOutcome.Failure -> error(
+                            "product_label payload import failed: ${imported.error.code}: " +
+                                (imported.error.detail ?: "no validation detail"),
+                        )
+                    }
                     (result.draft as CanonicalDraft.Nutrition).value
                 }
                 IngestionNutrition.ProductLabel(clientKey, draft)
@@ -605,14 +661,37 @@ object YeonsikOcrV2Json {
         productCandidates.forEach { candidate ->
             require(candidate.clientKey.isNotBlank() && candidate.productName.isNotBlank())
             require(candidate.evidence.isNotEmpty()) { "product candidates require evidence" }
-            candidate.evidence.forEach { evidence ->
-                require(evidence.sourceAttachmentIds.isNotEmpty()) { "product candidate evidence requires a source" }
-                require(evidence.sourceAttachmentIds.all { it in sourceIds }) {
+            val referencedSourceIds = candidate.effectiveSourceAttachmentIds
+            if (referencedSourceIds.isEmpty()) {
+                require(mode == IngestionMode.PACKAGED_PRODUCT) {
+                    "text-backed product candidates require packaged_product mode"
+                }
+                require(source.sourceFiles.isEmpty()) {
+                    "text-backed product candidates require empty source.source_files"
+                }
+                require(!source.userText.isNullOrBlank()) {
+                    "text-backed product candidates require source.user_text"
+                }
+                require(candidate.evidence.all { evidence ->
+                    evidence.sourceType == "user_statement" && evidence.sourceAttachmentIds.isEmpty()
+                }) {
+                    "text-backed product candidate evidence must use user_statement without attachments"
+                }
+            } else {
+                require(referencedSourceIds.all { it in sourceIds }) {
                     "product candidate evidence must reference source attachments"
                 }
-                require(evidence.sourceAttachmentIds.any { id ->
-                    source.sourceFiles.any { file -> file.id == id && file.type == SourceAttachmentType.PRODUCT_PHOTO }
-                }) { "product candidates require a PRODUCT_PHOTO source attachment" }
+                candidate.evidence.forEach { evidence ->
+                    require(evidence.sourceAttachmentIds.isNotEmpty()) {
+                        "product candidate evidence requires a source"
+                    }
+                    require(evidence.sourceAttachmentIds.all { it in sourceIds }) {
+                        "product candidate evidence must reference source attachments"
+                    }
+                    require(evidence.sourceAttachmentIds.any { id ->
+                        source.sourceFiles.any { file -> file.id == id && file.type == SourceAttachmentType.PRODUCT_PHOTO }
+                    }) { "product candidates require a PRODUCT_PHOTO source attachment" }
+                }
             }
         }
         require(nutrition.map { it.clientKey }.distinct().size == nutrition.size) {
@@ -626,6 +705,22 @@ object YeonsikOcrV2Json {
             val item = nutrition.singleOrNull { it.clientKey == link.nutritionClientKey }
             line != null && item?.lineId == line.id && item !is IngestionNutrition.MealComponentEstimate
         }) { "links must reference a receipt line and a non-component nutrition artifact" }
+        nutrition.filterIsInstance<IngestionNutrition.ProductLabel>().forEach { item ->
+            val provenanceErrors = NutritionContract.provenanceErrors(
+                sourceType = item.draft.sourceType,
+                sourceReference = item.draft.sourceReference,
+                parserVersion = item.draft.parserVersion,
+                sourceVersion = item.draft.sourceVersion,
+            )
+            require(provenanceErrors.isEmpty()) {
+                "invalid product_label provenance: ${provenanceErrors.joinToString("; ")}"
+            }
+            if (item.draft.sourceType == NutritionContract.EXTERNAL_REFERENCE_SOURCE_TYPE) {
+                require(mode == IngestionMode.PACKAGED_PRODUCT) {
+                    "external_reference nutrition is only allowed in packaged_product mode"
+                }
+            }
+        }
         require(consumption.map { it.clientKey }.distinct().size == consumption.size) {
             "consumption client_key values must be unique"
         }

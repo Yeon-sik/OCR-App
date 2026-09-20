@@ -6,6 +6,7 @@ import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.NutritionRange
 import com.pricetrace.receiptscanner.nutrition.NutritionDraftStatus
 import com.pricetrace.receiptscanner.nutrition.NutritionField
+import com.pricetrace.receiptscanner.nutrition.NutritionContract
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelValidator
 import kotlinx.serialization.json.Json
@@ -21,6 +22,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 const val NUTRITION_LABEL_V1 = "nutrition-label.v1"
+const val EXTERNAL_REFERENCE_V1 = "external-reference.v1"
 const val FOOD_ESTIMATE_V1 = "food-estimate.v1"
 
 sealed interface NutritionCanonicalImportOutcome {
@@ -181,7 +183,7 @@ data class CanonicalNutritionImportPayload(
 ) {
     init {
         require(idempotencyKey.isNotBlank())
-        require(inputContract in setOf(NUTRITION_LABEL_V1, FOOD_ESTIMATE_V1))
+        require(inputContract in setOf(NUTRITION_LABEL_V1, EXTERNAL_REFERENCE_V1, FOOD_ESTIMATE_V1))
         require(sourceDocumentRef.isNotBlank())
         require(foodName.isNotBlank())
         require(basisAmount.isFinite() && basisAmount > 0)
@@ -196,6 +198,11 @@ data class CanonicalNutritionImportPayload(
         }
         if (inputContract == NUTRITION_LABEL_V1) {
             require(nutrientProvenance.values.all { it.valueStatus == "observed" && it.sourceType == "product_label_ocr" })
+            require(estimationEvidence == null)
+        } else if (inputContract == EXTERNAL_REFERENCE_V1) {
+            require(nutrientProvenance.values.all {
+                it.valueStatus == "observed" && it.sourceType == NutritionContract.EXTERNAL_REFERENCE_SOURCE_TYPE
+            })
             require(estimationEvidence == null)
         } else {
             require(nutrientProvenance.values.any { it.valueStatus == "estimated" })
@@ -219,7 +226,13 @@ data class CanonicalNutritionImportPayload(
     companion object {
         val REQUIRED_NUTRIENTS = NutritionField.requiredFields.map(NutritionField::wireKey).toSet()
         val VALUE_STATUSES = setOf("observed", "estimated")
-        val SOURCE_TYPES = setOf("product_label_ocr", "food_image_estimate", "menu_reference", "manual")
+        val SOURCE_TYPES = setOf(
+            "product_label_ocr",
+            "external_reference",
+            "food_image_estimate",
+            "menu_reference",
+            "manual",
+        )
     }
 }
 
@@ -376,14 +389,19 @@ object CanonicalNutritionPayloadFactory {
             "nutrition_label_not_verified"
         }
         require(NutritionLabelValidator.validate(draft).isReadyForUpload) { "nutrition_label_incomplete" }
-        val sourceRef = sourceRef(localDocumentId, revisionSeq, draft.documentId)
+        val isExternalReference = draft.sourceType == NutritionContract.EXTERNAL_REFERENCE_SOURCE_TYPE
+        val sourceRef = if (isExternalReference) {
+            draft.sourceReference
+        } else {
+            sourceRef(localDocumentId, revisionSeq, draft.documentId)
+        }
         val required = NutritionField.requiredFields.associate { field -> field.wireKey to requireNotNull(draft.value(field)) }
         val provenance = NutritionField.requiredFields.associate { field ->
             field.wireKey to CanonicalNutrientProvenance(
                 value = required.getValue(field.wireKey),
                 valueStatus = "observed",
-                sourceType = "product_label_ocr",
-                evidenceRefs = evidenceRefs(sourceRef, draft, field),
+                sourceType = draft.sourceType,
+                evidenceRefs = if (isExternalReference) listOf(draft.sourceReference) else evidenceRefs(sourceRef, draft, field),
             )
         }
         val optional = NutritionField.entries.filterNot(NutritionField::required).mapNotNull { field ->
@@ -391,7 +409,7 @@ object CanonicalNutritionPayloadFactory {
         }.toMap()
         return CanonicalNutritionImportPayload(
             idempotencyKey = idempotencyKey,
-            inputContract = NUTRITION_LABEL_V1,
+            inputContract = if (isExternalReference) EXTERNAL_REFERENCE_V1 else NUTRITION_LABEL_V1,
             sourceDocumentRef = sourceRef,
             foodName = draft.productName.trim(),
             brand = draft.brand?.trim()?.takeIf(String::isNotEmpty),
@@ -403,6 +421,14 @@ object CanonicalNutritionPayloadFactory {
             optionalNutrients = optional,
             provenance = buildJsonObject {
                 put("parser_version", JsonPrimitive(draft.parserVersion))
+                put("source_type", JsonPrimitive(draft.sourceType))
+                put("source_reference", JsonPrimitive(draft.sourceReference))
+                put("source_version", JsonPrimitive(draft.sourceVersion))
+                if (isExternalReference) {
+                    // The external-reference RPC uses this discriminator to keep
+                    // the new provenance contract separate from nutrition-label.v1.
+                    put("canonical_input_contract", JsonPrimitive(EXTERNAL_REFERENCE_V1))
+                }
                 put("estimated", JsonPrimitive(false))
             },
             priceTraceIdentity = priceTraceIdentity,

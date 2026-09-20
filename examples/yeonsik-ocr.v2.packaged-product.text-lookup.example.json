@@ -1,0 +1,91 @@
+{
+  "schema_version": "yeonsik-ocr.v2",
+  "mode": "packaged_product",
+  "source": {
+    "producer": "chatgpt",
+    "source_files": [],
+    "user_text": "Test cereal의 공식 영양성분 공개 페이지를 확인해 주세요."
+  },
+  "merchant_candidate": null,
+  "receipt": null,
+  "product_candidates": [
+    {
+      "client_key": "text-product-1",
+      "product_name": "Test cereal",
+      "brand_name": "Test brand",
+      "manufacturer_name": "Test Foods",
+      "variant_name": "Original",
+      "specification_text": "500 g",
+      "content_amount": 500,
+      "content_unit": "g",
+      "package_count": 1,
+      "barcodes": [],
+      "source_attachment_ids": [],
+      "confidence": 0.94
+    }
+  ],
+  "nutrition": [
+    {
+      "client_key": "text-product-1",
+      "kind": "product_label",
+      "line_id": null,
+      "menu_name": null,
+      "component_role": null,
+      "payload": {
+        "schema_version": "fitness-nutrition-draft.v1",
+        "document_id": "external-test-cereal-1",
+        "parser_version": "external-nutrition-lookup.v1",
+        "status": "parsed",
+        "confirmed_at": null,
+        "name": "Test cereal",
+        "brand": "Test brand",
+        "kind": "external_menu",
+        "category": "processed",
+        "basis_amount": 100,
+        "basis_unit": "g",
+        "prep_state": "unspecified",
+        "cooking_method": "unspecified",
+        "nutrients": {
+          "calories_kcal": 380,
+          "protein_grams": 10,
+          "carbs_grams": 70,
+          "fat_grams": 5,
+          "sodium_mg": 100,
+          "saturated_fat_grams": 1,
+          "sugars_grams": 12,
+          "fiber_grams": 5,
+          "added_sugars_grams": null,
+          "trans_fat_grams": 0,
+          "cholesterol_mg": 0
+        },
+        "source_type": "external_reference",
+        "source_reference": "https://nutrition.example.com/products/test-cereal",
+        "source_version": "external-nutrition-lookup.v1",
+        "data_version": 2,
+        "visibility": "private",
+        "parse_warnings": [],
+        "evidence": {}
+      },
+      "estimate": null
+    }
+  ],
+  "consumption": [],
+  "classification_hints": {
+    "cashos": {
+      "category_hint": null,
+      "institution_hint": null,
+      "payment_method_hint": null
+    }
+  },
+  "links": [],
+  "projection_targets": [
+    "pricetrace_product_candidate",
+    "fitness_nutrition",
+    "pricetrace_product_nutrition_link"
+  ],
+  "review": {
+    "status": "needs_review",
+    "blocking_issues": [],
+    "warnings": []
+  }
+}

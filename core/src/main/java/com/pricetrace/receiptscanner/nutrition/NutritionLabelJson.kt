@@ -50,6 +50,9 @@ object NutritionLabelJson {
         return NutritionLabelDraft(
             documentId = root.string("document_id"),
             parserVersion = root.string("parser_version"),
+            sourceType = root.string("source_type"),
+            sourceReference = root.string("source_reference"),
+            sourceVersion = root.string("source_version"),
             productName = root.string("name"),
             brand = root.nullableString("brand"),
             category = root.string("category"),
@@ -62,7 +65,17 @@ object NutritionLabelJson {
                 .orEmpty(),
             status = NutritionDraftStatus.fromWireValue(root.string("status")),
             confirmedAt = root.nullableString("confirmed_at"),
-        )
+        ).also { draft ->
+            val provenanceErrors = NutritionContract.provenanceErrors(
+                sourceType = draft.sourceType,
+                sourceReference = draft.sourceReference,
+                parserVersion = draft.parserVersion,
+                sourceVersion = draft.sourceVersion,
+            )
+            require(provenanceErrors.isEmpty()) {
+                "Invalid nutrition provenance: ${provenanceErrors.joinToString("; ")}"
+            }
+        }
     }
 
     /** Public server payload: deliberately excludes OCR text, line evidence, and source images. */
@@ -103,9 +116,9 @@ object NutritionLabelJson {
             "nutrients" to JsonObject(
                 NutritionField.entries.associate { field -> field.wireKey to value(field).jsonNumber() },
             ),
-            "source_type" to JsonPrimitive(NutritionContract.SOURCE_TYPE),
+            "source_type" to JsonPrimitive(sourceType),
             "source_reference" to JsonPrimitive(sourceReference),
-            "source_version" to JsonPrimitive(parserVersion),
+            "source_version" to JsonPrimitive(sourceVersion),
             "data_version" to JsonPrimitive(FITNESS_NUTRITION_DATA_VERSION),
             "visibility" to JsonPrimitive(NutritionContract.VISIBILITY_PRIVATE),
             "parse_warnings" to JsonArray(parseWarnings.map(::JsonPrimitive)),
@@ -152,9 +165,9 @@ object NutritionLabelJson {
         values["prep_state"] = JsonPrimitive(NutritionContract.PREP_UNSPECIFIED)
         values["cooking_method"] = JsonPrimitive(NutritionContract.COOKING_UNSPECIFIED)
         NutritionField.entries.forEach { field -> values[field.wireKey] = value(field).jsonNumber() }
-        values["source_type"] = JsonPrimitive(NutritionContract.SOURCE_TYPE)
+        values["source_type"] = JsonPrimitive(sourceType)
         values["source_reference"] = JsonPrimitive(sourceReference)
-        values["source_version"] = JsonPrimitive(parserVersion)
+        values["source_version"] = JsonPrimitive(sourceVersion)
         values["data_version"] = JsonPrimitive(FITNESS_NUTRITION_DATA_VERSION)
         values["visibility"] = JsonPrimitive(NutritionContract.VISIBILITY_PRIVATE)
         values["updated_at"] = JsonPrimitive(updatedAt)

@@ -37,6 +37,28 @@ v2 입력에는 `catalog_product_id`, `standard_product_id`, `restaurant_menu_id
 `submit_product_candidate_v1`에 fact-only payload를 보낸다. PriceTrace가 반환한
 `catalogProductId`와 candidate response만 이후 projection identity로 보존한다.
 
+### Text-backed packaged product
+
+첨부 없이 공식 영양성분 공개 페이지를 조회한 packaged product도 정상적인 v2 경로다.
+이 경우 `source.source_files`와 `product_candidates[].source_attachment_ids`는 빈 배열이고,
+`source.user_text`는 비어 있지 않아야 한다. 후보 fact는 입력에 이미 있는 값만 보존하며,
+각 evidence는 `source_type=user_statement`로 생성한다. user text에서 상품 필드를 새로
+추론하거나 `consumption`을 만들지 않는다.
+
+ProductLabel payload는 기존 `fitness-nutrition-draft.v1` schema를 유지하면서 다음 provenance를
+사용한다.
+
+| field | text lookup contract |
+| --- | --- |
+| `source_type` | `external_reference` |
+| `source_reference` | 공개 `http`/`https` 영양성분 URL |
+| `parser_version` / `source_version` | `external-nutrition-lookup.v1` |
+| `estimate` | `null` |
+
+Fitness projection은 hierarchy-aware v3 RPC의 `external-reference.v1` input contract와
+실제 공개 URL을 `evidence_refs`에 사용한다. `product_label_ocr`와 attachment-backed
+`PRODUCT_PHOTO` 경로는 기존 `nutrition-label.v1` 계약과 V2 RPC를 그대로 유지한다.
+
 ## Meal
 
 `consumption`은 `consumed_at`과 item 목록을 필수로 한다. 각 item은
@@ -107,6 +129,7 @@ v2 codec은 root/nested key를 strict하게 검사하고, candidate evidence가 
 UI에서 명시적으로 확정한 뒤에만 `USER_VERIFIED`가 된다.
 
 - `examples/yeonsik-ocr.v2.packaged-product.example.json`
+- `examples/yeonsik-ocr.v2.packaged-product.text-lookup.example.json`
 - `examples/yeonsik-ocr.v2.restaurant.example.json`
 - `examples/yeonsik-ocr.v2.restaurant-food-photo.example.json`
 

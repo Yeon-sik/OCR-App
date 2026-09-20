@@ -287,6 +287,114 @@ class YeonsikOcrV2Test {
     }
 
     @Test
+    fun `v2 text nutrition lookup imports without attachments and keeps external provenance`() {
+        val imported = success(ExternalJsonImporter().import(
+            readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json"),
+            "local-v2-text-nutrition",
+        ))
+        val envelope = (imported.draft as CanonicalDraft.Envelope).value
+        val candidate = envelope.productCandidates.single()
+        val label = envelope.nutrition.single() as IngestionNutrition.ProductLabel
+
+        assertEquals(OcrWorkflowType.FITNESS_NUTRITION, imported.workflowType)
+        assertEquals(IngestionMode.PACKAGED_PRODUCT, envelope.mode)
+        assertTrue(envelope.source.sourceFiles.isEmpty())
+        assertTrue(candidate.sourceAttachmentIds.isEmpty())
+        assertTrue(candidate.evidence.isNotEmpty())
+        assertTrue(candidate.evidence.all {
+            it.sourceType == "user_statement" && it.sourceAttachmentIds.isEmpty()
+        })
+        assertEquals("external_reference", label.draft.sourceType)
+        assertEquals("https://nutrition.example.com/products/test-cereal", label.draft.sourceReference)
+        assertEquals("external-nutrition-lookup.v1", label.draft.sourceVersion)
+        assertEquals("external-nutrition-lookup.v1", label.draft.parserVersion)
+        assertEquals(null, envelope.consumption.singleOrNull())
+
+        val gate = IngestionEvidenceGate.evaluate(envelope, emptyList())
+        assertTrue(gate.blockingIssues.toString(), gate.isAllowed)
+        val encoded = JsonSupport.parse(YeonsikOcrV2Json.encode(envelope))
+        val payload = encoded["nutrition"]!!.jsonArray.single().jsonObject["payload"]!!.jsonObject
+        assertEquals("external_reference", payload["source_type"]!!.jsonPrimitive.content)
+        assertEquals(
+            "https://nutrition.example.com/products/test-cereal",
+            payload["source_reference"]!!.jsonPrimitive.content,
+        )
+        assertEquals("external-nutrition-lookup.v1", payload["source_version"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `v2 text nutrition candidate rejects missing user text`() {
+        val root = JsonSupport.parse(readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json"))
+        val invalid = JsonObject(root.toMutableMap().apply {
+            put("source", JsonObject(root["source"]!!.jsonObject.toMutableMap().apply {
+                put("user_text", JsonNull)
+            }))
+        })
+
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            YeonsikOcrV2Json.decode(
+                Json.encodeToString(JsonElement.serializer(), invalid),
+                "local-v2-text-nutrition-no-text",
+            )
+        }
+        assertTrue(error.message.orEmpty().contains("source.user_text"))
+    }
+
+    @Test
+    fun `v2 external nutrition provenance rejects invalid URL and version`() {
+        val source = readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json")
+        val invalidUrl = source.replace(
+            "https://nutrition.example.com/products/test-cereal",
+            "file:///private/nutrition.json",
+        )
+        val urlError = assertThrows(IllegalStateException::class.java) {
+            YeonsikOcrV2Json.decode(invalidUrl, "local-v2-text-nutrition-invalid-url")
+        }
+        assertTrue(urlError.message.orEmpty().contains("http/https URL"))
+
+        val invalidVersion = source.replace(
+            "\"source_version\": \"external-nutrition-lookup.v1\"",
+            "\"source_version\": \"nutrition-label-parser.v2\"",
+        )
+        val versionError = assertThrows(IllegalStateException::class.java) {
+            YeonsikOcrV2Json.decode(invalidVersion, "local-v2-text-nutrition-invalid-version")
+        }
+        assertTrue(versionError.message.orEmpty().contains("source_version"))
+    }
+
+    @Test
+    fun `v2 nested nutrition import keeps provenance validation detail`() {
+        val invalid = readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json")
+            .replace(
+                "https://nutrition.example.com/products/test-cereal",
+                "file:///private/nutrition.json",
+            )
+
+        val outcome = ExternalJsonImporter().import(invalid, "local-v2-nested-invalid")
+        val failure = outcome as ExternalJsonImportOutcome.Failure
+        assertTrue(failure.error.detail.orEmpty().contains("http/https URL"))
+        assertFalse(failure.error.detail.orEmpty().contains("must be fitness-nutrition-draft.v1"))
+    }
+
+    @Test
+    fun `v2 OCR product label still requires nutrition label evidence while external reference does not`() {
+        val external = (success(ExternalJsonImporter().import(
+            readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json"),
+            "local-v2-external-gate",
+        )).draft as CanonicalDraft.Envelope).value
+        assertTrue(IngestionEvidenceGate.evaluate(external, emptyList()).isAllowed)
+
+        val ocrRoot = JsonSupport.parse(readExample("yeonsik-ocr.v2.packaged-product.example.json"))
+        val ocrEnvelope = YeonsikOcrV2Json.decode(
+            Json.encodeToString(JsonElement.serializer(), ocrRoot),
+            "local-v2-ocr-gate",
+        )
+        val blocked = IngestionEvidenceGate.evaluate(ocrEnvelope, emptyList())
+        assertFalse(blocked.isAllowed)
+        assertTrue(blocked.blockingIssues.any { it.contains("nutrition_label") || it.contains("source_image") })
+    }
+
+    @Test
     fun `v2 confirmation revalidates edited cross artifact invariants`() = runBlocking {
         val useCase = CanonicalIngestionUseCase(InMemoryIngestionSessionStore())
         val imported = useCase.importJson(

@@ -372,7 +372,6 @@ class ExternalJsonImporter(
         requireKeysAllowingDiscarded(root, NUTRITION_KEYS, EXTERNAL_TRUST_KEYS)
         require(root.requiredString("schema_version") == FITNESS_NUTRITION_DRAFT_SCHEMA)
         root.requiredString("document_id")
-        root.requiredString("parser_version")
         root.requiredString("name")
         root.requiredNullableString("brand")
         root.requiredString("category")
@@ -381,9 +380,19 @@ class ExternalJsonImporter(
         require(root.requiredString("kind") == NutritionContract.KIND_EXTERNAL_MENU)
         require(root.requiredString("prep_state") == NutritionContract.PREP_UNSPECIFIED)
         require(root.requiredString("cooking_method") == NutritionContract.COOKING_UNSPECIFIED)
-        require(root.requiredString("source_type") == NutritionContract.SOURCE_TYPE)
-        root.requiredString("source_reference")
-        root.requiredString("source_version")
+        val sourceType = root.requiredString("source_type")
+        val sourceReference = root.requiredString("source_reference")
+        val sourceVersion = root.requiredString("source_version")
+        val parserVersion = root.requiredString("parser_version")
+        val provenanceErrors = NutritionContract.provenanceErrors(
+            sourceType = sourceType,
+            sourceReference = sourceReference,
+            parserVersion = parserVersion,
+            sourceVersion = sourceVersion,
+        )
+        require(provenanceErrors.isEmpty()) {
+            "Invalid nutrition provenance: ${provenanceErrors.joinToString("; ")}"
+        }
         require(root.requiredInt("data_version") == FITNESS_NUTRITION_DATA_VERSION)
         require(root.requiredString("visibility") == NutritionContract.VISIBILITY_PRIVATE)
         root.requiredNullableString("confirmed_at")

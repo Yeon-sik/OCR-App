@@ -8,6 +8,7 @@ import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V3_SCHEMA
+import com.pricetrace.receiptscanner.nutrition.NutritionContract
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonArray
@@ -31,7 +32,13 @@ class FitnessCanonicalProjectionSubmitter(
             return ProjectionSubmission.Failure("pricetrace_identity_missing", retryable = false)
         }
         val priceTraceIdentity = request.resolvedIdentity?.priceTrace?.let(PriceTraceIdentityJson::encode)
-        val useV3Contract = envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA
+        // external-reference.v1 is implemented by Fitness's hierarchy-aware v3 RPC. Keep
+        // product_label_ocr V2 calls on the legacy v2 boundary for backward compatibility.
+        val useV3Contract = envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA ||
+            envelope.nutrition.any { item ->
+                item is IngestionNutrition.ProductLabel &&
+                    item.draft.sourceType == NutritionContract.EXTERNAL_REFERENCE_SOURCE_TYPE
+            }
 
         val responses = mutableListOf<String>()
         var lastFoodId: String? = null
@@ -45,16 +52,19 @@ class FitnessCanonicalProjectionSubmitter(
                         idempotencyKey = itemKey,
                         draft = item.draft,
                         // submitProjection() verifies the persisted envelope fingerprint first.
-                    envelopeVerified = false,
-                    priceTraceIdentity = priceTraceIdentity,
-                    productCandidate = item.productClientKey?.let { productClientKey ->
-                        envelope.productCandidates.singleOrNull { candidate ->
-                            candidate.clientKey == productClientKey
-                        } ?: return ProjectionSubmission.Failure(
-                            "product_candidate_missing:$productClientKey",
-                            retryable = false,
-                        )
-                    },
+                        envelopeVerified = false,
+                        priceTraceIdentity = priceTraceIdentity,
+                        productCandidate = (item.productClientKey
+                            ?: envelope.productCandidates.singleOrNull { candidate ->
+                                candidate.clientKey == item.clientKey
+                            }?.clientKey)?.let { productClientKey ->
+                            envelope.productCandidates.singleOrNull { candidate ->
+                                candidate.clientKey == productClientKey
+                            } ?: return ProjectionSubmission.Failure(
+                                "product_candidate_missing:$productClientKey",
+                                retryable = false,
+                            )
+                        },
                         useV3Contract = useV3Contract,
                     )
                     is IngestionNutrition.RestaurantEstimate -> {
