@@ -43,7 +43,11 @@ v2 입력에는 `catalog_product_id`, `standard_product_id`, `restaurant_menu_id
 이 경우 `source.source_files`와 `product_candidates[].source_attachment_ids`는 빈 배열이고,
 `source.user_text`는 비어 있지 않아야 한다. 후보 fact는 입력에 이미 있는 값만 보존하며,
 각 evidence는 `source_type=user_statement`로 생성한다. user text에서 상품 필드를 새로
-추론하거나 `consumption`을 만들지 않는다.
+추론하거나 `consumption`을 만들지 않는다. 다만 canonical envelope에 사용자가 실제
+섭취 사실과 양을 명시해 이미 생성된 `consumption`이 있고, 모든 item이
+`amount_status=user_provided`와 amount/unit을 가지면 해당 consumption은 별도 FOOD_PHOTO
+없이 source-evidence gate를 통과할 수 있다. `estimated` amount나 사용자 명시가 없는
+consumption은 기존 FOOD_PHOTO requirement를 유지한다.
 
 ProductLabel payload는 기존 `fitness-nutrition-draft.v1` schema를 유지하면서 다음 provenance를
 사용한다.
@@ -58,12 +62,22 @@ ProductLabel payload는 기존 `fitness-nutrition-draft.v1` schema를 유지하�
 Fitness projection은 hierarchy-aware v3 RPC의 `external-reference.v1` input contract와
 실제 공개 URL을 `evidence_refs`에 사용한다. `product_label_ocr`와 attachment-backed
 `PRODUCT_PHOTO` 경로는 기존 `nutrition-label.v1` 계약과 V2 RPC를 그대로 유지한다.
+OCR-App과 FitnessApp이 고정해 검증하는 실제 RPC body는 양쪽 저장소의
+`contracts/fitness-external-reference.v1.json` fixture이며, contract/schema/version을
+임의로 `nutrition-label.v1`로 되돌리지 않는다.
 
 ## Meal
 
 `consumption`은 `consumed_at`과 item 목록을 필수로 한다. 각 item은
 `nutrition_client_key`, `amount`, `unit`, `confidence`, `amount_status`를 가진다. `consumed_at`은 ISO-8601
 offset을 포함한 실제 식사시각이며 receipt 결제시각이나 사진시각으로 자동 대체하지 않는다.
+
+사용자 statement 기반 consumption의 source-evidence 예외는 제한적이다. canonical
+`source.user_text`가 비어 있지 않고 모든 item이 `amount_status=user_provided`이며 amount/unit을
+실제로 가지는 경우에만 FOOD_PHOTO를 강제하지 않는다. 시스템이 사진 없이 섭취를
+추론해 consumption을 새로 만들지는 않으며, `estimated`/`observed`/`unknown` amount는
+FOOD_PHOTO를 요구한다. producer가 넣은 `user_verified`는 이 판단의 authority가 아니고,
+`consumed_at`은 사용자가 명시한 값만 사용한다.
 
 `FITNESS_MEAL`은 사용자 검증 이후 Fitness의 `import_verified_meal_v1`로 전송한다. 각 item의
 양·단위·confidence와 실제 식사시각을 그대로 보존하며, Fitness가 반환한

@@ -226,7 +226,7 @@ class FitnessCanonicalProjectionSubmitterTest {
         val transport = QueueTransport(
             NutritionHttpResponse(
                 200,
-                """[{"canonical_import_id":"canonical-external-1","idempotent_replay":false,"nutrition_food_id":"food-external-1","input_contract":"external-reference.v1","projection_source_type":"ocr_app","projection_import_id":"canonical-external-1-projection","catalog_product_id":null,"estimation_evidence_id":null,"visibility":"private"}]""",
+                """[{"canonical_import_id":"canonical-external-1","idempotent_replay":false,"nutrition_food_id":"food-external-1","input_contract":"external-reference.v1","projection_source_type":"external_reference","projection_import_id":"canonical-external-1-projection","catalog_product_id":null,"estimation_evidence_id":null,"visibility":"private"}]""",
             ),
         )
         val candidate = ProductCandidate(

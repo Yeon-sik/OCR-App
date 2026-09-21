@@ -323,6 +323,75 @@ class YeonsikOcrV2Test {
     }
 
     @Test
+    fun `v2 user provided consumption with product and nutrition photos does not require food photo`() {
+        val source = readExample("yeonsik-ocr.v2.packaged-product.example.json")
+            .replace("완제품 상품 사진과 영양성분표", "40g 먹음")
+            .replace("\"amount_status\": \"estimated\"", "\"amount_status\": \"user_provided\"")
+        val envelope = YeonsikOcrV2Json.decode(source, "local-v2-user-provided-consumption")
+
+        val result = IngestionEvidenceGate.evaluate(
+            envelope = envelope,
+            evidence = listOf(
+                LocalEvidence("product-photo-1", SourceAttachmentType.PRODUCT_PHOTO, true),
+                LocalEvidence("nutrition-label-1", SourceAttachmentType.NUTRITION_LABEL, true),
+            ),
+        )
+
+        assertTrue(result.blockingIssues.toString(), result.isAllowed)
+        assertFalse(result.blockingIssues.contains("food_photo_image_required"))
+        assertEquals("user_provided", envelope.consumption.single().items.single().amountStatus)
+    }
+
+    @Test
+    fun `v2 text nutrition lookup with user provided consumption passes without fake food photo`() {
+        val source = readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json")
+            .replace(
+                "Test cereal의 공식 영양성분 공개 페이지를 확인해 주세요.",
+                "Test cereal 40g 먹음",
+            )
+            .replace(
+                "\"consumption\": [],",
+                "\"consumption\": [{\"client_key\":\"consumption-text-1\",\"consumed_at\":\"2026-09-19T10:00:00+09:00\",\"items\":[{\"nutrition_client_key\":\"text-product-1\",\"amount\":40,\"unit\":\"g\",\"confidence\":1.0,\"amount_status\":\"user_provided\"}],\"status\":\"unverified\"}],",
+            )
+        val envelope = YeonsikOcrV2Json.decode(source, "local-v2-text-user-provided-consumption")
+
+        val result = IngestionEvidenceGate.evaluate(envelope, emptyList())
+
+        assertTrue(result.blockingIssues.toString(), result.isAllowed)
+        assertTrue(envelope.consumption.isNotEmpty())
+        assertEquals("user_provided", envelope.consumption.single().items.single().amountStatus)
+    }
+
+    @Test
+    fun `v2 estimated consumption still requires food photo evidence`() {
+        val source = readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json")
+            .replace(
+                "Test cereal의 공식 영양성분 공개 페이지를 확인해 주세요.",
+                "Test cereal을 먹은 것 같아요",
+            )
+            .replace(
+                "\"consumption\": [],",
+                "\"consumption\": [{\"client_key\":\"consumption-estimated-1\",\"consumed_at\":\"2026-09-19T10:00:00+09:00\",\"items\":[{\"nutrition_client_key\":\"text-product-1\",\"amount\":40,\"unit\":\"g\",\"confidence\":0.8,\"amount_status\":\"estimated\"}],\"status\":\"unverified\"}],",
+            )
+        val envelope = YeonsikOcrV2Json.decode(source, "local-v2-estimated-consumption")
+
+        val result = IngestionEvidenceGate.evaluate(envelope, emptyList())
+
+        assertFalse(result.isAllowed)
+        assertTrue(result.blockingIssues.isNotEmpty())
+    }
+
+    @Test
+    fun `v2 product and nutrition information without a consumption statement does not create consumption`() {
+        val envelope = YeonsikOcrV2Json.decode(
+            readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json"),
+            "local-v2-no-consumption-statement",
+        )
+
+        assertTrue(envelope.consumption.isEmpty())
+    }
+
+    @Test
     fun `v2 text nutrition candidate rejects missing user text`() {
         val root = JsonSupport.parse(readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json"))
         val invalid = JsonObject(root.toMutableMap().apply {

@@ -295,8 +295,13 @@ object IngestionEvidenceGate {
                     is IngestionNutrition.MealComponentEstimate -> add(SourceAttachmentType.FOOD_PHOTO)
                 }
             }
-        if (artifactKeys == null || artifactKeys.any { it.startsWith("${IngestionArtifactKeys.CONSUMPTION}:") }) {
-            if (envelope.consumption.isNotEmpty()) add(SourceAttachmentType.FOOD_PHOTO)
+        val selectedConsumptions = envelope.consumption.filter { consumption ->
+            artifactKeys == null || IngestionArtifactKeys.consumption(consumption.clientKey) in artifactKeys
+        }
+        if (selectedConsumptions.any { !hasUserProvidedConsumptionStatement(envelope, it, artifactKeys) }) {
+            // A user-provided amount in source.user_text is a sufficient source fact for
+            // consumption. Estimated/observed/unknown amounts remain photo-backed.
+            add(SourceAttachmentType.FOOD_PHOTO)
         }
         if (envelope.schemaVersion != YEONSIK_OCR_V4_SCHEMA) {
             val productArtifactSelected = artifactKeys == null || artifactKeys.any { key ->
@@ -335,8 +340,7 @@ object IngestionEvidenceGate {
         if (envelope.schemaVersion != YEONSIK_OCR_V2_SCHEMA ||
             envelope.mode != IngestionMode.PACKAGED_PRODUCT ||
             envelope.source.sourceFiles.isNotEmpty() ||
-            envelope.source.userText.isNullOrBlank() ||
-            envelope.consumption.isNotEmpty()
+            envelope.source.userText.isNullOrBlank()
         ) return false
 
         val selectedNutrition = envelope.nutrition.filter { item ->
@@ -345,7 +349,15 @@ object IngestionEvidenceGate {
         val selectedCandidates = envelope.productCandidates.filter { candidate ->
             artifactKeys == null || IngestionArtifactKeys.productCandidate(candidate.clientKey) in artifactKeys
         }
+        val selectedConsumptions = envelope.consumption.filter { consumption ->
+            artifactKeys == null || IngestionArtifactKeys.consumption(consumption.clientKey) in artifactKeys
+        }
         if (selectedNutrition.isEmpty() && selectedCandidates.isEmpty()) return false
+        if (selectedConsumptions.isNotEmpty() && selectedConsumptions.any {
+                !hasUserProvidedConsumptionStatement(envelope, it, artifactKeys)
+            }) {
+            return false
+        }
         val nutritionIsTextBacked = selectedNutrition.all { item ->
             item is IngestionNutrition.ProductLabel &&
                 item.draft.sourceType == NutritionContract.EXTERNAL_REFERENCE_SOURCE_TYPE
@@ -358,5 +370,26 @@ object IngestionEvidenceGate {
                 }
         }
         return nutritionIsTextBacked && candidatesAreTextBacked
+    }
+
+    /**
+     * A consumption artifact may avoid FOOD_PHOTO only when the canonical item records a
+     * user-provided amount and the envelope carries the user's text statement. Producer flags
+     * such as user_verified are intentionally ignored here; local verification remains separate.
+     */
+    private fun hasUserProvidedConsumptionStatement(
+        envelope: YeonsikOcrEnvelope,
+        consumption: IngestionConsumption,
+        artifactKeys: Set<String>?,
+    ): Boolean {
+        if (artifactKeys != null && IngestionArtifactKeys.consumption(consumption.clientKey) !in artifactKeys) {
+            return false
+        }
+        if (envelope.source.userText.isNullOrBlank() || consumption.items.isEmpty()) return false
+        return consumption.items.all { item ->
+            item.amountStatus == "user_provided" &&
+                item.amount != null &&
+                !item.unit.isNullOrBlank()
+        }
     }
 }

@@ -1,0 +1,79 @@
+{
+  "p_idempotency_key": "external-reference-key",
+  "p_input_contract": "external-reference.v1",
+  "p_source_document_ref": "https://nutrition.example.com/products/test-cereal",
+  "p_food_name": "Test cereal",
+  "p_brand": "Brand",
+  "p_category": "processed",
+  "p_basis_amount": 100.0,
+  "p_basis_unit": "g",
+  "p_required_nutrients": {
+    "calories_kcal": 10.0,
+    "protein_grams": 10.0,
+    "carbs_grams": 10.0,
+    "fat_grams": 10.0,
+    "sodium_mg": 10.0,
+    "saturated_fat_grams": 10.0,
+    "sugars_grams": 10.0
+  },
+  "p_nutrient_provenance": {
+    "calories_kcal": {
+      "value": 10.0,
+      "value_status": "observed",
+      "source_type": "external_reference",
+      "evidence_refs": ["https://nutrition.example.com/products/test-cereal"]
+    },
+    "protein_grams": {
+      "value": 10.0,
+      "value_status": "observed",
+      "source_type": "external_reference",
+      "evidence_refs": ["https://nutrition.example.com/products/test-cereal"]
+    },
+    "carbs_grams": {
+      "value": 10.0,
+      "value_status": "observed",
+      "source_type": "external_reference",
+      "evidence_refs": ["https://nutrition.example.com/products/test-cereal"]
+    },
+    "fat_grams": {
+      "value": 10.0,
+      "value_status": "observed",
+      "source_type": "external_reference",
+      "evidence_refs": ["https://nutrition.example.com/products/test-cereal"]
+    },
+    "sodium_mg": {
+      "value": 10.0,
+      "value_status": "observed",
+      "source_type": "external_reference",
+      "evidence_refs": ["https://nutrition.example.com/products/test-cereal"]
+    },
+    "saturated_fat_grams": {
+      "value": 10.0,
+      "value_status": "observed",
+      "source_type": "external_reference",
+      "evidence_refs": ["https://nutrition.example.com/products/test-cereal"]
+    },
+    "sugars_grams": {
+      "value": 10.0,
+      "value_status": "observed",
+      "source_type": "external_reference",
+      "evidence_refs": ["https://nutrition.example.com/products/test-cereal"]
+    }
+  },
+  "p_optional_nutrients": {},
+  "p_provenance": {
+    "parser_version": "external-nutrition-lookup.v1",
+    "source_type": "external_reference",
+    "source_reference": "https://nutrition.example.com/products/test-cereal",
+    "source_version": "external-nutrition-lookup.v1",
+    "canonical_input_contract": "external-reference.v1",
+    "estimated": false
+  },
+  "p_user_verified": true,
+  "p_pricetrace_identity": null,
+  "p_estimation_evidence": null,
+  "p_manufacturer_name": "Test Foods",
+  "p_brand_name": "Brand",
+  "p_sub_brand_name": null,
+  "p_product_name": "Test cereal"
+}
