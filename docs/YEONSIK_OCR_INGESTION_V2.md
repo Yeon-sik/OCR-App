@@ -21,15 +21,13 @@ OCR-App은 외부 JSON을 검증하고, 원본 증거를 로컬에 연결하고,
 
 ## Product
 
-source attachment type에 `product_photo` (`PRODUCT_PHOTO`)를 추가했다. `product_candidates`
-항목은 다음 관측 사실과 evidence만 가질 수 있다.
+source attachment type에 `product_photo` (`PRODUCT_PHOTO`)를 추가했다. `product_candidates` 항목은 최신 Project wire field와 source fact만 가진다.
 
 - `product_name`
-- `brand` 또는 `manufacturer`
-- `specification`, `content_amount`, `content_unit`, `package_count`
-- `variant`
-- `barcodes[]` (`type`, `value`)
-- source attachment를 가리키는 `evidence`
+- `brand_name`, `manufacturer_name`, `variant_name`, `specification_text`
+- `content_amount`, `content_unit`, `package_count`
+- `barcodes[]` (`scheme`, `value`)
+- `source_attachment_ids`, `confidence`
 
 v2 입력에는 `catalog_product_id`, `standard_product_id`, `restaurant_menu_id`,
 `nutrition_food_id` 같은 서버 identity를 넣을 수 없다. OCR-App은
@@ -61,9 +59,13 @@ Fitness projection은 hierarchy-aware v3 RPC의 `external-reference.v1` input co
 
 ## Meal
 
-`consumption`은 `consumed_at`과 item 목록을 필수로 한다. 각 item은
-`nutrition_client_key`, `amount`, `unit`, `confidence`, `amount_status`를 가진다. `consumed_at`은 ISO-8601
-offset을 포함한 실제 식사시각이며 receipt 결제시각이나 사진시각으로 자동 대체하지 않는다.
+`consumption`은 사용자가 실제 섭취를 명시한 경우에만 producer가 넣을 수 있다. 상품 정보,
+음식 사진, 구매 사실만으로 OCR/App이 자동 생성하지 않는다. 각 item은
+`nutrition_client_key`, `amount`, `unit`, `confidence`, `amount_status`를 가진다. `amount_status=user_provided`는
+비어 있지 않은 `source.user_text`의 사용자 섭취 진술에만 쓴다. 이 경우 FOOD_PHOTO는 evidence gate의
+요건이 아니다. 사진 기반 추정량(`amount_status=estimated`) 등 다른 amount status는 기존처럼
+`FOOD_PHOTO` evidence가 필요하다. `consumed_at`은 사용자가 명시한 경우에만 넣으며, receipt 결제시각이나
+사진시각으로 자동 대체하지 않는다.
 
 `FITNESS_MEAL`은 사용자 검증 이후 Fitness의 `import_verified_meal_v1`로 전송한다. 각 item의
 양·단위·confidence와 실제 식사시각을 그대로 보존하며, Fitness가 반환한
@@ -92,6 +94,9 @@ receipt line을 만들지 않는다.
 artifact를 text로 통과시켜도 full-envelope 검증에서는 `restaurant_estimate`의
 `FOOD_PHOTO` 검사를 별도로 수행한다.
 
+Receipt line의 `food_service.benefit_kind`는 `included`, `complimentary`, `review_event`,
+`promotion`, `other`를 지원한다. 값이 null이 아닌 line은 일반 PriceTrace price observation으로
+승격하지 않는다. 0원 또는 소액이라는 값만으로 benefit kind를 OCR/App이 자동 추론하지 않는다.
 ## Side dish / meal component
 
 Nutrition kind `meal_component_estimate`는 음식 사진으로 추정한 무료 반찬처럼 receipt에
@@ -123,10 +128,12 @@ NutritionFood로 생성된 뒤에만 `FITNESS_PRODUCT_NUTRITION_LINK`를 실행�
 
 v2 codec은 root/nested key를 strict하게 검사하고, candidate evidence가 실제
 `PRODUCT_PHOTO` attachment를 참조하는지, component가 PriceTrace menu identity를 넣지
-않는지, consumption에 실제 offset 시각과 item 값을 갖는지 검증한다. `component_role`과
-`amount_status`는 Fitness provenance까지 전달한다. 외부 `review.status`나
+않는지, consumption item이 기존 nutrition을 참조하는지 검증한다. Project의 `projection_targets`는
+hint일 뿐 routing authority가 아니며, Product Candidate와 NutritionFood가 모두 downstream에서
+해결된 뒤에만 `pricetrace_product_nutrition_link`가 실행된다. 외부 `review.status`나
 `consumption.status`는 서버 권한으로 취급하지 않고 항상 `UNVERIFIED`로 시작하며, production
-UI에서 명시적으로 확정한 뒤에만 `USER_VERIFIED`가 된다.
+UI에서 명시적으로 확정한 뒤에만 `USER_VERIFIED`가 된다. 이 문서와 examples는 OCR Project의
+authoritative SPEC을 대체하는 schema authority가 아니다.
 
 - `examples/yeonsik-ocr.v2.packaged-product.example.json`
 - `examples/yeonsik-ocr.v2.packaged-product.text-lookup.example.json`

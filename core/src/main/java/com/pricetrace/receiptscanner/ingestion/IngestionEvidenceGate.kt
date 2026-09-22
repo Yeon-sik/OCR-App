@@ -296,7 +296,19 @@ object IngestionEvidenceGate {
                 }
             }
         if (artifactKeys == null || artifactKeys.any { it.startsWith("${IngestionArtifactKeys.CONSUMPTION}:") }) {
-            if (envelope.consumption.isNotEmpty()) add(SourceAttachmentType.FOOD_PHOTO)
+            val selectedConsumption = envelope.consumption.filter { consumption ->
+                artifactKeys == null || IngestionArtifactKeys.consumption(consumption.clientKey) in artifactKeys
+            }
+            // A user_provided amount is an explicit user statement carried in source.user_text;
+            // it is not a photo-derived estimate. The producer must not create consumption from
+            // product or purchase facts, and this gate never upgrades it to USER_VERIFIED.
+            // We intentionally require the existing FOOD_PHOTO evidence path for every other
+            // amount status, including estimated amounts.
+            val requiresFoodPhoto = selectedConsumption.any { consumption ->
+                envelope.source.userText.isNullOrBlank() ||
+                    consumption.items.any { item -> item.amountStatus != "user_provided" }
+            }
+            if (requiresFoodPhoto) add(SourceAttachmentType.FOOD_PHOTO)
         }
         if (envelope.schemaVersion != YEONSIK_OCR_V4_SCHEMA) {
             val productArtifactSelected = artifactKeys == null || artifactKeys.any { key ->
@@ -335,8 +347,7 @@ object IngestionEvidenceGate {
         if (envelope.schemaVersion != YEONSIK_OCR_V2_SCHEMA ||
             envelope.mode != IngestionMode.PACKAGED_PRODUCT ||
             envelope.source.sourceFiles.isNotEmpty() ||
-            envelope.source.userText.isNullOrBlank() ||
-            envelope.consumption.isNotEmpty()
+            envelope.source.userText.isNullOrBlank()
         ) return false
 
         val selectedNutrition = envelope.nutrition.filter { item ->
@@ -357,6 +368,13 @@ object IngestionEvidenceGate {
                     evidence.sourceType == "user_statement" && evidence.sourceAttachmentIds.isEmpty()
                 }
         }
-        return nutritionIsTextBacked && candidatesAreTextBacked
+        val selectedConsumption = envelope.consumption.filter { consumption ->
+            artifactKeys == null || IngestionArtifactKeys.consumption(consumption.clientKey) in artifactKeys
+        }
+        val consumptionIsTextBacked = selectedConsumption.all { consumption ->
+            consumption.items.isNotEmpty() &&
+                consumption.items.all { item -> item.amountStatus == "user_provided" }
+        }
+        return nutritionIsTextBacked && candidatesAreTextBacked && consumptionIsTextBacked
     }
 }

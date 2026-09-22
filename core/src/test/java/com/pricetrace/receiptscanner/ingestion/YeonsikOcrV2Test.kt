@@ -395,6 +395,122 @@ class YeonsikOcrV2Test {
     }
 
     @Test
+    fun `v2 user provided consumption with stated amount passes without food photo`() {
+        val source = YeonsikOcrV2Json.decode(
+            readExample("yeonsik-ocr.v2.packaged-product.example.json"),
+            "local-v2-user-provided-product",
+        )
+        val envelope = source.copy(
+            source = source.source.copy(userText = "Test cereal 40g 먹음"),
+            consumption = source.consumption.map { consumption ->
+                consumption.copy(items = consumption.items.map { item ->
+                    item.copy(amountStatus = "user_provided")
+                })
+            },
+        )
+
+        val result = IngestionEvidenceGate.evaluate(
+            envelope,
+            listOf(
+                LocalEvidence("product-photo-1", SourceAttachmentType.PRODUCT_PHOTO, true),
+                LocalEvidence("nutrition-label-1", SourceAttachmentType.NUTRITION_LABEL, true),
+            ),
+        )
+
+        assertTrue(result.blockingIssues.toString(), result.isAllowed)
+        assertEquals(ConsumptionVerificationStatus.UNVERIFIED, envelope.consumption.single().status)
+    }
+
+    @Test
+    fun `v2 external reference with explicit user consumption passes without food photo`() {
+        val source = YeonsikOcrV2Json.decode(
+            readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json"),
+            "local-v2-external-user-provided",
+        )
+        val envelope = source.copy(
+            source = source.source.copy(userText = "Test cereal 한 봉지 먹음"),
+            consumption = listOf(
+                IngestionConsumption(
+                    clientKey = "meal-user-provided",
+                    nutritionClientKeys = setOf("text-product-1"),
+                    items = listOf(
+                        IngestionConsumptionItem(
+                            nutritionClientKey = "text-product-1",
+                            amount = 1.0,
+                            unit = "package",
+                            confidence = 1.0,
+                            amountStatus = "user_provided",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(IngestionEvidenceGate.evaluate(envelope, emptyList()).isAllowed)
+        assertEquals(ConsumptionVerificationStatus.UNVERIFIED, envelope.consumption.single().status)
+    }
+
+    @Test
+    fun `v2 estimated consumption without food photo remains blocked`() {
+        val source = YeonsikOcrV2Json.decode(
+            readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json"),
+            "local-v2-external-estimated",
+        )
+        val envelope = source.copy(
+            source = source.source.copy(userText = "Test cereal 한 봉지 먹음"),
+            consumption = listOf(
+                IngestionConsumption(
+                    clientKey = "meal-estimated",
+                    nutritionClientKeys = setOf("text-product-1"),
+                    items = listOf(
+                        IngestionConsumptionItem(
+                            nutritionClientKey = "text-product-1",
+                            amount = 1.0,
+                            unit = "package",
+                            confidence = 0.7,
+                            amountStatus = "estimated",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val result = IngestionEvidenceGate.evaluate(envelope, emptyList())
+        assertFalse(result.isAllowed)
+        assertTrue(result.blockingIssues.any { it == "food_photo_image_required" || it == "source_image_required" })
+    }
+
+    @Test
+    fun `v2 purchase statement alone does not create consumption`() {
+        val source = YeonsikOcrV2Json.decode(
+            readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json"),
+            "local-v2-purchase-is-not-consumption",
+        )
+        val envelope = source.copy(source = source.source.copy(userText = "Test cereal을 구매했음"))
+
+        assertTrue(envelope.consumption.isEmpty())
+        assertFalse(IngestionProjection.FITNESS_MEAL in CanonicalProjectionPlanner.plan(envelope).eligible)
+    }
+
+    @Test
+    fun `v2 restaurant photo estimate and consumption still require and accept food photo evidence`() {
+        val envelope = YeonsikOcrV2Json.decode(
+            readExample("yeonsik-ocr.v2.restaurant.example.json"),
+            "local-v2-restaurant-consumption-evidence",
+        )
+
+        assertTrue(
+            IngestionEvidenceGate.evaluate(
+                envelope,
+                listOf(
+                    LocalEvidence("receipt-1", SourceAttachmentType.RECEIPT, true),
+                    LocalEvidence("food-1", SourceAttachmentType.FOOD_PHOTO, true),
+                    LocalEvidence("food-3", SourceAttachmentType.FOOD_PHOTO, true),
+                ),
+            ).isAllowed,
+        )
+    }
+    @Test
     fun `v2 confirmation revalidates edited cross artifact invariants`() = runBlocking {
         val useCase = CanonicalIngestionUseCase(InMemoryIngestionSessionStore())
         val imported = useCase.importJson(
@@ -574,8 +690,8 @@ class YeonsikOcrV2Test {
     fun `v2 rejects identity fields that GPT must not provide`() {
         val invalid = readExample("yeonsik-ocr.v2.packaged-product.example.json")
             .replace(
-                "\"source_version\": \"chatgpt-vision-v2\",",
-                "\"source_version\": \"chatgpt-vision-v2\", \"catalog_product_id\": \"not-a-client-fact\",",
+                "\"confidence\": 0.93",
+                "\"confidence\": 0.93, \"catalog_product_id\": \"not-a-client-fact\"",
             )
 
         assertThrows(IllegalArgumentException::class.java) {
@@ -715,30 +831,7 @@ class YeonsikOcrV2Test {
 
     private fun projectPackagedExample(): String {
         val legacyRoot = JsonSupport.parse(readExample("yeonsik-ocr.v2.packaged-product.example.json"))
-        val oldCandidate = legacyRoot["product_candidates"]!!.jsonArray.single().jsonObject
-        val sourceAttachmentIds = oldCandidate["evidence"]!!.jsonArray
-            .flatMap { it.jsonObject["source_attachment_ids"]!!.jsonArray }
-            .map { it.jsonPrimitive.content }
-            .distinct()
-        val candidate = buildJsonObject {
-            put("client_key", oldCandidate["client_key"]!!)
-            put("product_name", oldCandidate["product_name"]!!)
-            put("brand_name", oldCandidate["brand"] ?: JsonNull)
-            put("manufacturer_name", oldCandidate["manufacturer"] ?: JsonNull)
-            put("variant_name", oldCandidate["variant"] ?: JsonNull)
-            put("specification_text", oldCandidate["specification"] ?: JsonNull)
-            put("content_amount", oldCandidate["content_amount"] ?: JsonNull)
-            put("content_unit", oldCandidate["content_unit"] ?: JsonNull)
-            put("package_count", oldCandidate["package_count"] ?: JsonNull)
-            put("barcodes", JsonArray(oldCandidate["barcodes"]!!.jsonArray.map { value ->
-                buildJsonObject {
-                    put("scheme", value.jsonObject["type"]!!)
-                    put("value", value.jsonObject["value"]!!)
-                }
-            }))
-            put("source_attachment_ids", JsonArray(sourceAttachmentIds.map(::JsonPrimitive)))
-            put("confidence", JsonPrimitive(0.93))
-        }
+        val candidate = legacyRoot["product_candidates"]!!.jsonArray.single().jsonObject
         val canonicalRoot = JsonObject(legacyRoot.toMutableMap().apply {
             put("product_candidates", JsonArray(listOf(candidate)))
             put(

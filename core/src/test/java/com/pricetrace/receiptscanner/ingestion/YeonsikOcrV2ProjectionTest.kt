@@ -1,5 +1,6 @@
 package com.pricetrace.receiptscanner.ingestion
 
+import com.pricetrace.receiptscanner.domain.ReceiptBenefitKind
 import com.pricetrace.receiptscanner.importer.CanonicalDraft
 import com.pricetrace.receiptscanner.importer.ExternalJsonImportOutcome
 import com.pricetrace.receiptscanner.importer.ExternalJsonImporter
@@ -7,6 +8,7 @@ import com.pricetrace.receiptscanner.input.InputOrigin
 import com.pricetrace.receiptscanner.nutrition.NutritionDraftStatus
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -96,6 +98,37 @@ class YeonsikOcrV2ProjectionTest {
         )
     }
 
+    @Test
+    fun `benefit receipt lines never become PriceTrace observations regardless of amount`() {
+        val imported = ExternalJsonImporter().import(
+            readExample("yeonsik-ocr.v2.restaurant.example.json"),
+            "local-v2-benefit-price-routing",
+        ) as ExternalJsonImportOutcome.Success
+        val source = (imported.result.draft as CanonicalDraft.Envelope).value
+        val receipt = requireNotNull(source.receipt)
+
+        ReceiptBenefitKind.entries.forEach { benefitKind ->
+            val envelope = source.copy(
+                receipt = receipt.copy(lineItems = receipt.lineItems.map { line ->
+                    line.copy(foodService = line.foodService!!.copy(benefitKind = benefitKind))
+                }),
+            )
+            assertFalse(
+                "$benefitKind must not become a PriceTrace price observation",
+                IngestionProjection.PRICETRACE_PRICE_OBSERVATION in CanonicalProjectionPlanner.plan(envelope).eligible,
+            )
+        }
+
+        val zeroAmountWithoutBenefit = source.copy(
+            receipt = receipt.copy(lineItems = receipt.lineItems.map { line ->
+                line.copy(netAmountMinor = 0, foodService = line.foodService!!.copy(benefitKind = null))
+            }),
+        )
+        assertTrue(
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION in
+                CanonicalProjectionPlanner.plan(zeroAmountWithoutBenefit).eligible,
+        )
+    }
     @Test
     fun `v2 incomplete consumption never activates fitness meal`() = runBlocking {
         val imported = ExternalJsonImporter().import(

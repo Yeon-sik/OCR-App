@@ -59,29 +59,18 @@
     {
       "client_key": "product-1",
       "product_name": "Test cereal",
-      "brand": "Test brand",
-      "manufacturer": "Test Foods",
-      "specification": "Original",
+      "brand_name": "Test brand",
+      "manufacturer_name": "Test Foods",
+      "variant_name": "Original",
+      "specification_text": "Original",
       "content_amount": 500,
       "content_unit": "g",
       "package_count": 1,
-      "variant": "Original",
       "barcodes": [
-        {"type": "ean13", "value": "8801234567890"}
+        {"scheme": "ean13", "value": "8801234567890"}
       ],
-      "candidate_type": "retail_product",
-      "source_version": "chatgpt-vision-v2",
-      "evidence": [
-        {
-          "source_attachment_ids": ["product-photo-1"],
-          "source": "상품 정면 사진",
-          "source_type": "product_photo",
-          "source_ref": "product-photo-1",
-          "field": "product_name",
-          "observed_value": "Test cereal",
-          "content_hash": null
-        }
-      ]
+      "source_attachment_ids": ["product-photo-1"],
+      "confidence": 0.93
     }
   ],
   "consumption": [
