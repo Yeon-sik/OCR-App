@@ -38,7 +38,7 @@ import java.nio.file.Path
 object NativeFileDialogs {
     fun chooseBundles(): List<Path> = openFiles(
         title = "영식 파일 선택",
-        extensions = setOf("yeonsik"),
+        extensions = setOf("yeonsik", "json"),
         multiple = true,
     )
 

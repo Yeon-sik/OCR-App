@@ -39,9 +39,14 @@ import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 import com.pricetrace.receiptscanner.review.CanonicalReviewController
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.nio.file.Files
 import java.nio.file.Path
 
 private enum class CompactCollectorPane(val label: String) {
@@ -89,14 +94,20 @@ fun YeonsikCollectorApp(
         { action -> scope.launch(Dispatchers.IO) { action() } }
     }
     val importBundles: (List<Path>) -> Unit = { paths ->
-        val bundles = paths.filter { it.fileName.toString().endsWith(".yeonsik", ignoreCase = true) }
-        if (bundles.isEmpty()) {
+        val bundles = yeonsikBundlePaths(paths)
+        val jsonFiles = paths.filter { it.fileName.toString().endsWith(".json", ignoreCase = true) }
+        if (bundles.isEmpty() && jsonFiles.isEmpty()) {
             importNotice = "지원하지 않는 파일입니다. 확장자가 .yeonsik 인 파일을 선택하거나 놓으세요."
         } else {
-            importNotice = null
-            runIo {
-                batchCoordinator.importBundles(bundles)
-                refreshRecent()
+            importNotice = jsonFiles
+                .map(::diagnosticArtifactNotice)
+                .joinToString("\n")
+                .ifBlank { null }
+            if (bundles.isNotEmpty()) {
+                runIo {
+                    batchCoordinator.importBundles(bundles)
+                    refreshRecent()
+                }
             }
         }
     }
@@ -499,3 +510,52 @@ private fun batchItemStatusKind(status: DesktopBatchItemStatus): CollectorStatus
 }
 
 private val evidenceExtensions = setOf("png", "jpg", "jpeg", "webp", "heic", "heif")
+
+internal fun yeonsikBundlePaths(paths: List<Path>): List<Path> =
+    paths.filter { it.fileName.toString().endsWith(".yeonsik", ignoreCase = true) }
+
+internal fun diagnosticArtifactNotice(path: Path): String {
+    val root = try {
+        Json.parseToJsonElement(Files.readString(path))
+    } catch (_: Exception) {
+        return "JSON 파일을 읽을 수 없습니다."
+    }
+    val artifact = root as? JsonObject ?: return unsupportedJsonNotice()
+    return when (artifact.stringValue("status")) {
+        "needs_recapture" -> diagnosticNotice(
+            status = "재입력 필요",
+            reason = artifact.stringValue("reason"),
+            detailLabel = "누락",
+            details = artifact.stringArrayValue("missing"),
+        )
+        "needs_split" -> diagnosticNotice(
+            status = "입력 분리 필요",
+            reason = artifact.stringValue("reason"),
+            detailLabel = "필요한 스키마",
+            details = artifact.stringArrayValue("required_schemas"),
+        )
+        else -> unsupportedJsonNotice()
+    }
+}
+
+private fun diagnosticNotice(
+    status: String,
+    reason: String?,
+    detailLabel: String,
+    details: List<String>,
+): String = buildList {
+    add(status)
+    reason?.takeIf(String::isNotBlank)?.let(::add)
+    if (details.isNotEmpty()) add("$detailLabel: ${details.joinToString(", ")}")
+}.joinToString(" · ")
+
+private fun unsupportedJsonNotice(): String =
+    "지원하지 않는 JSON입니다. canonical JSON은 개발자 정보 > 외부 JSON 열기를 사용하세요."
+
+private fun JsonObject.stringValue(key: String): String? =
+    (this[key] as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content
+
+private fun JsonObject.stringArrayValue(key: String): List<String> =
+    (this[key] as? JsonArray)?.mapNotNull { value ->
+        (value as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content
+    }.orEmpty()

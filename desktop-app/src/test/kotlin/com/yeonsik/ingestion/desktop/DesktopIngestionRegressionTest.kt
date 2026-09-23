@@ -48,6 +48,60 @@ import java.util.zip.ZipOutputStream
 
 class DesktopIngestionRegressionTest {
     @Test
+    fun `failure diagnostic JSON reports status reason and recognized details safely`() {
+        val directory = Files.createTempDirectory("yeonsik-diagnostic-json")
+        fun write(name: String, json: String) = directory.resolve(name).also { Files.writeString(it, json) }
+
+        val recapture = write(
+            "needs_recapture.json",
+            """{"status":"needs_recapture","missing":["nutrition.required_nutrients"],"reason":"동일 제품의 필수 영양정보를 확인할 수 없습니다."}""",
+        )
+        assertEquals(
+            "재입력 필요 · 동일 제품의 필수 영양정보를 확인할 수 없습니다. · 누락: nutrition.required_nutrients",
+            diagnosticArtifactNotice(recapture),
+        )
+
+        val split = write(
+            "needs_split.json",
+            """{"status":"needs_split","required_schemas":["yeonsik-ocr.v4","yeonsik-ocr.v2"],"reason":"현재 canonical 계약은 입력을 동시에 표현하지 않습니다."}""",
+        )
+        assertEquals(
+            "입력 분리 필요 · 현재 canonical 계약은 입력을 동시에 표현하지 않습니다. · 필요한 스키마: yeonsik-ocr.v4, yeonsik-ocr.v2",
+            diagnosticArtifactNotice(split),
+        )
+        assertEquals("JSON 파일을 읽을 수 없습니다.", diagnosticArtifactNotice(write("malformed.json", "{")))
+        assertEquals(
+            "지원하지 않는 JSON입니다. canonical JSON은 개발자 정보 > 외부 JSON 열기를 사용하세요.",
+            diagnosticArtifactNotice(write("canonical.json", """{"receipt":{"schema":"receipt.v2"}}""")),
+        )
+    }
+
+    @Test
+    fun `failure JSON selected with a yeonsik bundle does not block bundle import`() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-diagnostic-and-bundle"))
+        val controller = DesktopIngestionController(
+            store = store,
+            bundle = DesktopProjectionBundle(
+                config = DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")),
+                evidenceArchivePortOverride = CountingArchivePort(),
+            ),
+        )
+        val coordinator = DesktopBatchCoordinator(controller)
+        val failure = store.directory.resolve("needs_recapture.json").also {
+            Files.writeString(it, """{"status":"needs_recapture","reason":"추가 자료가 필요합니다."}""")
+        }
+        val bundle = writeMerchantBundle(store.directory, "diagnostic-coexists", userText = "근거 자료")
+        val selected = listOf(failure, bundle)
+        val bundles = yeonsikBundlePaths(selected)
+
+        assertEquals("재입력 필요 · 추가 자료가 필요합니다.", diagnosticArtifactNotice(failure))
+        coordinator.importBundles(bundles)
+
+        assertEquals(1, coordinator.state.value.items.size)
+        assertEquals(DesktopBatchItemStatus.REVIEW_REQUIRED, coordinator.state.value.items.single().status)
+        assertNotNull(coordinator.state.value.items.single().ingestionId)
+    }
+    @Test
     fun `desktop review derives PriceTrace status and reason per V4 purchase record`() = runBlocking {
         val source = YeonsikOcrV4Json.decode(
             readExample("yeonsik-ocr.v4.purchase.example.json"),
