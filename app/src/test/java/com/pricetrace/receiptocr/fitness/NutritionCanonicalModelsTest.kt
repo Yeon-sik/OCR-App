@@ -19,6 +19,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 class NutritionCanonicalModelsTest {
     @Test
@@ -168,6 +169,51 @@ class NutritionCanonicalModelsTest {
     }
 
     @Test
+    fun externalReferenceFactoryMatchesTheSharedFitnessContractFixture() {
+        val candidate = ProductCandidate(
+            clientKey = "product-1",
+            productName = "Test cereal",
+            brand = "Brand",
+            manufacturer = "Test Foods",
+            sourceAttachmentIds = emptyList(),
+            evidence = listOf(
+                ProductCandidateEvidence(
+                    sourceType = "user_statement",
+                    sourceRef = "user-statement:sha256:abc",
+                    field = "product_name",
+                    observedValue = "Test cereal",
+                ),
+            ),
+        )
+        val sourceReference = "https://nutrition.example.com/products/test-cereal"
+        val draft = NutritionLabelDraft(
+            documentId = "external-label-1",
+            parserVersion = com.pricetrace.receiptscanner.nutrition.EXTERNAL_NUTRITION_LOOKUP_VERSION,
+            sourceType = "external_reference",
+            sourceReference = sourceReference,
+            sourceVersion = com.pricetrace.receiptscanner.nutrition.EXTERNAL_NUTRITION_LOOKUP_VERSION,
+            productName = "Test cereal",
+            brand = "Brand",
+            category = "processed",
+            basisAmount = 100.0,
+            basisUnit = "g",
+            nutrients = NutritionField.requiredFields.associateWith { 10.0 },
+        ).asUserVerified("2026-09-19T10:00:00+09:00")
+        val payload = CanonicalNutritionPayloadFactory.fromProductLabel(
+            localDocumentId = "text-lookup-session",
+            revisionSeq = 2,
+            idempotencyKey = "external-reference-key",
+            draft = draft,
+            productCandidate = candidate,
+        )
+
+        val actual = Json.parseToJsonElement(payload.toRpcJson(includeHierarchyFields = true))
+        val expected = Json.parseToJsonElement(readContractFixture())
+
+        assertEquals(expected, actual)
+    }
+
+    @Test
     fun restaurantEstimateUsesFoodEstimateContractWithConfidenceRangeAndDeclaredEvidence() {
         val evidenceRefs = NutritionField.requiredFields.associate { field ->
             field to NutritionNutrientProvenance(
@@ -280,6 +326,14 @@ class NutritionCanonicalModelsTest {
             )
         }.toMap(),
     ).asUserVerified("2026-08-28T10:00:00+09:00")
+
+    private fun readContractFixture(): String {
+        val file = sequenceOf(
+            File("contracts/fitness-external-reference.v1.json"),
+            File("../contracts/fitness-external-reference.v1.json"),
+        ).firstOrNull(File::isFile) ?: error("external-reference contract fixture not found")
+        return file.readText()
+    }
 
     private fun value(field: NutritionField): Double = when (field) {
         NutritionField.CALORIES_KCAL -> 380.0

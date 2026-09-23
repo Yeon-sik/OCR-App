@@ -53,6 +53,19 @@ hierarchy-aware v3 RPC에 `external-reference.v1` input contract와 공개 URL e
 reference를 전송하고, 추정치나 `estimation_evidence`를 만들지 않습니다. 기존
 `product_label_ocr` 라벨 경로는 `nutrition-label.v1` 계약과 V2 RPC를 유지합니다.
 
+양쪽 저장소의 실제 RPC body 기준 fixture는
+`contracts/fitness-external-reference.v1.json`입니다. 이 fixture의 schema/version은
+`external-reference.v1`과 `external-nutrition-lookup.v1`로 고정하며, Fitness read 결과도
+`source_type=external_reference`, 원본 URL, 동일 source version을 노출해야 합니다.
+상세한 공통 schema/version 규칙은 `contracts/fitness-external-reference.v1.md`에 둡니다.
+
+`consumption`은 실제 user consumption statement가 canonical envelope에 있을 때만
+존재합니다. `source.user_text`가 있고 모든 선택된 item이 `amount_status=user_provided`와
+실제 amount/unit을 가지면 FOOD_PHOTO를 요구하지 않습니다. `estimated`, `observed`,
+`unknown` amount는 기존처럼 FOOD_PHOTO source evidence를 요구합니다. 이 gate는
+사진 없이 consumption을 생성하거나 `consumed_at`을 추정하지 않으며, producer의
+`user_verified` flag를 권한으로 사용하지 않습니다.
+
 ## 앱 설정과 사용
 
 1. 루트 `.env`의 `NUTRITION_SUPABASE_URL`, `NUTRITION_SUPABASE_ANON_KEY`, `EMAIL`, `PASSWORD`를 채우고 빌드합니다. 앱이 연결값을 자동 사용하고 시작 시 Fitness 계정 로그인을 시도합니다.
