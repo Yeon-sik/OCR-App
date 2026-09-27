@@ -94,6 +94,24 @@ class NutritionSupabaseGateway(
         return importCanonicalOnce(payload, refreshed, "/rest/v1/rpc/import_canonical_nutrition_v3")
     }
 
+    /** Atomically attaches the exact PriceTrace menu identity and publishes one verified estimate. */
+    suspend fun publishVerifiedDiningOutNutrition(
+        payload: NutritionDiningOutPublicationPayload,
+    ): NutritionDiningOutPublicationOutcome {
+        val initial = store.read()
+        if (!initial.isSignedIn) {
+            return NutritionDiningOutPublicationOutcome.Failure(NutritionGatewayFailure.NOT_CONFIGURED)
+        }
+        val first = publishVerifiedDiningOutNutritionOnce(payload, initial)
+        if (first !is NutritionDiningOutPublicationOutcome.Failure ||
+            first.reason != NutritionGatewayFailure.AUTHENTICATION
+        ) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return publishVerifiedDiningOutNutritionOnce(payload, refreshed)
+    }
+
     /** Sends the verified item-level Meal to Fitness's canonical Meal boundary. */
     suspend fun importVerifiedMeal(payload: FitnessMealCanonicalPayload): NutritionMealImportOutcome {
         val initial = store.read()
@@ -180,6 +198,43 @@ class NutritionSupabaseGateway(
         NutritionCanonicalImportOutcome.Failure(NutritionGatewayFailure.NETWORK)
     } catch (error: Exception) {
         NutritionCanonicalImportOutcome.Failure(NutritionGatewayFailure.CONTRACT, error.message)
+    }
+
+    private suspend fun publishVerifiedDiningOutNutritionOnce(
+        payload: NutritionDiningOutPublicationPayload,
+        config: NutritionSupabaseConfig,
+    ): NutritionDiningOutPublicationOutcome = try {
+        val response = transport.execute(
+            request(
+                config = config,
+                method = "POST",
+                path = "/rest/v1/rpc/publish_verified_ocr_dining_out_nutrition_v1",
+                body = NutritionDiningOutPublicationJson.encode(payload),
+            ),
+        )
+        when {
+            response.statusCode == 401 || response.statusCode == 403 ->
+                NutritionDiningOutPublicationOutcome.Failure(NutritionGatewayFailure.AUTHENTICATION)
+            response.statusCode == 409 ->
+                NutritionDiningOutPublicationOutcome.Failure(NutritionGatewayFailure.CONFLICT, response.body.takeIf(String::isNotBlank))
+            response.statusCode == 429 ->
+                NutritionDiningOutPublicationOutcome.Failure(NutritionGatewayFailure.RATE_LIMITED, response.body.takeIf(String::isNotBlank))
+            response.statusCode in 500..599 ->
+                NutritionDiningOutPublicationOutcome.Failure(NutritionGatewayFailure.SERVER, response.body.takeIf(String::isNotBlank))
+            response.statusCode !in 200..299 ->
+                NutritionDiningOutPublicationOutcome.Failure(NutritionGatewayFailure.CONTRACT, response.body.takeIf(String::isNotBlank))
+            else -> {
+                val decoded = NutritionDiningOutPublicationJson.decodeResponse(response.body)
+                NutritionDiningOutPublicationJson.requireMatches(decoded, payload)
+                NutritionDiningOutPublicationOutcome.Success(decoded, response.body)
+            }
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: IOException) {
+        NutritionDiningOutPublicationOutcome.Failure(NutritionGatewayFailure.NETWORK)
+    } catch (error: Exception) {
+        NutritionDiningOutPublicationOutcome.Failure(NutritionGatewayFailure.CONTRACT, error.message)
     }
 
     private suspend fun proposeProductNutritionLinkOnce(

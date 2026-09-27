@@ -47,8 +47,15 @@ sealed interface ProjectionSubmission {
         /** False when the sink accepted the request but did not create this target yet. */
         val primaryUploaded: Boolean = true,
         val primaryPendingReason: String? = null,
+        /** PriceTrace can accept a receipt while requiring OCR-owned identity follow-up. */
+        val requiresReview: Boolean = false,
     ) : ProjectionSubmission
-    data class Failure(val message: String, val retryable: Boolean) : ProjectionSubmission
+    data class Failure(
+        val message: String,
+        val retryable: Boolean,
+        val requiresReview: Boolean = false,
+        val metadataJson: String? = null,
+    ) : ProjectionSubmission
 }
 
 interface IngestionProjectionSubmitter {
@@ -553,9 +560,17 @@ class IngestionOrchestrator(
         return when (val result = submitter.submit(request)) {
             is ProjectionSubmission.Success -> persistSuccess(session, projection, attempted, key, result, envelope)
             is ProjectionSubmission.Failure -> if (result.retryable) {
-                persistFailure(session, projection, attempted, result.message, key)
+                persistFailure(session, projection, attempted, result.message, key, result.metadataJson)
             } else {
-                persistBlocked(session, projection, attempted, result.message, key)
+                persistBlocked(
+                    session,
+                    projection,
+                    attempted,
+                    result.message,
+                    key,
+                    reviewRequired = result.requiresReview,
+                    metadataJson = result.metadataJson,
+                )
             }
         }
     }
@@ -1264,7 +1279,11 @@ class IngestionOrchestrator(
                 else -> state
             }
         }
-        val updatedSession = session.copy(updatedAt = nowValue, projections = targetStates)
+        val updatedSession = session.copy(
+            reviewStatus = if (result.requiresReview) IngestionReviewStatus.NEEDS_REVIEW else session.reviewStatus,
+            updatedAt = nowValue,
+            projections = targetStates,
+        )
         store.save(updatedSession)
         return targetStates.first { it.projection == projection }
     }
@@ -1275,14 +1294,21 @@ class IngestionOrchestrator(
         previous: ProjectionState,
         message: String,
         key: String? = previous.idempotencyKey,
+        reviewRequired: Boolean = false,
+        metadataJson: String? = previous.metadataJson,
     ): ProjectionState {
         val updatedState = previous.copy(
             status = ProjectionStatus.BLOCKED,
             idempotencyKey = key,
             lastError = message,
+            metadataJson = metadataJson,
             updatedAt = now(),
         )
-        store.save(session.copy(updatedAt = now(), projections = session.projections.replace(updatedState)))
+        store.save(session.copy(
+            reviewStatus = if (reviewRequired) IngestionReviewStatus.NEEDS_REVIEW else session.reviewStatus,
+            updatedAt = now(),
+            projections = session.projections.replace(updatedState),
+        ))
         return updatedState
     }
 
@@ -1292,11 +1318,13 @@ class IngestionOrchestrator(
         previous: ProjectionState,
         message: String,
         key: String? = previous.idempotencyKey,
+        metadataJson: String? = previous.metadataJson,
     ): ProjectionState {
         val updatedState = previous.copy(
             status = ProjectionStatus.FAILED,
             idempotencyKey = key,
             lastError = message,
+            metadataJson = metadataJson,
             updatedAt = now(),
         )
         store.save(session.copy(updatedAt = now(), projections = session.projections.replace(updatedState)))

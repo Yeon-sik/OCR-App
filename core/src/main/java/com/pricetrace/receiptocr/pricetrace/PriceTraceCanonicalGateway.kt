@@ -724,12 +724,13 @@ class PriceTraceCanonicalProjectionSubmitter(
                             val remoteId = observations.firstOrNull()?.let {
                                 (it as? JsonObject)?.standaloneId()
                             } ?: return ProjectionSubmission.Failure("pricetrace_observation_identity_invalid", retryable = false)
-                            return ProjectionSubmission.Success(remoteId = remoteId, metadataJson = result.response.encode())
+                            return ProjectionSubmission.Success(
+                                remoteId = remoteId,
+                                metadataJson = result.response.encode(),
+                                requiresReview = PriceTraceIdentityJson.requiresOcrReview(result.response),
+                            )
                         }
-                        is PriceTraceCanonicalOutcome.Failure -> return ProjectionSubmission.Failure(
-                            message = result.message ?: result.kind.name,
-                            retryable = result.kind.retryable,
-                        )
+                        is PriceTraceCanonicalOutcome.Failure -> return result.toProjectionFailure(reviewAware = true)
                     }
                 }
                 val receipt = envelope.receipt
@@ -769,12 +770,10 @@ class PriceTraceCanonicalProjectionSubmitter(
                             } else {
                                 null
                             },
+                            requiresReview = PriceTraceIdentityJson.requiresOcrReview(result.response),
                         )
                     }
-                    is PriceTraceCanonicalOutcome.Failure -> ProjectionSubmission.Failure(
-                        message = result.message ?: result.kind.name,
-                        retryable = result.kind.retryable,
-                    )
+                    is PriceTraceCanonicalOutcome.Failure -> result.toProjectionFailure(reviewAware = true)
                 }
             }
             IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> {
@@ -798,6 +797,23 @@ class PriceTraceCanonicalProjectionSubmitter(
     private fun JsonObject.requiredId(key: String): String =
         (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
             ?: error("PriceTrace response is missing $key")
+
+    private fun PriceTraceCanonicalOutcome.Failure.toProjectionFailure(
+        reviewAware: Boolean = false,
+    ): ProjectionSubmission.Failure {
+        val message = message ?: kind.name
+        val requiresReview = reviewAware && listOf(
+            "needs_ocr_resolution",
+            "needs_user_selection",
+            "ambiguous",
+            "unresolved_catalog",
+        ).any { token -> message.contains(token, ignoreCase = true) }
+        return ProjectionSubmission.Failure(
+            message = message,
+            retryable = kind.retryable && !requiresReview,
+            requiresReview = requiresReview,
+        )
+    }
 
     private fun JsonObject.standaloneId(): String? = listOf(
         "observationId", "observation_id", "priceObservationId", "id",
