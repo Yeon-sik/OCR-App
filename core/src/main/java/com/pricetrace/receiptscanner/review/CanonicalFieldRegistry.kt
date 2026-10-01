@@ -1,6 +1,7 @@
 package com.pricetrace.receiptscanner.review
 
 import com.pricetrace.receiptscanner.domain.ReceiptLineType
+import com.pricetrace.receiptscanner.domain.BusinessKind
 import com.pricetrace.receiptscanner.domain.ReceiptFulfillmentEvidence
 import com.pricetrace.receiptscanner.domain.ReceiptFulfillmentType
 import com.pricetrace.receiptscanner.domain.FoodServiceRole
@@ -61,11 +62,17 @@ object CanonicalFieldRegistry {
     fun fields(envelope: YeonsikOcrEnvelope): List<CanonicalEditableField> = buildList {
         if (envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA && envelope.receipt != null) {
             val receipt = envelope.receipt
+            val foodServiceReceipt = receipt.merchant.businessKind == BusinessKind.FOOD_SERVICE ||
+                envelope.merchantCandidate?.businessKind == BusinessKind.FOOD_SERVICE
             add(text("receipt.merchant.name", "판매처명", nullable = true))
             add(text("receipt.merchant.branch_name", "지점명"))
             add(text("receipt.merchant.address", "판매처 주소"))
             add(text("receipt.merchant.phone", "판매처 전화"))
             add(text("receipt.merchant.business_registration_number", "사업자등록번호"))
+            if (foodServiceReceipt) {
+                add(text("receipt.merchant.catalog_namespace", "판매처 출처 namespace"))
+                add(text("receipt.merchant.merchant_id", "판매처 출처 위치 코드"))
+            }
             add(date("receipt.document.issued_on", "구매일"))
             add(datetime("receipt.document.issued_at", "구매 시각"))
             add(enum("receipt.document.fulfillment.type", "수령 방식", ReceiptFulfillmentType.entries.map { it.wireValue }, nullable = false))
@@ -73,6 +80,7 @@ object CanonicalFieldRegistry {
             receipt.lineItems.forEach { line ->
                 val prefix = "receipt.line_items[${line.id}]"
                 add(text("$prefix.description", "${line.id} 설명", nullable = true))
+                if (foodServiceReceipt) add(text("$prefix.merchant_sku", "${line.id} 인쇄된 메뉴 코드", nullable = true))
                 add(enum("$prefix.type", "${line.id} 행 유형", ReceiptLineType.entries.map { it.wireValue }, nullable = false))
                 add(decimal("$prefix.quantity", "${line.id} 수량", nullable = true, min = BigDecimal.ZERO, minExclusive = true))
                 add(integer("$prefix.unit_price_amount_minor", "${line.id} 단가", nullable = true, min = BigDecimal.ZERO))
@@ -101,15 +109,23 @@ object CanonicalFieldRegistry {
             }
         }
 
-        if (envelope.merchantCandidate != null &&
-            !(envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA && envelope.receipt != null)
-        ) {
-            add(text("merchant_candidate.name", "상점 후보명", nullable = false))
-            add(text("merchant_candidate.branch_name", "상점 후보 지점"))
-            add(text("merchant_candidate.address", "상점 후보 주소"))
-            add(text("merchant_candidate.phone", "상점 후보 전화"))
-            add(text("merchant_candidate.business_registration_number", "상점 후보 사업자등록번호"))
-            add(enum("merchant_candidate.business_kind", "상점 후보 업종", BUSINESS_KIND_VALUES, nullable = false))
+        if (envelope.merchantCandidate != null) {
+            val v2Receipt = envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA && envelope.receipt != null
+            if (!v2Receipt) {
+                add(text("merchant_candidate.name", "상점 후보명", nullable = false))
+                add(text("merchant_candidate.branch_name", "상점 후보 지점"))
+                add(text("merchant_candidate.address", "상점 후보 주소"))
+                add(text("merchant_candidate.phone", "상점 후보 전화"))
+                add(text("merchant_candidate.business_registration_number", "상점 후보 사업자등록번호"))
+                add(enum("merchant_candidate.business_kind", "상점 후보 업종", BUSINESS_KIND_VALUES, nullable = false))
+            }
+            // PriceTrace's OCR-owned merchant resolution RPC accepts these user-reviewed source facts.
+            if (!v2Receipt || envelope.receipt.merchant.businessKind == BusinessKind.FOOD_SERVICE ||
+                envelope.merchantCandidate.businessKind == BusinessKind.FOOD_SERVICE
+            ) {
+                add(text("merchant_candidate.source_namespace", "상점 출처 namespace"))
+                add(text("merchant_candidate.source_location_code", "상점 출처 위치 코드"))
+            }
         }
 
         envelope.productCandidates.forEach { candidate ->
@@ -243,6 +259,8 @@ object CanonicalFieldRegistry {
             canonical == "receipt.merchant.address" -> envelope.receipt?.merchant?.address
             canonical == "receipt.merchant.phone" -> envelope.receipt?.merchant?.phone
             canonical == "receipt.merchant.business_registration_number" -> envelope.receipt?.merchant?.businessRegistrationNumber
+            canonical == "receipt.merchant.catalog_namespace" -> envelope.receipt?.merchant?.catalogNamespace
+            canonical == "receipt.merchant.merchant_id" -> envelope.receipt?.merchant?.merchantId
             canonical == "receipt.document.issued_on" -> envelope.receipt?.document?.issuedOn
             canonical == "receipt.document.issued_at" -> envelope.receipt?.document?.issuedAt
             canonical == "receipt.document.fulfillment.type" -> envelope.receipt?.document?.fulfillment?.type?.wireValue
@@ -315,6 +333,7 @@ object CanonicalFieldRegistry {
         val line = envelope.receipt?.lineItems?.findByKey(match.groupValues[1]) ?: return null
         return when (match.groupValues[2]) {
             "description" -> line.description
+            "merchant_sku" -> line.identifiers.filter { it.scheme == "merchant_sku" }.singleOrNull()?.value
             "type" -> line.type.wireValue
             "quantity", "quantity.value" -> line.quantity?.value
             "unit_price_amount_minor" -> line.unitPriceAmountMinor?.toString()
@@ -363,6 +382,8 @@ object CanonicalFieldRegistry {
             "phone" -> candidate.phone
             "business_registration_number" -> candidate.businessRegistrationNumber
             "business_kind" -> candidate.businessKind.wireValue
+            "source_namespace" -> candidate.sourceNamespace
+            "source_location_code" -> candidate.sourceLocationCode
             else -> null
         }
     }

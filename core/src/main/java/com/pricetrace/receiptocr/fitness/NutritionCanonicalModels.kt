@@ -37,6 +37,18 @@ sealed interface NutritionCanonicalImportOutcome {
     ) : NutritionCanonicalImportOutcome
 }
 
+sealed interface NutritionDiningOutPublicationOutcome {
+    data class Success(
+        val response: NutritionDiningOutPublicationResponse,
+        val rawResponse: String,
+    ) : NutritionDiningOutPublicationOutcome
+
+    data class Failure(
+        val reason: NutritionGatewayFailure,
+        val message: String? = null,
+    ) : NutritionDiningOutPublicationOutcome
+}
+
 sealed interface NutritionProductLinkOutcome {
     data class Success(
         val response: ProductNutritionLinkProposalResponse,
@@ -247,6 +259,100 @@ data class CanonicalNutritionImportResponse(
     val estimationEvidenceId: String?,
     val visibility: String,
 )
+
+data class NutritionDiningOutPublicationPayload(
+    val idempotencyKey: String,
+    val canonicalImportId: String,
+    val nutritionFoodId: String,
+    val restaurantId: String,
+    val restaurantLocationId: String,
+    val restaurantMenuId: String,
+    val catalogProductId: String,
+) {
+    init {
+        require(idempotencyKey.isNotBlank() && idempotencyKey.length <= 200)
+        require(canonicalImportId.isNotBlank() && nutritionFoodId.isNotBlank())
+        require(restaurantId.isNotBlank() && restaurantLocationId.isNotBlank())
+        require(restaurantMenuId.isNotBlank() && catalogProductId.isNotBlank())
+    }
+}
+
+data class NutritionDiningOutPublicationResponse(
+    val canonicalImportId: String,
+    val nutritionFoodId: String,
+    val restaurantId: String,
+    val restaurantLocationId: String,
+    val restaurantMenuId: String,
+    val catalogProductId: String,
+    val nutritionLinkId: String,
+    val nutritionLinkRevision: Int,
+    val visibility: String,
+    val foodRevision: Int,
+    val publicationRevision: Int,
+    val publishedAt: String,
+    val replayed: Boolean,
+)
+
+object NutritionDiningOutPublicationJson {
+    private val json = Json { explicitNulls = true; ignoreUnknownKeys = false }
+
+    fun encode(payload: NutritionDiningOutPublicationPayload): String = json.encodeToString(
+        JsonObject.serializer(),
+        buildJsonObject {
+            put("p_idempotency_key", JsonPrimitive(payload.idempotencyKey))
+            put("p_canonical_import_id", JsonPrimitive(payload.canonicalImportId))
+            put("p_nutrition_food_id", JsonPrimitive(payload.nutritionFoodId))
+            put("p_restaurant_id", JsonPrimitive(payload.restaurantId))
+            put("p_restaurant_location_id", JsonPrimitive(payload.restaurantLocationId))
+            put("p_restaurant_menu_id", JsonPrimitive(payload.restaurantMenuId))
+            put("p_catalog_product_id", JsonPrimitive(payload.catalogProductId))
+        },
+    )
+
+    fun decodeResponse(value: String): NutritionDiningOutPublicationResponse {
+        val root = json.parseToJsonElement(value)
+        val row = when (root) {
+            is JsonObject -> root
+            else -> root.jsonArray.single().jsonObject
+        }
+        fun requiredString(key: String): String = (row[key] as? JsonPrimitive)?.contentOrNull
+            ?.takeIf(String::isNotBlank) ?: error("Missing OCR dining-out publication response field: $key")
+        fun requiredInt(key: String): Int = (row[key] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
+            ?: error("Invalid OCR dining-out publication response integer: $key")
+        fun requiredBoolean(key: String): Boolean = (row[key] as? JsonPrimitive)?.contentOrNull
+            ?.toBooleanStrictOrNull() ?: error("Invalid OCR dining-out publication response boolean: $key")
+        return NutritionDiningOutPublicationResponse(
+            canonicalImportId = requiredString("canonical_import_id"),
+            nutritionFoodId = requiredString("nutrition_food_id"),
+            restaurantId = requiredString("restaurant_id"),
+            restaurantLocationId = requiredString("restaurant_location_id"),
+            restaurantMenuId = requiredString("restaurant_menu_id"),
+            catalogProductId = requiredString("catalog_product_id"),
+            nutritionLinkId = requiredString("nutrition_link_id"),
+            nutritionLinkRevision = requiredInt("nutrition_link_revision"),
+            visibility = requiredString("visibility"),
+            foodRevision = requiredInt("food_revision"),
+            publicationRevision = requiredInt("publication_revision"),
+            publishedAt = requiredString("published_at"),
+            replayed = requiredBoolean("replayed"),
+        )
+    }
+
+    fun requireMatches(
+        response: NutritionDiningOutPublicationResponse,
+        payload: NutritionDiningOutPublicationPayload,
+    ) {
+        require(response.canonicalImportId == payload.canonicalImportId)
+        require(response.nutritionFoodId == payload.nutritionFoodId)
+        require(response.restaurantId == payload.restaurantId)
+        require(response.restaurantLocationId == payload.restaurantLocationId)
+        require(response.restaurantMenuId == payload.restaurantMenuId)
+        require(response.catalogProductId == payload.catalogProductId)
+        require(response.visibility == "public")
+        require(response.nutritionLinkRevision > 0 && response.foodRevision > 0)
+        require(response.publicationRevision > 0 && response.publishedAt.isNotBlank())
+    }
+}
 
 object CanonicalNutritionImportJson {
     private val json = Json { explicitNulls = true; ignoreUnknownKeys = false }
@@ -466,6 +572,7 @@ object CanonicalNutritionPayloadFactory {
         idempotencyKey: String,
         restaurantName: String,
         item: IngestionNutrition.RestaurantMenuEstimate,
+        priceTraceIdentity: JsonObject? = null,
         @Suppress("UNUSED_PARAMETER") useV3Contract: Boolean = false,
     ): CanonicalNutritionImportPayload = fromEstimate(
         localDocumentId = localDocumentId,
@@ -476,7 +583,7 @@ object CanonicalNutritionPayloadFactory {
         artifactKey = item.clientKey,
         foodName = item.menuName,
         estimate = item.estimate,
-        priceTraceIdentity = null,
+        priceTraceIdentity = priceTraceIdentity,
         priceObservationClientKey = item.priceObservationClientKey,
         inputContract = FOOD_ESTIMATE_V1,
     )

@@ -4,6 +4,7 @@ import com.pricetrace.receiptscanner.importer.CanonicalDraft
 import com.pricetrace.receiptscanner.importer.ExternalJsonImportOutcome
 import com.pricetrace.receiptscanner.importer.ExternalJsonImporter
 import com.pricetrace.receiptscanner.nutrition.NutritionField
+import com.pricetrace.receiptscanner.review.CanonicalReviewController
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -665,6 +666,249 @@ class YeonsikOcrV3Test {
     }
 
     @Test
+    fun `PT merchant OCR resolution preserves server metadata and resumes Fitness after edited facts are confirmed`() = runBlocking {
+        val store = InMemoryIngestionSessionStore()
+        val priceTrace = OcrResolutionRecordingSubmitter()
+        val fitness = RecordingSubmitter()
+        val useCase = CanonicalIngestionUseCase(
+            store = store,
+            submitters = mapOf(
+                IngestionProjection.PRICETRACE_RECEIPT to priceTrace,
+                IngestionProjection.FITNESS_NUTRITION to fitness,
+            ),
+        )
+        val imported = useCase.importJson(
+            value = exampleJson("yeonsik-ocr.v2.restaurant.example.json"),
+            localDocumentId = "pt-ocr-resolution",
+            ingestionId = "pt-ocr-resolution-ingestion",
+        ) as CanonicalImportResult.Success
+        val firstConfirmation = useCase.confirm(
+            imported.session.ingestionId,
+            imported.envelope,
+            verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+        )
+        assertTrue(firstConfirmation.result is IngestionStartResult.Success)
+
+        val firstSubmit = useCase.submitSelected(
+            imported.session.ingestionId,
+            firstConfirmation.envelope,
+            setOf(IngestionProjection.PRICETRACE_RECEIPT),
+        )
+        assertEquals(ProjectionStatus.UPLOADED, firstSubmit.single {
+            it.projection == IngestionProjection.PRICETRACE_RECEIPT
+        }.status)
+        assertEquals(IngestionReviewStatus.NEEDS_REVIEW, useCase.session(imported.session.ingestionId)?.reviewStatus)
+        assertEquals(0, priceTrace.resolutionRequests.size)
+        assertTrue(fitness.requests.isEmpty())
+
+        val pendingMetadata = requireNotNull(useCase.session(imported.session.ingestionId)?.projections
+            ?.single { it.projection == IngestionProjection.PRICETRACE_RECEIPT }?.metadataJson)
+        val pendingResolution = requireNotNull(PriceTraceIdentityJson.ocrResolution(pendingMetadata))
+        assertEquals("pt-resolution-42", pendingResolution.resolutionId)
+        assertEquals("merchant_identity_ambiguous", pendingResolution.reasonCode)
+        assertEquals(listOf("merchant_name", "branch_name"), pendingResolution.requiredSourceFacts)
+
+        val editor = CanonicalReviewController(firstConfirmation.envelope)
+        assertTrue(editor.updateMerchantName("Reviewed Restaurant"))
+        val revised = useCase.reviseCanonicalDraft(
+            imported.session.ingestionId,
+            editor.state.value.envelope,
+        ) as IngestionStartResult.Success
+        assertEquals(IngestionReviewStatus.NEEDS_REVIEW, revised.session.reviewStatus)
+        assertEquals(
+            pendingMetadata,
+            revised.session.projections.single { it.projection == IngestionProjection.PRICETRACE_RECEIPT }.metadataJson,
+        )
+
+        val secondConfirmation = useCase.confirm(
+            imported.session.ingestionId,
+            editor.state.value.envelope,
+            verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+        )
+
+        assertTrue("${secondConfirmation.result}", secondConfirmation.result is IngestionStartResult.Success)
+        assertEquals(1, priceTrace.receiptSubmissionCount)
+        assertEquals(1, priceTrace.resolutionRequests.size)
+        assertEquals("pt-resolution-42", priceTrace.resolutionRequests.single().resolutionId)
+        assertEquals("Reviewed Restaurant", priceTrace.resolutionRequests.single().merchant.name)
+        assertEquals(1, fitness.requests.size)
+        assertEquals(IngestionProjection.FITNESS_NUTRITION, fitness.requests.single().projection)
+        assertEquals(
+            IngestionReviewStatus.READY,
+            useCase.session(imported.session.ingestionId)?.reviewStatus,
+        )
+        assertEquals(
+            "resolved",
+            PriceTraceIdentityJson.ocrResolution(
+                useCase.session(imported.session.ingestionId)?.projections
+                    ?.single { it.projection == IngestionProjection.PRICETRACE_RECEIPT }?.metadataJson,
+            )?.status,
+        )
+    }
+
+    @Test
+    fun `PT receipt menu OCR resolution uses exact source line and resumes Fitness after review`() = runBlocking {
+        val store = InMemoryIngestionSessionStore()
+        val priceTrace = ReceiptMenuResolutionRecordingSubmitter()
+        val fitness = RecordingSubmitter()
+        val useCase = CanonicalIngestionUseCase(
+            store = store,
+            submitters = mapOf(
+                IngestionProjection.PRICETRACE_RECEIPT to priceTrace,
+                IngestionProjection.FITNESS_NUTRITION to fitness,
+            ),
+        )
+        val imported = useCase.importJson(
+            value = exampleJson("yeonsik-ocr.v2.restaurant.example.json"),
+            localDocumentId = "pt-menu-ocr-resolution",
+            ingestionId = "pt-menu-ocr-resolution-ingestion",
+        ) as CanonicalImportResult.Success
+        val firstConfirmation = useCase.confirm(
+            imported.session.ingestionId,
+            imported.envelope,
+            verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+        )
+        assertTrue(firstConfirmation.result is IngestionStartResult.Success)
+
+        val firstSubmit = useCase.submitSelected(
+            imported.session.ingestionId,
+            firstConfirmation.envelope,
+            setOf(IngestionProjection.PRICETRACE_RECEIPT),
+        )
+        assertEquals(ProjectionStatus.UPLOADED, firstSubmit.single {
+            it.projection == IngestionProjection.PRICETRACE_RECEIPT
+        }.status)
+        assertEquals(IngestionReviewStatus.NEEDS_REVIEW, useCase.session(imported.session.ingestionId)?.reviewStatus)
+        assertTrue(fitness.requests.isEmpty())
+        val pendingMetadata = requireNotNull(useCase.session(imported.session.ingestionId)?.projections
+            ?.single { it.projection == IngestionProjection.PRICETRACE_RECEIPT }?.metadataJson)
+        val pending = PriceTraceIdentityJson.receiptMenuOcrResolutions(pendingMetadata).single()
+        assertEquals("pt-line-resolution-1", pending.resolution.resolutionId)
+        assertEquals("line-1", pending.sourceLineId)
+        assertEquals("menu_identity_ambiguous", pending.resolution.reasonCode)
+        assertEquals(listOf("item_name", "source_product_code_namespace", "source_product_code"), pending.resolution.requiredSourceFacts)
+
+        val editor = CanonicalReviewController(firstConfirmation.envelope)
+        assertTrue(editor.updateField("nutrition[food-1].menu_name", "Reviewed Noodles"))
+        assertTrue(editor.updateField("receipt.merchant.catalog_namespace", "menu-source"))
+        assertTrue(editor.updateField("receipt.line_items[line-1].merchant_sku", "SKU-17"))
+        val revised = useCase.reviseCanonicalDraft(imported.session.ingestionId, editor.state.value.envelope)
+        assertTrue(revised is IngestionStartResult.Success)
+        assertEquals(
+            pendingMetadata,
+            useCase.session(imported.session.ingestionId)?.projections
+                ?.single { it.projection == IngestionProjection.PRICETRACE_RECEIPT }?.metadataJson,
+        )
+
+        val secondConfirmation = useCase.confirm(
+            imported.session.ingestionId,
+            editor.state.value.envelope,
+            verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+        )
+
+        assertTrue("${secondConfirmation.result}", secondConfirmation.result is IngestionStartResult.Success)
+        assertEquals(1, priceTrace.receiptSubmissionCount)
+        assertEquals(1, priceTrace.menuResolutionRequests.size)
+        val resolvedRequest = priceTrace.menuResolutionRequests.single()
+        assertEquals("pt-line-resolution-1", resolvedRequest.resolutionId)
+        assertEquals("line-1", resolvedRequest.sourceLineId)
+        assertEquals("Reviewed Noodles", resolvedRequest.menuFacts.itemName)
+        assertEquals("menu-source", resolvedRequest.menuFacts.sourceMenuCodeNamespace)
+        assertEquals("SKU-17", resolvedRequest.menuFacts.sourceMenuCode)
+        assertEquals(1, fitness.requests.size)
+        assertEquals(IngestionProjection.FITNESS_NUTRITION, fitness.requests.single().projection)
+        assertEquals(
+            IngestionReviewStatus.READY,
+            useCase.session(imported.session.ingestionId)?.reviewStatus,
+        )
+        assertEquals("resolved", PriceTraceIdentityJson.tryDecode(
+            useCase.session(imported.session.ingestionId)?.projections
+                ?.single { it.projection == IngestionProjection.PRICETRACE_RECEIPT }?.metadataJson,
+        )?.lines?.single()?.resolutionStatus)
+    }
+
+    @Test
+    fun `PT standalone menu OCR resolution exact observation resumes Fitness after review`() = runBlocking {
+        val store = InMemoryIngestionSessionStore()
+        val priceTrace = StandaloneMenuResolutionRecordingSubmitter()
+        val fitness = RecordingSubmitter()
+        val useCase = CanonicalIngestionUseCase(
+            store = store,
+            submitters = mapOf(
+                IngestionProjection.PRICETRACE_PRICE_OBSERVATION to priceTrace,
+                IngestionProjection.FITNESS_NUTRITION to fitness,
+            ),
+        )
+        val imported = useCase.importJson(
+            value = restaurantJson(),
+            localDocumentId = "pt-standalone-menu-ocr-resolution",
+            ingestionId = "pt-standalone-menu-ocr-resolution-ingestion",
+        ) as CanonicalImportResult.Success
+        val firstConfirmation = useCase.confirm(
+            imported.session.ingestionId,
+            imported.envelope,
+            verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+        )
+        assertTrue(firstConfirmation.result is IngestionStartResult.Success)
+
+        useCase.submitSelected(
+            imported.session.ingestionId,
+            firstConfirmation.envelope,
+            setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION),
+        )
+        assertEquals(IngestionReviewStatus.NEEDS_REVIEW, useCase.session(imported.session.ingestionId)?.reviewStatus)
+        assertTrue(fitness.requests.isEmpty())
+        val pendingMetadata = requireNotNull(useCase.session(imported.session.ingestionId)?.projections
+            ?.single { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson)
+        val pending = PriceTraceIdentityJson.standaloneMenuOcrResolutions(pendingMetadata).single()
+        assertEquals("pt-standalone-resolution-1", pending.resolution.resolutionId)
+        assertEquals("price-1", pending.priceObservationClientKey)
+        assertEquals("menu_identity_ambiguous", pending.resolution.reasonCode)
+        assertEquals(listOf("item_name", "source_menu_code_namespace", "source_menu_code"), pending.resolution.requiredSourceFacts)
+
+        val editor = CanonicalReviewController(firstConfirmation.envelope)
+        assertTrue(editor.updateField("merchant_candidate.name", "Reviewed Restaurant"))
+        assertTrue(editor.updateField("nutrition[nutrition-1].menu_name", "Reviewed Noodles"))
+        val revised = useCase.reviseCanonicalDraft(imported.session.ingestionId, editor.state.value.envelope)
+        assertTrue(revised is IngestionStartResult.Success)
+        assertEquals(
+            pendingMetadata,
+            useCase.session(imported.session.ingestionId)?.projections
+                ?.single { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson,
+        )
+
+        val secondConfirmation = useCase.confirm(
+            imported.session.ingestionId,
+            editor.state.value.envelope,
+            verificationBasis = VerificationBasis.MANUAL_CANONICAL_REVIEW,
+        )
+
+        assertTrue("${secondConfirmation.result}", secondConfirmation.result is IngestionStartResult.Success)
+        assertEquals(1, priceTrace.menuResolutionRequests.size)
+        val resolvedRequest = priceTrace.menuResolutionRequests.single()
+        assertEquals("pt-standalone-resolution-1", resolvedRequest.resolutionId)
+        assertEquals("price-1", resolvedRequest.priceObservationClientKey)
+        assertEquals("Reviewed Restaurant", resolvedRequest.merchant.name)
+        assertEquals("Reviewed Noodles", resolvedRequest.menuFacts.itemName)
+        assertEquals(1, fitness.requests.size)
+        assertEquals(IngestionProjection.FITNESS_NUTRITION, fitness.requests.single().projection)
+        assertEquals(
+            IngestionReviewStatus.READY,
+            useCase.session(imported.session.ingestionId)?.reviewStatus,
+        )
+        val resolvedMetadata = requireNotNull(useCase.session(imported.session.ingestionId)?.projections
+            ?.single { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson)
+        val resolvedResponse = PriceTraceIdentityJson.standaloneMenuOcrResolutions(resolvedMetadata)
+        assertTrue(resolvedResponse.isEmpty())
+        val response = Json.parseToJsonElement(resolvedMetadata).jsonObject
+            .getValue("observations").jsonArray.single().jsonObject.getValue("response").jsonObject
+        assertEquals("exact", response["menuResolutionStatus"]?.jsonPrimitive?.content)
+        assertEquals("restaurant-1", response["authoritativeIds"]?.jsonObject?.get("restaurantId")?.jsonPrimitive?.content)
+        assertEquals(1, priceTrace.submitIdempotencyKeys.size)
+        assertEquals(1, priceTrace.submitIdempotencyKeys.distinct().size)
+    }
+
+    @Test
     fun `v1 and v2 remain importable through their separate codecs`() {
         val importer = ExternalJsonImporter()
         listOf(
@@ -692,6 +936,204 @@ class YeonsikOcrV3Test {
             onSubmit(request)
             return responses.removeFirstOrNull() ?: ProjectionSubmission.Success(
                 remoteId = "remote-${request.projection.wireValue}",
+            )
+        }
+    }
+
+    private class OcrResolutionRecordingSubmitter :
+        IngestionProjectionSubmitter,
+        OcrMerchantIdentityResolutionSubmitter {
+        var receiptSubmissionCount = 0
+        val resolutionRequests = mutableListOf<OcrMerchantIdentityResolutionRequest>()
+
+        override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+            receiptSubmissionCount += 1
+            return ProjectionSubmission.Success(
+                remoteId = "pt-receipt-42",
+                metadataJson = Json.encodeToString(JsonObject.serializer(), needsOcrResolutionResponse()),
+                requiresReview = true,
+            )
+        }
+
+        override suspend fun resolveMerchantIdentity(
+            request: OcrMerchantIdentityResolutionRequest,
+        ): ProjectionSubmission {
+            resolutionRequests += request
+            return ProjectionSubmission.Success(
+                remoteId = "pt-receipt-42",
+                metadataJson = Json.encodeToString(JsonObject.serializer(), resolvedOcrResolutionResponse()),
+            )
+        }
+
+        private fun needsOcrResolutionResponse() = buildJsonObject {
+            put("receiptId", JsonPrimitive("pt-receipt-42"))
+            put("merchantResolutionStatus", JsonPrimitive("needs_ocr_resolution"))
+            put("ocrResolution", buildJsonObject {
+                put("schemaVersion", JsonPrimitive("ocr-resolution.v1"))
+                put("status", JsonPrimitive("needs_ocr_resolution"))
+                put("resolutionId", JsonPrimitive("pt-resolution-42"))
+                put("reasonCode", JsonPrimitive("merchant_identity_ambiguous"))
+                put("requiredSourceFacts", JsonArray(listOf(
+                    JsonPrimitive("merchant_name"), JsonPrimitive("branch_name"),
+                )))
+            })
+        }
+
+        private fun resolvedOcrResolutionResponse() = buildJsonObject {
+            put("receiptId", JsonPrimitive("pt-receipt-42"))
+            put("merchantResolutionStatus", JsonPrimitive("exact"))
+            put("restaurantId", JsonPrimitive("restaurant-42"))
+            put("restaurantLocationId", JsonPrimitive("location-42"))
+            put("ocrResolution", buildJsonObject {
+                put("schemaVersion", JsonPrimitive("ocr-resolution.v1"))
+                put("status", JsonPrimitive("resolved"))
+                put("resolutionId", JsonPrimitive("pt-resolution-42"))
+                put("reasonCode", JsonNull)
+                put("requiredSourceFacts", JsonArray(emptyList()))
+            })
+            put("lines", JsonArray(listOf(buildJsonObject {
+                put("sourceLineId", JsonPrimitive("line-1"))
+                put("resolutionStatus", JsonPrimitive("resolved"))
+                put("restaurantMenuId", JsonPrimitive("menu-42"))
+                put("catalogProductId", JsonPrimitive("catalog-42"))
+            })))
+        }
+    }
+
+    private class ReceiptMenuResolutionRecordingSubmitter :
+        IngestionProjectionSubmitter,
+        OcrMenuIdentityResolutionSubmitter {
+        var receiptSubmissionCount = 0
+        val menuResolutionRequests = mutableListOf<OcrReceiptMenuResolutionRequest>()
+
+        override suspend fun submit(request: ProjectionRequest): ProjectionSubmission.Success {
+            receiptSubmissionCount += 1
+            val sourceLineId = request.envelope!!.nutrition.filterIsInstance<IngestionNutrition.RestaurantEstimate>()
+                .single().lineId!!
+            return ProjectionSubmission.Success(
+                remoteId = "pt-receipt-menu-42",
+                metadataJson = Json.encodeToString(JsonObject.serializer(), buildJsonObject {
+                    put("receiptId", JsonPrimitive("pt-receipt-menu-42"))
+                    put("merchantResolutionStatus", JsonPrimitive("exact"))
+                    put("lines", JsonArray(listOf(buildJsonObject {
+                        put("sourceLineId", JsonPrimitive(sourceLineId))
+                        put("resolutionStatus", JsonPrimitive("needs_ocr_resolution"))
+                        put("restaurantMenuId", JsonNull)
+                        put("catalogProductId", JsonNull)
+                        put("ocrResolution", buildJsonObject {
+                            put("schemaVersion", JsonPrimitive("ocr-resolution.v1"))
+                            put("status", JsonPrimitive("needs_ocr_resolution"))
+                            put("resolutionId", JsonPrimitive("pt-line-resolution-1"))
+                            put("reasonCode", JsonPrimitive("menu_identity_ambiguous"))
+                            put("requiredSourceFacts", JsonArray(listOf(
+                                JsonPrimitive("item_name"),
+                                JsonPrimitive("source_product_code_namespace"),
+                                JsonPrimitive("source_product_code"),
+                            )))
+                        })
+                    })))
+                }),
+                requiresReview = true,
+            )
+        }
+
+        override suspend fun resolveReceiptMenuIdentity(
+            request: OcrReceiptMenuResolutionRequest,
+        ): ProjectionSubmission = run {
+            menuResolutionRequests += request
+            ProjectionSubmission.Success(
+                remoteId = "pt-receipt-menu-42",
+                metadataJson = Json.encodeToString(JsonObject.serializer(), buildJsonObject {
+                    put("receiptId", JsonPrimitive("pt-receipt-menu-42"))
+                    put("merchantResolutionStatus", JsonPrimitive("exact"))
+                    put("restaurantId", JsonPrimitive("restaurant-42"))
+                    put("restaurantLocationId", JsonPrimitive("location-42"))
+                    put("lines", JsonArray(listOf(buildJsonObject {
+                        put("sourceLineId", JsonPrimitive(request.sourceLineId))
+                        put("resolutionStatus", JsonPrimitive("resolved"))
+                        put("restaurantMenuId", JsonPrimitive("menu-42"))
+                        put("catalogProductId", JsonPrimitive("catalog-42"))
+                        put("ocrResolution", JsonNull)
+                    })))
+                }),
+            )
+        }
+
+        override suspend fun resolveStandaloneMenuIdentity(
+            request: OcrStandaloneMenuResolutionRequest,
+        ): ProjectionSubmission = error("receipt menu resolver cannot resolve standalone rows")
+    }
+
+    private class StandaloneMenuResolutionRecordingSubmitter :
+        IngestionProjectionSubmitter,
+        OcrMenuIdentityResolutionSubmitter {
+        val menuResolutionRequests = mutableListOf<OcrStandaloneMenuResolutionRequest>()
+        val submitIdempotencyKeys = mutableListOf<String>()
+
+        override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+            submitIdempotencyKeys += request.idempotencyKey
+            val priceKey = requireNotNull(request.envelope).priceObservations.single().clientKey
+            return ProjectionSubmission.Success(
+                remoteId = "pt-standalone-resolution-1",
+                metadataJson = Json.encodeToString(JsonObject.serializer(), buildJsonObject {
+                    put("observations", JsonArray(listOf(buildJsonObject {
+                        put("priceObservationClientKey", JsonPrimitive(priceKey))
+                        put("response", buildJsonObject {
+                            put("kind", JsonPrimitive("restaurant_purchase"))
+                            put("observationId", JsonNull)
+                            put("authorityStatus", JsonPrimitive("needs_ocr_resolution"))
+                            put("merchantResolutionStatus", JsonPrimitive("needs_ocr_resolution"))
+                            put("menuResolutionStatus", JsonPrimitive("needs_ocr_resolution"))
+                            put("authoritativeIds", buildJsonObject {
+                                put("restaurantId", JsonNull)
+                                put("restaurantLocationId", JsonNull)
+                                put("restaurantMenuId", JsonNull)
+                                put("catalogProductId", JsonNull)
+                            })
+                            put("ocrResolution", buildJsonObject {
+                                put("schemaVersion", JsonPrimitive("ocr-resolution.v1"))
+                                put("status", JsonPrimitive("needs_ocr_resolution"))
+                                put("resolutionId", JsonPrimitive("pt-standalone-resolution-1"))
+                                put("reasonCode", JsonPrimitive("menu_identity_ambiguous"))
+                                put("requiredSourceFacts", JsonArray(listOf(
+                                    JsonPrimitive("item_name"),
+                                    JsonPrimitive("source_menu_code_namespace"),
+                                    JsonPrimitive("source_menu_code"),
+                                )))
+                            })
+                        })
+                    })))
+                }),
+                primaryUploaded = false,
+                primaryPendingReason = "pricetrace_standalone_menu_identity_requires_review",
+                requiresReview = true,
+            )
+        }
+
+        override suspend fun resolveReceiptMenuIdentity(
+            request: OcrReceiptMenuResolutionRequest,
+        ): ProjectionSubmission = error("standalone resolver cannot resolve receipt lines")
+
+        override suspend fun resolveStandaloneMenuIdentity(
+            request: OcrStandaloneMenuResolutionRequest,
+        ): ProjectionSubmission {
+            menuResolutionRequests += request
+            return ProjectionSubmission.Success(
+                remoteId = "pt-observation-42",
+                metadataJson = Json.encodeToString(JsonObject.serializer(), buildJsonObject {
+                    put("kind", JsonPrimitive("restaurant_purchase"))
+                    put("observationId", JsonPrimitive("pt-observation-42"))
+                    put("authorityStatus", JsonPrimitive("exact"))
+                    put("merchantResolutionStatus", JsonPrimitive("exact"))
+                    put("menuResolutionStatus", JsonPrimitive("exact"))
+                    put("ocrResolution", JsonNull)
+                    put("authoritativeIds", buildJsonObject {
+                        put("restaurantId", JsonPrimitive("restaurant-1"))
+                        put("restaurantLocationId", JsonPrimitive("location-1"))
+                        put("restaurantMenuId", JsonPrimitive("menu-1"))
+                        put("catalogProductId", JsonPrimitive("catalog-1"))
+                    })
+                }),
             )
         }
     }

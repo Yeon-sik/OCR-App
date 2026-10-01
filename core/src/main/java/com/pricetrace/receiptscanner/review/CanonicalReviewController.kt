@@ -8,6 +8,7 @@ import com.pricetrace.receiptscanner.domain.ReceiptFoodService
 import com.pricetrace.receiptscanner.domain.ReceiptFulfillmentEvidence
 import com.pricetrace.receiptscanner.domain.ReceiptFulfillmentType
 import com.pricetrace.receiptscanner.domain.ReceiptLineType
+import com.pricetrace.receiptscanner.domain.ReceiptIdentifier
 import com.pricetrace.receiptscanner.domain.ReceiptQuantity
 import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.domain.ReceiptV2LineItem
@@ -629,6 +630,8 @@ class CanonicalReviewController(
             "phone",
             "business_registration_number",
             "business_kind",
+            "source_namespace",
+            "source_location_code",
         )
         return fields.mapNotNull { field ->
             val path = "merchant_candidate.$field"
@@ -674,6 +677,14 @@ class CanonicalReviewController(
             path == "receipt.merchant.address" -> updateMerchantTyped(envelope, receipt.merchant.copy(address = value as String?))
             path == "receipt.merchant.phone" -> updateMerchantTyped(envelope, receipt.merchant.copy(phone = value as String?))
             path == "receipt.merchant.business_registration_number" -> updateMerchantTyped(envelope, receipt.merchant.copy(businessRegistrationNumber = value as String?))
+            path == "receipt.merchant.catalog_namespace" -> envelope.copy(
+                receipt = receipt.copy(merchant = receipt.merchant.copy(catalogNamespace = value as String?)),
+                merchantCandidate = envelope.merchantCandidate?.copy(sourceNamespace = value as String?),
+            )
+            path == "receipt.merchant.merchant_id" -> envelope.copy(
+                receipt = receipt.copy(merchant = receipt.merchant.copy(merchantId = value as String?)),
+                merchantCandidate = envelope.merchantCandidate?.copy(sourceLocationCode = value as String?),
+            )
             path == "receipt.document.issued_on" -> envelope.copy(receipt = receipt.copy(document = receipt.document.copy(issuedOn = value as String?)))
             path == "receipt.document.issued_at" -> envelope.copy(receipt = receipt.copy(document = receipt.document.copy(issuedAt = value as String?)))
             path == "receipt.document.fulfillment.type" -> envelope.copy(
@@ -729,6 +740,9 @@ class CanonicalReviewController(
         val value = parsed.value
         val nextLine = when (match.groupValues[2]) {
             "description" -> line.copy(description = value as String?)
+            "merchant_sku" -> line.copy(identifiers = line.identifiers
+                .filterNot { it.scheme == "merchant_sku" }
+                .let { retained -> if (value == null) retained else retained + ReceiptIdentifier("merchant_sku", value as String) })
             "type" -> line.copy(type = enumValue<ReceiptLineType>(value))
             "quantity", "quantity.value" -> line.copy(
                 quantity = parsed.canonicalValue?.let { nextValue ->
@@ -785,6 +799,8 @@ class CanonicalReviewController(
             "phone" -> candidate.copy(phone = value as String?)
             "business_registration_number" -> candidate.copy(businessRegistrationNumber = value as String?)
             "business_kind" -> candidate.copy(businessKind = enumValue(value))
+            "source_namespace" -> candidate.copy(sourceNamespace = value as String?)
+            "source_location_code" -> candidate.copy(sourceLocationCode = value as String?)
             else -> error("merchant_candidate field is not editable")
         }
         return envelope.copy(merchantCandidate = next)
@@ -1005,6 +1021,8 @@ class CanonicalReviewController(
             "phone" -> value.phone
             "business_registration_number" -> value.businessRegistrationNumber
             "business_kind" -> value.businessKind.wireValue
+            "source_namespace" -> value.sourceNamespace
+            "source_location_code" -> value.sourceLocationCode
             else -> null
         }
     }
@@ -1056,6 +1074,8 @@ class CanonicalReviewController(
         phone = merchant.phone,
         businessRegistrationNumber = merchant.businessRegistrationNumber,
         businessKind = merchant.businessKind,
+        sourceNamespace = merchant.catalogNamespace?.trim()?.takeIf(String::isNotEmpty) ?: sourceNamespace,
+        sourceLocationCode = merchant.merchantId?.trim()?.takeIf(String::isNotEmpty) ?: sourceLocationCode,
     )
 
     private fun String?.editableText(): String? = this?.takeIf(String::isNotBlank)

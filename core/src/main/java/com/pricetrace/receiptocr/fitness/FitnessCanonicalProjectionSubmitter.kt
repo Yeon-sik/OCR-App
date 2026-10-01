@@ -7,11 +7,16 @@ import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
+import com.pricetrace.receiptscanner.ingestion.PriceTraceRestaurantMenuIdentity
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V3_SCHEMA
 import com.pricetrace.receiptscanner.nutrition.NutritionContract
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /** Publishes only canonical Nutrition contracts for the integrated OCR envelope. */
 class FitnessCanonicalProjectionSubmitter(
@@ -28,10 +33,17 @@ class FitnessCanonicalProjectionSubmitter(
         if (envelope.nutrition.isEmpty()) {
             return ProjectionSubmission.Failure("nutrition_artifact_missing", retryable = false)
         }
-        if (envelope.receipt != null && request.resolvedIdentity?.priceTrace == null) {
-            return ProjectionSubmission.Failure("pricetrace_identity_missing", retryable = false)
+        val resolvedReceiptIdentity = request.resolvedIdentity?.priceTrace
+            ?: request.dependencyMetadataJson[IngestionProjection.PRICETRACE_RECEIPT]
+                ?.let(PriceTraceIdentityJson::tryDecode)
+        if (envelope.receipt != null && resolvedReceiptIdentity == null) {
+            return ProjectionSubmission.Failure(
+                "pricetrace_identity_requires_ocr_review",
+                retryable = false,
+                requiresReview = true,
+            )
         }
-        val priceTraceIdentity = request.resolvedIdentity?.priceTrace?.let(PriceTraceIdentityJson::encode)
+        val priceTraceIdentity = resolvedReceiptIdentity?.let(PriceTraceIdentityJson::encode)
         // external-reference.v1 is implemented by Fitness's hierarchy-aware v3 RPC. Keep
         // product_label_ocr V2 calls on the legacy v2 boundary for backward compatibility.
         val useV3Contract = envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA ||
@@ -42,9 +54,12 @@ class FitnessCanonicalProjectionSubmitter(
 
         val responses = mutableListOf<String>()
         var lastFoodId: String? = null
+        var reviewReason: String? = null
         return try {
-            envelope.nutrition.forEach { item ->
+            for (item in envelope.nutrition) {
                 val itemKey = StableIds.sha256("${request.idempotencyKey}|nutrition|${item.clientKey}")
+                var publicationIdentity: PriceTraceRestaurantMenuIdentity? = null
+                var identityRequiredForPublication = false
                 val payload = when (item) {
                     is IngestionNutrition.ProductLabel -> CanonicalNutritionPayloadFactory.fromProductLabel(
                         localDocumentId = localDocumentId,
@@ -74,13 +89,22 @@ class FitnessCanonicalProjectionSubmitter(
                                 "restaurant_name_missing",
                                 retryable = false,
                             )
+                        identityRequiredForPublication = true
+                        publicationIdentity = if (envelope.receipt != null) {
+                            resolvedReceiptIdentity?.let { identity -> item.lineId?.let { sourceLineId ->
+                                PriceTraceIdentityJson.exactRestaurantMenuForSourceLine(identity, sourceLineId)
+                            } }
+                        } else null
+                        if (envelope.receipt != null && publicationIdentity == null) {
+                            reviewReason = reviewReason ?: "restaurant_menu_identity_requires_ocr_review:${item.clientKey}"
+                            continue
+                        }
                         CanonicalNutritionPayloadFactory.fromRestaurantEstimate(
                             localDocumentId = localDocumentId,
                             revisionSeq = request.revisionSeq,
                             idempotencyKey = itemKey,
                             restaurantName = restaurantName,
                             item = item,
-                            priceTraceIdentity = priceTraceIdentity,
                             useV3Contract = useV3Contract,
                         )
                     }
@@ -88,6 +112,12 @@ class FitnessCanonicalProjectionSubmitter(
                         val restaurantName = envelope.receipt?.merchant?.name
                             ?: envelope.merchantCandidate?.name
                             ?: return ProjectionSubmission.Failure("restaurant_name_missing", retryable = false)
+                        identityRequiredForPublication = true
+                        publicationIdentity = standaloneIdentityFor(
+                            request = request,
+                            envelope = envelope,
+                            priceObservationClientKey = item.priceObservationClientKey,
+                        )
                         CanonicalNutritionPayloadFactory.fromRestaurantMenuEstimate(
                             localDocumentId = localDocumentId,
                             revisionSeq = request.revisionSeq,
@@ -121,10 +151,7 @@ class FitnessCanonicalProjectionSubmitter(
                             lastFoodId = result.response.nutritionFoodId
                         }
                         is NutritionMealComponentImportOutcome.Failure -> {
-                            return ProjectionSubmission.Failure(
-                                message = result.message ?: result.reason.name,
-                                retryable = result.reason.isRetryable(),
-                            )
+                            return failure(result.message ?: result.reason.name, result.reason.isRetryable(), responses)
                         }
                     }
                     else -> when (val result = if (useV3Contract) {
@@ -135,30 +162,88 @@ class FitnessCanonicalProjectionSubmitter(
                         is NutritionCanonicalImportOutcome.Success -> {
                             responses += result.rawResponse
                             lastFoodId = result.response.nutritionFoodId
+                            if (identityRequiredForPublication && publicationIdentity == null) {
+                                reviewReason = reviewReason ?: "restaurant_menu_identity_requires_ocr_review:${item.clientKey}"
+                            } else if (publicationIdentity != null) {
+                                val publication = NutritionDiningOutPublicationPayload(
+                                    idempotencyKey = StableIds.sha256("$itemKey|publication"),
+                                    canonicalImportId = result.response.canonicalImportId,
+                                    nutritionFoodId = result.response.nutritionFoodId,
+                                    restaurantId = publicationIdentity.restaurantId,
+                                    restaurantLocationId = publicationIdentity.restaurantLocationId,
+                                    restaurantMenuId = publicationIdentity.restaurantMenuId,
+                                    catalogProductId = publicationIdentity.catalogProductId,
+                                )
+                                when (val published = gateway.publishVerifiedDiningOutNutrition(publication)) {
+                                    is NutritionDiningOutPublicationOutcome.Success -> {
+                                        responses += published.rawResponse
+                                        lastFoodId = published.response.nutritionFoodId
+                                    }
+                                    is NutritionDiningOutPublicationOutcome.Failure -> return failure(
+                                        published.message ?: published.reason.name,
+                                        published.reason.isRetryable(),
+                                        responses,
+                                    )
+                                }
+                            }
                         }
                         is NutritionCanonicalImportOutcome.Failure -> {
-                            return ProjectionSubmission.Failure(
-                                message = result.message ?: result.reason.name,
-                                retryable = result.reason.isRetryable(),
-                            )
+                            return failure(result.message ?: result.reason.name, result.reason.isRetryable(), responses)
                         }
                     }
                 }
             }
+            if (reviewReason != null) {
+                return ProjectionSubmission.Failure(
+                    message = reviewReason,
+                    retryable = false,
+                    requiresReview = true,
+                    metadataJson = responseMetadata(responses),
+                )
+            }
             ProjectionSubmission.Success(
                 remoteId = requireNotNull(lastFoodId),
-                metadataJson = json.encodeToString(
-                    kotlinx.serialization.json.JsonArray.serializer(),
-                    buildJsonArray { responses.forEach { add(Json.parseToJsonElement(it)) } },
-                ),
+                metadataJson = responseMetadata(responses),
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: IllegalArgumentException) {
-            ProjectionSubmission.Failure(error.message ?: "nutrition_contract_invalid", retryable = false)
+            failure(error.message ?: "nutrition_contract_invalid", retryable = false, responses)
         } catch (error: Exception) {
-            ProjectionSubmission.Failure(error.message ?: "nutrition_projection_failed", retryable = true)
+            failure(error.message ?: "nutrition_projection_failed", retryable = true, responses)
         }
+    }
+
+    /** Resolve the exact per-observation server response by its local request correlation key. */
+    private fun standaloneIdentityFor(
+        request: ProjectionRequest,
+        envelope: com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope,
+        priceObservationClientKey: String,
+    ): PriceTraceRestaurantMenuIdentity? {
+        val raw = request.dependencyMetadataJson[IngestionProjection.PRICETRACE_PRICE_OBSERVATION] ?: return null
+        val root = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return null
+        val row = (root["observations"] as? JsonArray)
+            ?.mapNotNull { it as? JsonObject }
+            ?.singleOrNull {
+                runCatching { it["priceObservationClientKey"]?.jsonPrimitive?.content }.getOrNull() ==
+                    priceObservationClientKey
+            }
+            ?: return null
+        val response = row["response"] as? JsonObject ?: return null
+        return PriceTraceIdentityJson.exactRestaurantMenuFromStandaloneResponse(response)
+    }
+
+    private fun failure(message: String, retryable: Boolean, responses: List<String>): ProjectionSubmission.Failure =
+        ProjectionSubmission.Failure(
+            message = message,
+            retryable = retryable,
+            metadataJson = responseMetadata(responses),
+        )
+
+    private fun responseMetadata(responses: List<String>): String? = responses.takeIf { it.isNotEmpty() }?.let { rawResponses ->
+        json.encodeToString(JsonArray.serializer(), buildJsonArray {
+            rawResponses.forEach { add(Json.parseToJsonElement(it)) }
+        })
     }
 
     private fun NutritionGatewayFailure.isRetryable(): Boolean = when (this) {

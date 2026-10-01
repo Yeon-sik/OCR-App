@@ -9,13 +9,17 @@ import com.pricetrace.receiptscanner.ingestion.NutritionRange
 import com.pricetrace.receiptscanner.ingestion.ProductCandidate
 import com.pricetrace.receiptscanner.ingestion.ProductCandidateEvidence
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentity
-import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.ingestion.PriceTraceLineIdentity
 import com.pricetrace.receiptscanner.ingestion.ProjectionIdentity
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
+import com.pricetrace.receiptscanner.ingestion.StandalonePriceObservation
+import com.pricetrace.receiptscanner.ingestion.StandalonePriceObservationEvidence
+import com.pricetrace.receiptscanner.ingestion.StandalonePriceObservationKind
+import com.pricetrace.receiptscanner.ingestion.StandalonePriceObservationQuantity
 import com.pricetrace.receiptscanner.ingestion.SourceAttachment
 import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
+import com.pricetrace.receiptscanner.ingestion.PriceTraceRestaurantMenuIdentity
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.nutrition.EXTERNAL_NUTRITION_LOOKUP_VERSION
 import com.pricetrace.receiptscanner.nutrition.NutritionField
@@ -37,10 +41,8 @@ class FitnessCanonicalProjectionSubmitterTest {
     @Test
     fun restaurantMenuEstimateUsesFitnessV3RpcAndCarriesStandalonePriceLink() = runTest {
         val transport = QueueTransport(
-            NutritionHttpResponse(
-                200,
-                """[{"canonical_import_id":"canonical-menu-1","idempotent_replay":false,"nutrition_food_id":"food-menu-1","input_contract":"food-estimate.v1","projection_source_type":"ocr_app","projection_import_id":"canonical-menu-1-projection","catalog_product_id":null,"estimation_evidence_id":"canonical-menu-1-evidence","visibility":"private"}]""",
-            ),
+            response("canonical-menu-1", "food-menu-1"),
+            publicationResponse("canonical-menu-1", "food-menu-1", menuIdentity("restaurant-menu-1")),
         )
         val item = IngestionNutrition.RestaurantMenuEstimate(
             clientKey = "menu-1",
@@ -65,12 +67,17 @@ class FitnessCanonicalProjectionSubmitterTest {
                 localDocumentId = "ocr-menu-1",
                 revisionSeq = 1,
                 idempotencyKey = "menu-key",
+                dependencyMetadataJson = mapOf(
+                    IngestionProjection.PRICETRACE_PRICE_OBSERVATION to standaloneMetadata(
+                        "price-1" to menuIdentity("restaurant-menu-1"),
+                    ),
+                ),
             ),
         )
 
         assertTrue(result is ProjectionSubmission.Success)
         assertEquals("food-menu-1", (result as ProjectionSubmission.Success).remoteId)
-        val request = transport.requests.single()
+        val request = transport.requests.first()
         assertEquals(
             "https://nutrition.example.com/rest/v1/rpc/import_canonical_nutrition_v3",
             request.url,
@@ -86,6 +93,12 @@ class FitnessCanonicalProjectionSubmitterTest {
             "price-1",
             body["p_provenance"]!!.jsonObject["price_observation_client_key"]?.jsonPrimitive?.content,
         )
+        assertEquals(
+            "https://nutrition.example.com/rest/v1/rpc/publish_verified_ocr_dining_out_nutrition_v1",
+            transport.requests[1].url,
+        )
+        assertEquals("restaurant-menu-1", Json.parseToJsonElement(requireNotNull(transport.requests[1].body))
+            .jsonObject["p_restaurant_menu_id"]?.jsonPrimitive?.content)
     }
 
     @Test
@@ -120,7 +133,8 @@ class FitnessCanonicalProjectionSubmitterTest {
             ),
         )
 
-        assertTrue(result is ProjectionSubmission.Success)
+        assertTrue(result is ProjectionSubmission.Failure)
+        assertTrue((result as ProjectionSubmission.Failure).requiresReview)
         val request = transport.requests.single()
         assertEquals(
             "https://nutrition.example.com/rest/v1/rpc/import_canonical_nutrition_v2",
@@ -134,6 +148,8 @@ class FitnessCanonicalProjectionSubmitterTest {
             "food_image_estimate",
             body["p_nutrient_provenance"]!!.jsonObject["calories_kcal"]!!.jsonObject["source_type"]?.jsonPrimitive?.content,
         )
+        assertEquals(1, transport.requests.size)
+        assertFalse(transport.requests.any { it.url.endsWith("/rpc/publish_verified_ocr_dining_out_nutrition_v1") })
     }
 
     @Test
@@ -301,8 +317,15 @@ class FitnessCanonicalProjectionSubmitterTest {
     @Test
     fun restaurantBundlePublishesEveryEstimateThroughIndependentCanonicalRpcCalls() = runTest {
         val store = FakeStore(signedIn())
-        val transport = QueueTransport(response("canonical-1", "food-1"), response("canonical-2", "food-2"))
+        val identityOne = menuIdentity("restaurant-menu-1")
+        val identityTwo = menuIdentity("restaurant-menu-2")
+        val transport = QueueTransport(
+            response("canonical-1", "food-1"), publicationResponse("canonical-1", "food-1", identityOne),
+            response("canonical-2", "food-2"), publicationResponse("canonical-2", "food-2", identityTwo),
+        )
         val submitter = FitnessCanonicalProjectionSubmitter(NutritionSupabaseGateway(store, transport))
+        val estimateOne = estimate("menu-1")
+        val estimateTwo = estimate("menu-2")
 
         val result = submitter.submit(
             ProjectionRequest(
@@ -315,20 +338,44 @@ class FitnessCanonicalProjectionSubmitterTest {
                     mode = com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT,
                     source = IngestionSource(producer = "chatgpt-project", sourceFiles = emptyList()),
                     merchantCandidate = MerchantCandidate(name = "Test Restaurant"),
-                    nutrition = listOf(estimate("menu-1"), estimate("menu-2")),
+                    nutrition = listOf(
+                        IngestionNutrition.RestaurantMenuEstimate(
+                            clientKey = estimateOne.clientKey,
+                            menuName = estimateOne.menuName,
+                            priceObservationClientKey = "price-1",
+                            estimate = estimateOne.estimate,
+                        ),
+                        IngestionNutrition.RestaurantMenuEstimate(
+                            clientKey = estimateTwo.clientKey,
+                            menuName = estimateTwo.menuName,
+                            priceObservationClientKey = "price-2",
+                            estimate = estimateTwo.estimate,
+                        ),
+                    ),
+                    priceObservations = listOf(
+                        priceObservation("price-1", "Menu menu-1"),
+                        priceObservation("price-2", "Menu menu-2"),
+                    ),
+                    schemaVersion = com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V3_SCHEMA,
                 ),
                 localDocumentId = "ocr-local-document",
                 revisionSeq = 7,
                 canonicalFingerprint = "fingerprint-7",
+                dependencyMetadataJson = mapOf(
+                    IngestionProjection.PRICETRACE_PRICE_OBSERVATION to standaloneMetadata(
+                        "price-1" to identityOne,
+                        "price-2" to identityTwo,
+                    ),
+                ),
             ),
         )
 
         assertTrue(result is ProjectionSubmission.Success)
         assertEquals("food-2", (result as ProjectionSubmission.Success).remoteId)
-        assertEquals(2, transport.requests.size)
+        assertEquals(4, transport.requests.size)
 
         val first = Json.parseToJsonElement(requireNotNull(transport.requests[0].body)).jsonObject
-        val second = Json.parseToJsonElement(requireNotNull(transport.requests[1].body)).jsonObject
+        val second = Json.parseToJsonElement(requireNotNull(transport.requests[2].body)).jsonObject
         assertEquals(FOOD_ESTIMATE_V1, first["p_input_contract"]?.jsonPrimitive?.content)
         assertEquals(FOOD_ESTIMATE_V1, second["p_input_contract"]?.jsonPrimitive?.content)
         assertEquals(true, first["p_user_verified"]?.jsonPrimitive?.content?.toBoolean())
@@ -343,10 +390,14 @@ class FitnessCanonicalProjectionSubmitterTest {
         assertEquals(500.0, range?.get("point")?.jsonPrimitive?.content?.toDouble())
         assertEquals(600.0, range?.get("max")?.jsonPrimitive?.content?.toDouble())
         assertTrue(first["p_nutrient_provenance"]!!.jsonObject.keys.containsAll(CanonicalNutritionImportPayload.REQUIRED_NUTRIENTS))
+        assertEquals("restaurant-menu-1", Json.parseToJsonElement(requireNotNull(transport.requests[1].body))
+            .jsonObject["p_restaurant_menu_id"]?.jsonPrimitive?.content)
+        assertEquals("restaurant-menu-2", Json.parseToJsonElement(requireNotNull(transport.requests[3].body))
+            .jsonObject["p_restaurant_menu_id"]?.jsonPrimitive?.content)
     }
 
     @Test
-    fun receiptBackedNutritionCarriesPriceTraceAuthorityIdentity() = runTest {
+    fun receiptBackedNutritionKeepsPrivateImportAndUsesPriceTraceIdentityForPublication() = runTest {
         val identity = PriceTraceIdentity(
             receiptId = "receipt-1",
             storeId = "store-1",
@@ -355,6 +406,7 @@ class FitnessCanonicalProjectionSubmitterTest {
             lines = listOf(
                 PriceTraceLineIdentity(
                     sourceLineId = "line-menu",
+                    resolutionStatus = "resolved",
                     receiptItemId = "line-menu",
                     productId = "product-1",
                     storeProductId = "store-product-1",
@@ -362,8 +414,10 @@ class FitnessCanonicalProjectionSubmitterTest {
                     restaurantMenuId = "menu-1",
                 ),
             ),
+            merchantResolutionStatus = "exact",
         )
         val envelope = YeonsikOcrEnvelope(
+            schemaVersion = com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V3_SCHEMA,
             mode = com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT,
             source = IngestionSource(producer = "chatgpt-project", sourceFiles = emptyList()),
             receipt = com.pricetrace.receiptscanner.domain.ReceiptV2(
@@ -397,9 +451,15 @@ class FitnessCanonicalProjectionSubmitterTest {
                 ),
                 payments = emptyList(),
             ),
-            nutrition = listOf(estimate("line-menu")),
+            nutrition = listOf(estimate("line-menu").copy(lineId = "line-menu")),
         )
-        val transport = QueueTransport(response("canonical-identity", "food-identity"))
+        val transport = QueueTransport(
+            response("canonical-identity", "food-identity"),
+            publicationResponse(
+                "canonical-identity", "food-identity",
+                PriceTraceRestaurantMenuIdentity("restaurant-1", "location-1", "menu-1", "catalog-1"),
+            ),
+        )
         val result = FitnessCanonicalProjectionSubmitter(NutritionSupabaseGateway(FakeStore(signedIn()), transport))
             .submit(
                 ProjectionRequest(
@@ -416,12 +476,14 @@ class FitnessCanonicalProjectionSubmitterTest {
             )
 
         assertTrue(result is ProjectionSubmission.Success)
-        val body = Json.parseToJsonElement(requireNotNull(transport.requests.single().body)).jsonObject
-        val sentIdentity = body["p_pricetrace_identity"]?.jsonObject
-        assertEquals("receipt-1", sentIdentity?.get("receiptId")?.jsonPrimitive?.content)
-        assertEquals("store-1", sentIdentity?.get("storeId")?.jsonPrimitive?.content)
-        assertEquals("product-1", sentIdentity?.get("lines")?.jsonArray?.single()?.jsonObject?.get("productId")?.jsonPrimitive?.content)
-        assertEquals(PriceTraceIdentityJson.encode(identity), sentIdentity)
+        val body = Json.parseToJsonElement(requireNotNull(transport.requests.first().body)).jsonObject
+        assertEquals(JsonNull, body["p_pricetrace_identity"])
+        assertEquals(2, transport.requests.size)
+        val publication = Json.parseToJsonElement(requireNotNull(transport.requests[1].body)).jsonObject
+        assertEquals("restaurant-1", publication["p_restaurant_id"]?.jsonPrimitive?.content)
+        assertEquals("location-1", publication["p_restaurant_location_id"]?.jsonPrimitive?.content)
+        assertEquals("menu-1", publication["p_restaurant_menu_id"]?.jsonPrimitive?.content)
+        assertEquals("catalog-1", publication["p_catalog_product_id"]?.jsonPrimitive?.content)
     }
 
     private fun externalDraft() = NutritionLabelDraft(
@@ -475,6 +537,65 @@ class FitnessCanonicalProjectionSubmitterTest {
     private fun response(id: String, foodId: String) = NutritionHttpResponse(
         200,
         """[{"canonical_import_id":"$id","idempotent_replay":false,"nutrition_food_id":"$foodId","input_contract":"food-estimate.v1","projection_source_type":"ocr_app","projection_import_id":"$id-projection","catalog_product_id":null,"estimation_evidence_id":"$id-evidence","visibility":"private"}]""",
+    )
+
+    private fun publicationResponse(
+        canonicalId: String,
+        foodId: String,
+        identity: PriceTraceRestaurantMenuIdentity,
+    ) = NutritionHttpResponse(
+        200,
+        """[{"canonical_import_id":"$canonicalId","nutrition_food_id":"$foodId","restaurant_id":"${identity.restaurantId}","restaurant_location_id":"${identity.restaurantLocationId}","restaurant_menu_id":"${identity.restaurantMenuId}","catalog_product_id":"${identity.catalogProductId}","nutrition_link_id":"link-$foodId","nutrition_link_revision":1,"visibility":"public","food_revision":1,"publication_revision":1,"published_at":"2026-09-27T00:00:00Z","replayed":false}]""",
+    )
+
+    private fun menuIdentity(menuName: String) = PriceTraceRestaurantMenuIdentity(
+        restaurantId = "restaurant-$menuName",
+        restaurantLocationId = "location-$menuName",
+        restaurantMenuId = menuName,
+        catalogProductId = "catalog-$menuName",
+    )
+
+    private fun standaloneMetadata(vararg entries: Pair<String, PriceTraceRestaurantMenuIdentity>): String =
+        Json.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), kotlinx.serialization.json.buildJsonObject {
+            put("observations", kotlinx.serialization.json.JsonArray(entries.map { (clientKey, identity) ->
+                kotlinx.serialization.json.buildJsonObject {
+                    put("priceObservationClientKey", kotlinx.serialization.json.JsonPrimitive(clientKey))
+                    put("response", kotlinx.serialization.json.buildJsonObject {
+                        put("kind", kotlinx.serialization.json.JsonPrimitive("restaurant_purchase"))
+                        put("authorityStatus", kotlinx.serialization.json.JsonPrimitive("exact"))
+                        put("merchantResolutionStatus", kotlinx.serialization.json.JsonPrimitive("exact"))
+                        put("menuResolutionStatus", kotlinx.serialization.json.JsonPrimitive("exact"))
+                        put("observationId", kotlinx.serialization.json.JsonPrimitive("observation-$clientKey"))
+                        put("ocrResolution", JsonNull)
+                        put("authoritativeIds", kotlinx.serialization.json.buildJsonObject {
+                            put("restaurantId", kotlinx.serialization.json.JsonPrimitive(identity.restaurantId))
+                            put("restaurantLocationId", kotlinx.serialization.json.JsonPrimitive(identity.restaurantLocationId))
+                            put("restaurantMenuId", kotlinx.serialization.json.JsonPrimitive(identity.restaurantMenuId))
+                            put("catalogProductId", kotlinx.serialization.json.JsonPrimitive(identity.catalogProductId))
+                        })
+                    })
+                }
+            }))
+        })
+
+    private fun priceObservation(clientKey: String, itemName: String) = StandalonePriceObservation(
+        clientKey = clientKey,
+        kind = StandalonePriceObservationKind.RESTAURANT_PURCHASE,
+        itemName = itemName,
+        observedOn = "2026-09-02",
+        quantity = StandalonePriceObservationQuantity(1.0, "serving"),
+        unitPriceAmountMinor = 5000,
+        grossAmountMinor = 5000,
+        discountAmountMinor = 0,
+        netAmountMinor = 5000,
+        sourceAttachmentIds = listOf("$clientKey-menu-photo"),
+        evidence = listOf(StandalonePriceObservationEvidence(
+            sourceType = "menu_photo",
+            sourceAttachmentIds = listOf("$clientKey-menu-photo"),
+            field = "item_name",
+            observedValue = itemName,
+        )),
+        confidence = 0.9,
     )
 
     private fun connection() = NutritionSupabaseConfig(
