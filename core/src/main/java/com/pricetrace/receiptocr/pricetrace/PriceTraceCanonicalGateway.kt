@@ -9,6 +9,11 @@ import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Js
 import com.pricetrace.receiptscanner.publisher.PriceTracePurchaseObservationV4Payload
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.IngestionProjectionSubmitter
+import com.pricetrace.receiptscanner.ingestion.OcrMerchantIdentityResolutionRequest
+import com.pricetrace.receiptscanner.ingestion.OcrMerchantIdentityResolutionSubmitter
+import com.pricetrace.receiptscanner.ingestion.OcrMenuIdentityResolutionSubmitter
+import com.pricetrace.receiptscanner.ingestion.OcrReceiptMenuResolutionRequest
+import com.pricetrace.receiptscanner.ingestion.OcrStandaloneMenuResolutionRequest
 import com.pricetrace.receiptscanner.ingestion.ProductCandidate
 import com.pricetrace.receiptscanner.ingestion.ProductCandidateBarcode
 import com.pricetrace.receiptscanner.ingestion.ProductCandidateEvidence
@@ -69,6 +74,53 @@ class PriceTraceCanonicalGateway(
         if (first !is PriceTraceCanonicalOutcome.Failure || first.kind != PriceObservationFailureKind.AUTHENTICATION) return first
         val refreshed = refresh(initial) ?: return first
         return submitMerchantOnce(idempotencyKey, merchant, refreshed)
+    }
+
+    /** Uses only a PriceTrace-issued resolution id and authenticated owner session. */
+    suspend fun resolveOcrMerchantIdentity(
+        request: OcrMerchantIdentityResolutionRequest,
+    ): PriceTraceCanonicalOutcome {
+        require(request.resolutionId.isNotBlank()) { "PriceTrace resolutionId is required" }
+        val initial = store.read()
+        if (!initial.isSignedIn) return PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
+        val first = resolveOcrMerchantIdentityOnce(request, initial)
+        if (first !is PriceTraceCanonicalOutcome.Failure || first.kind != PriceObservationFailureKind.AUTHENTICATION) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return resolveOcrMerchantIdentityOnce(request, refreshed)
+    }
+
+    suspend fun resolveOcrReceiptMenuIdentity(
+        request: OcrReceiptMenuResolutionRequest,
+    ): PriceTraceCanonicalOutcome {
+        require(request.resolutionId.isNotBlank() && request.sourceLineId.isNotBlank()) {
+            "PriceTrace receipt menu resolution identity is required"
+        }
+        val initial = store.read()
+        if (!initial.isSignedIn) return PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
+        val first = resolveOcrReceiptMenuIdentityOnce(request, initial)
+        if (first !is PriceTraceCanonicalOutcome.Failure || first.kind != PriceObservationFailureKind.AUTHENTICATION) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return resolveOcrReceiptMenuIdentityOnce(request, refreshed)
+    }
+
+    suspend fun resolveOcrStandaloneRestaurantMenu(
+        request: OcrStandaloneMenuResolutionRequest,
+    ): PriceTraceCanonicalOutcome {
+        require(request.resolutionId.isNotBlank() && request.priceObservationClientKey.isNotBlank()) {
+            "PriceTrace standalone menu resolution identity is required"
+        }
+        val initial = store.read()
+        if (!initial.isSignedIn) return PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
+        val first = resolveOcrStandaloneRestaurantMenuOnce(request, initial)
+        if (first !is PriceTraceCanonicalOutcome.Failure || first.kind != PriceObservationFailureKind.AUTHENTICATION) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return resolveOcrStandaloneRestaurantMenuOnce(request, refreshed)
     }
 
     suspend fun submitProductCandidates(
@@ -245,6 +297,129 @@ class PriceTraceCanonicalGateway(
         PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.CONTRACT, error.message)
     }
 
+    private suspend fun resolveOcrMerchantIdentityOnce(
+        resolution: OcrMerchantIdentityResolutionRequest,
+        config: PriceTraceSupabaseConfig,
+    ): PriceTraceCanonicalOutcome = try {
+        val merchant = resolution.merchant
+        require(merchant.businessKind == com.pricetrace.receiptscanner.domain.BusinessKind.FOOD_SERVICE) {
+            "OCR merchant resolution requires a food_service source fact"
+        }
+        val merchantJson = buildJsonObject {
+            put("merchant_name", JsonPrimitive(merchant.name))
+            put("branch_name", merchant.branchName?.let(::JsonPrimitive) ?: JsonNull)
+            put("business_kind", JsonPrimitive(merchant.businessKind.wireValue))
+            put("business_registration_number", merchant.businessRegistrationNumber?.let(::JsonPrimitive) ?: JsonNull)
+            put("address", merchant.address?.let(::JsonPrimitive) ?: JsonNull)
+            put("phone", merchant.phone?.let(::JsonPrimitive) ?: JsonNull)
+            put("source_namespace", merchant.sourceNamespace?.let(::JsonPrimitive) ?: JsonNull)
+            put("source_location_code", merchant.sourceLocationCode?.let(::JsonPrimitive) ?: JsonNull)
+        }
+        val body = buildJsonObject {
+            put("p_resolution_id", JsonPrimitive(resolution.resolutionId))
+            put("p_merchant", merchantJson)
+            put("p_user_verified", JsonPrimitive(true))
+        }.encode()
+        val response = transport.execute(
+            request(config, "POST", "/rest/v1/rpc/resolve_ocr_merchant_identity_v1", body = body),
+        )
+        if (response.statusCode !in 200..299) {
+            return PriceTraceCanonicalOutcome.Failure(classify(response), response.body.takeIf(String::isNotBlank))
+        }
+        PriceTraceCanonicalOutcome.Success(decodeResponse(response.body))
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: SocketTimeoutException) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NETWORK_TIMEOUT)
+    } catch (_: IOException) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NETWORK)
+    } catch (error: Exception) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.CONTRACT, error.message)
+    }
+
+    private suspend fun resolveOcrReceiptMenuIdentityOnce(
+        resolution: OcrReceiptMenuResolutionRequest,
+        config: PriceTraceSupabaseConfig,
+    ): PriceTraceCanonicalOutcome = try {
+        val facts = resolution.menuFacts
+        require(facts.itemName.isNotBlank()) { "OCR receipt menu resolution requires an item_name source fact" }
+        val menuFacts = buildJsonObject {
+            put("item_name", JsonPrimitive(facts.itemName))
+            put("serving_label", facts.servingLabel?.let(::JsonPrimitive) ?: JsonNull)
+            put("category_label", facts.categoryLabel?.let(::JsonPrimitive) ?: JsonNull)
+            put("source_product_code_namespace", facts.sourceMenuCodeNamespace?.let(::JsonPrimitive) ?: JsonNull)
+            put("source_product_code", facts.sourceMenuCode?.let(::JsonPrimitive) ?: JsonNull)
+        }
+        val body = buildJsonObject {
+            put("p_resolution_id", JsonPrimitive(resolution.resolutionId))
+            put("p_menu_facts", menuFacts)
+            put("p_user_verified", JsonPrimitive(true))
+        }.encode()
+        val response = transport.execute(
+            request(config, "POST", "/rest/v1/rpc/resolve_ocr_receipt_menu_identity_v1", body = body),
+        )
+        if (response.statusCode !in 200..299) {
+            return PriceTraceCanonicalOutcome.Failure(classify(response), response.body.takeIf(String::isNotBlank))
+        }
+        PriceTraceCanonicalOutcome.Success(decodeReceiptMenuResolutionResponse(response.body))
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: SocketTimeoutException) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NETWORK_TIMEOUT)
+    } catch (_: IOException) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NETWORK)
+    } catch (error: Exception) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.CONTRACT, error.message)
+    }
+
+    private suspend fun resolveOcrStandaloneRestaurantMenuOnce(
+        resolution: OcrStandaloneMenuResolutionRequest,
+        config: PriceTraceSupabaseConfig,
+    ): PriceTraceCanonicalOutcome = try {
+        val merchant = resolution.merchant
+        val facts = resolution.menuFacts
+        require(merchant.name.isNotBlank() && facts.itemName.isNotBlank()) {
+            "OCR standalone menu resolution requires merchant and item source facts"
+        }
+        val merchantJson = buildJsonObject {
+            put("merchant_name", JsonPrimitive(merchant.name))
+            put("branch_name", merchant.branchName?.let(::JsonPrimitive) ?: JsonNull)
+            put("source_namespace", merchant.sourceNamespace?.let(::JsonPrimitive) ?: JsonNull)
+            put("source_location_code", merchant.sourceLocationCode?.let(::JsonPrimitive) ?: JsonNull)
+            put("business_registration_number", merchant.businessRegistrationNumber?.let(::JsonPrimitive) ?: JsonNull)
+            put("address", merchant.address?.let(::JsonPrimitive) ?: JsonNull)
+            put("phone", merchant.phone?.let(::JsonPrimitive) ?: JsonNull)
+        }
+        val itemJson = buildJsonObject {
+            put("item_name", JsonPrimitive(facts.itemName))
+            put("serving_label", facts.servingLabel?.let(::JsonPrimitive) ?: JsonNull)
+            put("category_label", facts.categoryLabel?.let(::JsonPrimitive) ?: JsonNull)
+            put("source_menu_code_namespace", facts.sourceMenuCodeNamespace?.let(::JsonPrimitive) ?: JsonNull)
+            put("source_menu_code", facts.sourceMenuCode?.let(::JsonPrimitive) ?: JsonNull)
+        }
+        val body = buildJsonObject {
+            put("p_resolution_id", JsonPrimitive(resolution.resolutionId))
+            put("p_merchant", merchantJson)
+            put("p_item", itemJson)
+            put("p_user_verified", JsonPrimitive(true))
+        }.encode()
+        val response = transport.execute(
+            request(config, "POST", "/rest/v1/rpc/resolve_ocr_standalone_restaurant_menu_v1", body = body),
+        )
+        if (response.statusCode !in 200..299) {
+            return PriceTraceCanonicalOutcome.Failure(classify(response), response.body.takeIf(String::isNotBlank))
+        }
+        PriceTraceCanonicalOutcome.Success(decodeStandaloneMenuResolutionResponse(response.body))
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: SocketTimeoutException) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NETWORK_TIMEOUT)
+    } catch (_: IOException) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NETWORK)
+    } catch (error: Exception) {
+        PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.CONTRACT, error.message)
+    }
+
     private suspend fun submitProductCandidatesOnce(
         idempotencyKey: String,
         candidates: List<ProductCandidate>,
@@ -306,7 +481,7 @@ class PriceTraceCanonicalGateway(
         require(envelope.priceObservations.all { it.netAmountMinor != null }) {
             "price_observation_net_amount_required"
         }
-        val responses = mutableListOf<JsonObject>()
+        val responses = mutableListOf<Pair<String, JsonObject>>()
         envelope.priceObservations.forEach { observation ->
             val observationKey = StableIds.sha256("$idempotencyKey|observation=${observation.clientKey}")
             val response = transport.execute(
@@ -323,11 +498,18 @@ class PriceTraceCanonicalGateway(
             if (response.statusCode !in 200..299) {
                 return PriceTraceCanonicalOutcome.Failure(classify(response), response.body.takeIf(String::isNotBlank))
             }
-            responses += decodeStandaloneResponse(response.body)
+            // Pair each server response with the exact local request key at the call site. The
+            // response array order is never used later to infer Nutrition identity.
+            responses += observation.clientKey to decodeStandaloneResponse(response.body)
         }
         PriceTraceCanonicalOutcome.Success(buildJsonObject {
             put("schemaVersion", JsonPrimitive("receipt-independent-price-observation.v3"))
-            put("observations", JsonArray(responses))
+            put("observations", JsonArray(responses.map { (clientKey, response) ->
+                buildJsonObject {
+                    put("priceObservationClientKey", JsonPrimitive(clientKey))
+                    put("response", response)
+                }
+            }))
         })
     } catch (cancelled: CancellationException) {
         throw cancelled
@@ -578,6 +760,46 @@ class PriceTraceCanonicalGateway(
         return row
     }
 
+    /** PT menu-resolution RPCs return either an exact owner response or an OCR review envelope. */
+    private fun decodeReceiptMenuResolutionResponse(value: String): JsonObject {
+        val row = decodeJsonObject(value)
+        val hasReceipt = (row["receiptId"] as? JsonPrimitive)?.contentOrNull?.isNotBlank() == true
+        val pendingResolution = (row["status"] as? JsonPrimitive)?.contentOrNull
+            .equals("needs_ocr_resolution", ignoreCase = true) &&
+            (row["resolutionId"] as? JsonPrimitive)?.contentOrNull?.isNotBlank() == true
+        require(hasReceipt || pendingResolution) {
+            "PriceTrace receipt menu resolution response is neither exact nor reviewable"
+        }
+        return row
+    }
+
+    private fun decodeStandaloneMenuResolutionResponse(value: String): JsonObject {
+        val row = decodeJsonObject(value)
+        val observationId = sequenceOf("observationId", "observation_id", "priceObservationId", "id")
+            .mapNotNull { key -> (row[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank) }
+            .firstOrNull()
+        val exact = row["kind"]?.let { (it as? JsonPrimitive)?.contentOrNull }
+            .equals("restaurant_purchase", ignoreCase = true) &&
+            observationId != null && PriceTraceIdentityJson.exactRestaurantMenuFromStandaloneResponse(row) != null
+        val ocrResolution = PriceTraceIdentityJson.ocrResolution(row.encode())
+        val pending = row["kind"]?.let { (it as? JsonPrimitive)?.contentOrNull }
+            .equals("restaurant_purchase", ignoreCase = true) &&
+            row["merchantResolutionStatus"] != null && row["menuResolutionStatus"] != null &&
+            ocrResolution?.status.equals("needs_ocr_resolution", ignoreCase = true)
+        require(exact || pending) {
+            "PriceTrace standalone menu resolution response is neither exact nor reviewable"
+        }
+        return row
+    }
+
+    private fun decodeJsonObject(value: String): JsonObject {
+        val element = json.parseToJsonElement(value)
+        return when (element) {
+            is JsonObject -> element
+            else -> element.jsonArray.single().jsonObject
+        }
+    }
+
     private fun decodeStandaloneResponse(value: String): JsonObject {
         val element = json.parseToJsonElement(value)
         val row = when (element) {
@@ -658,7 +880,80 @@ class PriceTraceCanonicalGateway(
 
 class PriceTraceCanonicalProjectionSubmitter(
     private val gateway: PriceTraceCanonicalGateway,
-) : IngestionProjectionSubmitter {
+) : IngestionProjectionSubmitter, OcrMerchantIdentityResolutionSubmitter, OcrMenuIdentityResolutionSubmitter {
+    override suspend fun resolveMerchantIdentity(
+        request: OcrMerchantIdentityResolutionRequest,
+    ): ProjectionSubmission = when (val result = gateway.resolveOcrMerchantIdentity(request)) {
+        is PriceTraceCanonicalOutcome.Success -> {
+            val requiresReview = !PriceTraceIdentityJson.merchantResolutionIsExact(result.response) ||
+                !PriceTraceIdentityJson.ocrResolutionIsResolved(result.response) ||
+                PriceTraceIdentityJson.requiresOcrReview(result.response)
+            ProjectionSubmission.Success(
+                remoteId = result.response.requiredId("receiptId"),
+                metadataJson = result.response.encode(),
+                alsoUploaded = if (result.response.hasCompleteObservations(request.receipt)) {
+                    setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+                } else {
+                    emptySet()
+                },
+                requiresReview = requiresReview,
+            )
+        }
+        is PriceTraceCanonicalOutcome.Failure -> result.toProjectionFailure(reviewAware = true)
+    }
+
+    override suspend fun resolveReceiptMenuIdentity(
+        request: OcrReceiptMenuResolutionRequest,
+    ): ProjectionSubmission = when (val result = gateway.resolveOcrReceiptMenuIdentity(request)) {
+        is PriceTraceCanonicalOutcome.Success -> {
+            val response = result.response
+            val hasReceiptResponse = response.stringField("receiptId") != null
+            val requiresReview = !hasReceiptResponse ||
+                !PriceTraceIdentityJson.merchantResolutionIsExact(response) ||
+                PriceTraceIdentityJson.requiresOcrReview(response)
+            ProjectionSubmission.Success(
+                remoteId = response.stringField("receiptId")
+                    ?: response.stringField("resolutionId")
+                    ?: request.resolutionId,
+                metadataJson = response.encode(),
+                alsoUploaded = if (!requiresReview && response.hasCompleteObservations(request.receipt)) {
+                    setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+                } else {
+                    emptySet()
+                },
+                requiresReview = requiresReview,
+            )
+        }
+        is PriceTraceCanonicalOutcome.Failure -> result.toProjectionFailure(reviewAware = true)
+    }
+
+    override suspend fun resolveStandaloneMenuIdentity(
+        request: OcrStandaloneMenuResolutionRequest,
+    ): ProjectionSubmission {
+        return when (val result = gateway.resolveOcrStandaloneRestaurantMenu(request)) {
+            is PriceTraceCanonicalOutcome.Success -> {
+                val exactIdentity = PriceTraceIdentityJson.exactRestaurantMenuFromStandaloneResponse(result.response)
+                val requiresReview = exactIdentity == null || PriceTraceIdentityJson.requiresOcrReview(result.response)
+                val remoteId = result.response.standaloneId()
+                    ?: PriceTraceIdentityJson.ocrResolution(result.response.encode())?.resolutionId
+                    ?: return ProjectionSubmission.Failure(
+                        "pricetrace_standalone_resolution_identity_invalid",
+                        retryable = false,
+                        requiresReview = true,
+                        metadataJson = result.response.encode(),
+                    )
+                ProjectionSubmission.Success(
+                    remoteId = remoteId,
+                    metadataJson = result.response.encode(),
+                    primaryUploaded = !requiresReview,
+                    primaryPendingReason = if (requiresReview) "pricetrace_standalone_menu_identity_requires_review" else null,
+                    requiresReview = requiresReview,
+                )
+            }
+            is PriceTraceCanonicalOutcome.Failure -> result.toProjectionFailure(reviewAware = true)
+        }
+    }
+
     override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
         val envelope = request.envelope ?: return ProjectionSubmission.Failure("canonical_envelope_missing", retryable = false)
         return when (request.projection) {
@@ -721,13 +1016,28 @@ class PriceTraceCanonicalProjectionSubmitter(
                     when (val result = gateway.submitStandalonePriceObservations(request.idempotencyKey, envelope)) {
                         is PriceTraceCanonicalOutcome.Success -> {
                             val observations = (result.response["observations"] as? JsonArray).orEmpty()
-                            val remoteId = observations.firstOrNull()?.let {
-                                (it as? JsonObject)?.standaloneId()
-                            } ?: return ProjectionSubmission.Failure("pricetrace_observation_identity_invalid", retryable = false)
+                            val observationResponses = observations.mapNotNull { observation ->
+                                ((observation as? JsonObject)?.get("response") as? JsonObject)
+                            }
+                            val requiresReview = PriceTraceIdentityJson.requiresOcrReview(result.response) ||
+                                PriceTraceIdentityJson.standaloneRestaurantIdentityNeedsReview(result.response)
+                            val remoteId = observationResponses.firstNotNullOfOrNull { response ->
+                                response.standaloneId()
+                                    ?: PriceTraceIdentityJson.ocrResolution(response.encode())?.resolutionId
+                            } ?: return ProjectionSubmission.Failure(
+                                "pricetrace_observation_identity_invalid",
+                                retryable = false,
+                                requiresReview = requiresReview,
+                                metadataJson = result.response.encode(),
+                            )
                             return ProjectionSubmission.Success(
                                 remoteId = remoteId,
                                 metadataJson = result.response.encode(),
-                                requiresReview = PriceTraceIdentityJson.requiresOcrReview(result.response),
+                                primaryUploaded = !requiresReview,
+                                primaryPendingReason = if (requiresReview) {
+                                    "pricetrace_standalone_menu_identity_requires_review"
+                                } else null,
+                                requiresReview = requiresReview,
                             )
                         }
                         is PriceTraceCanonicalOutcome.Failure -> return result.toProjectionFailure(reviewAware = true)

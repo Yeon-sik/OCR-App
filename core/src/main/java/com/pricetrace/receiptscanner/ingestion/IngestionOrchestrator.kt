@@ -7,6 +7,16 @@ import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.input.InputOrigin
 import com.pricetrace.receiptscanner.nutrition.NutritionDraftStatus
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelJson
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.time.OffsetDateTime
 
 enum class IdentityResolutionStatus { RESOLVED, AMBIGUOUS, NOT_FOUND }
@@ -60,6 +70,45 @@ sealed interface ProjectionSubmission {
 
 interface IngestionProjectionSubmitter {
     suspend fun submit(request: ProjectionRequest): ProjectionSubmission
+}
+
+data class OcrMerchantIdentityResolutionRequest(
+    val resolutionId: String,
+    val merchant: MerchantCandidate,
+    val receipt: ReceiptV2,
+)
+
+/** PT-owned OCR resolution RPC; resolution ids and canonical identities come from PT metadata only. */
+interface OcrMerchantIdentityResolutionSubmitter {
+    suspend fun resolveMerchantIdentity(request: OcrMerchantIdentityResolutionRequest): ProjectionSubmission
+}
+
+data class OcrMenuSourceFacts(
+    val itemName: String,
+    val servingLabel: String? = null,
+    val categoryLabel: String? = null,
+    val sourceMenuCodeNamespace: String? = null,
+    val sourceMenuCode: String? = null,
+)
+
+data class OcrReceiptMenuResolutionRequest(
+    val resolutionId: String,
+    val sourceLineId: String,
+    val menuFacts: OcrMenuSourceFacts,
+    val receipt: ReceiptV2,
+)
+
+data class OcrStandaloneMenuResolutionRequest(
+    val resolutionId: String,
+    val priceObservationClientKey: String,
+    val merchant: MerchantCandidate,
+    val menuFacts: OcrMenuSourceFacts,
+)
+
+/** PriceTrace-owned owner-authenticated menu resolution RPCs for receipt and receipt-free rows. */
+interface OcrMenuIdentityResolutionSubmitter {
+    suspend fun resolveReceiptMenuIdentity(request: OcrReceiptMenuResolutionRequest): ProjectionSubmission
+    suspend fun resolveStandaloneMenuIdentity(request: OcrStandaloneMenuResolutionRequest): ProjectionSubmission
 }
 
 interface IngestionSessionStore {
@@ -188,6 +237,16 @@ class IngestionOrchestrator(
                             projectionPayloadFingerprint = projectionPayloadFingerprint(state.projection, envelope),
                         )
                     state.status == ProjectionStatus.DISABLED -> state.copy(updatedAt = nowValue)
+                    state.projection in setOf(
+                        IngestionProjection.PRICETRACE_RECEIPT,
+                        IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+                    ) && PriceTraceIdentityJson.hasPendingOcrResolution(state.metadataJson) ->
+                        // PT already accepted the source row and issued an OCR resolution ID.
+                        // Preserve its metadata while the owner edits facts; do not replay ingestion.
+                        state.copy(
+                            projectionPayloadFingerprint = projectionPayloadFingerprint(state.projection, envelope),
+                            updatedAt = nowValue,
+                        )
                     else -> {
                         val nextProjectionFingerprint = projectionPayloadFingerprint(state.projection, envelope)
                         val payloadChanged = state.projectionPayloadFingerprint?.let {
@@ -573,6 +632,317 @@ class IngestionOrchestrator(
                 )
             }
         }
+    }
+
+    /** Completes PT-issued OCR merchant/menu reviews after the shared editor re-verifies source facts. */
+    suspend fun resolvePendingOcrIdentity(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+    ): ProjectionSubmission? {
+        var session = store.get(ingestionId) ?: return ProjectionSubmission.Failure(
+            "ingestion_not_found", retryable = false,
+        )
+        var lastSuccess: ProjectionSubmission.Success? = null
+
+        val receiptState = session.projections.singleOrNull { it.projection == IngestionProjection.PRICETRACE_RECEIPT }
+        val merchantResolution = PriceTraceIdentityJson.ocrResolution(receiptState?.metadataJson)
+            ?.takeIf { it.status.equals("needs_ocr_resolution", ignoreCase = true) }
+        if (merchantResolution != null) {
+            if (!isVerifiedForOcrResolution(session, envelope)) return resolutionNeedsReview(
+                "pricetrace_ocr_resolution_requires_verified_canonical_revision", receiptState?.metadataJson,
+            )
+            val receipt = envelope.receipt ?: return resolutionNeedsReview(
+                "pricetrace_ocr_resolution_receipt_missing", receiptState?.metadataJson,
+            )
+            val merchant = resolutionMerchant(envelope) ?: return resolutionNeedsReview(
+                "pricetrace_ocr_resolution_merchant_facts_missing", receiptState?.metadataJson,
+            )
+            val submitter = submitters[IngestionProjection.PRICETRACE_RECEIPT] as? OcrMerchantIdentityResolutionSubmitter
+                ?: return resolutionNeedsReview("pricetrace_ocr_resolution_not_configured", receiptState?.metadataJson)
+            val attempted = beginOcrResolutionAttempt(ingestionId, IngestionProjection.PRICETRACE_RECEIPT)
+                ?: return resolutionNeedsReview("pricetrace_ocr_resolution_projection_missing", receiptState?.metadataJson)
+            val result = submitter.resolveMerchantIdentity(
+                OcrMerchantIdentityResolutionRequest(merchantResolution.resolutionId, merchant, receipt),
+            )
+            val saved = persistOcrResolutionResult(
+                ingestionId, envelope, IngestionProjection.PRICETRACE_RECEIPT,
+                requireNotNull(receiptState), attempted, result,
+                mergeReceiptResolutionMetadata(receiptState.metadataJson, result.metadataJsonOrNull()),
+            )
+            if (saved !is ProjectionSubmission.Success) return saved
+            lastSuccess = saved
+            if (saved.requiresReview) return saved
+            session = requireNotNull(store.get(ingestionId))
+            // Merchant resolution may create fresh line resolution IDs. Let OCR review those
+            // source facts in a later editor action before calling the line RPCs.
+            if (PriceTraceIdentityJson.receiptMenuOcrResolutions(
+                    session.projections.single { it.projection == IngestionProjection.PRICETRACE_RECEIPT }.metadataJson,
+                ).isNotEmpty()
+            ) return saved.copy(requiresReview = true)
+        }
+
+        while (true) {
+            session = requireNotNull(store.get(ingestionId))
+            val state = session.projections.singleOrNull { it.projection == IngestionProjection.PRICETRACE_RECEIPT }
+                ?: break
+            val pending = PriceTraceIdentityJson.receiptMenuOcrResolutions(state.metadataJson).firstOrNull() ?: break
+            if (!isVerifiedForOcrResolution(session, envelope)) return resolutionNeedsReview(
+                "pricetrace_ocr_resolution_requires_verified_canonical_revision", state.metadataJson,
+            )
+            val receipt = envelope.receipt ?: return resolutionNeedsReview(
+                "pricetrace_ocr_menu_resolution_receipt_missing", state.metadataJson,
+            )
+            val menuFacts = receiptMenuFacts(envelope, pending.sourceLineId) ?: return resolutionNeedsReview(
+                "pricetrace_ocr_menu_source_facts_missing:${pending.sourceLineId}", state.metadataJson,
+            )
+            val submitter = submitters[IngestionProjection.PRICETRACE_RECEIPT] as? OcrMenuIdentityResolutionSubmitter
+                ?: return resolutionNeedsReview("pricetrace_ocr_menu_resolution_not_configured", state.metadataJson)
+            val attempted = beginOcrResolutionAttempt(ingestionId, IngestionProjection.PRICETRACE_RECEIPT)
+                ?: return resolutionNeedsReview("pricetrace_ocr_menu_projection_missing", state.metadataJson)
+            val result = submitter.resolveReceiptMenuIdentity(
+                OcrReceiptMenuResolutionRequest(
+                    resolutionId = pending.resolution.resolutionId,
+                    sourceLineId = pending.sourceLineId,
+                    menuFacts = menuFacts,
+                    receipt = receipt,
+                ),
+            )
+            val saved = persistOcrResolutionResult(
+                ingestionId, envelope, IngestionProjection.PRICETRACE_RECEIPT,
+                state, attempted, result,
+                mergeReceiptMenuResolutionMetadata(state.metadataJson, pending.sourceLineId, result.metadataJsonOrNull()),
+            )
+            if (saved !is ProjectionSubmission.Success) return saved
+            lastSuccess = saved
+            if (saved.requiresReview) return saved
+        }
+
+        while (true) {
+            session = requireNotNull(store.get(ingestionId))
+            val state = session.projections.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }
+                ?: break
+            val pending = PriceTraceIdentityJson.standaloneMenuOcrResolutions(state.metadataJson).firstOrNull() ?: break
+            if (!isVerifiedForOcrResolution(session, envelope)) return resolutionNeedsReview(
+                "pricetrace_ocr_resolution_requires_verified_canonical_revision", state.metadataJson,
+            )
+            val menuRequest = standaloneMenuRequest(envelope, pending.priceObservationClientKey, pending.resolution.resolutionId)
+                ?: return resolutionNeedsReview(
+                    "pricetrace_ocr_standalone_menu_source_facts_missing:${pending.priceObservationClientKey}",
+                    state.metadataJson,
+                )
+            val submitter = submitters[IngestionProjection.PRICETRACE_PRICE_OBSERVATION] as? OcrMenuIdentityResolutionSubmitter
+                ?: return resolutionNeedsReview("pricetrace_ocr_standalone_resolution_not_configured", state.metadataJson)
+            val attempted = beginOcrResolutionAttempt(ingestionId, IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+                ?: return resolutionNeedsReview("pricetrace_ocr_standalone_projection_missing", state.metadataJson)
+            val result = submitter.resolveStandaloneMenuIdentity(menuRequest)
+            val saved = persistOcrResolutionResult(
+                ingestionId, envelope, IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+                state, attempted, result,
+                mergeStandaloneMenuResolutionMetadata(
+                    state.metadataJson, pending.priceObservationClientKey, result.metadataJsonOrNull(),
+                ),
+            )
+            if (saved !is ProjectionSubmission.Success) return saved
+            lastSuccess = saved
+            if (saved.requiresReview) return saved
+        }
+
+        return lastSuccess
+    }
+
+    private fun isVerifiedForOcrResolution(session: IngestionSession, envelope: YeonsikOcrEnvelope): Boolean =
+        session.canonicalFingerprint == fingerprint(envelope) &&
+            session.verifiedCanonicalFingerprint == session.canonicalFingerprint &&
+            envelope.review.status == IngestionReviewStatus.READY
+
+    private suspend fun beginOcrResolutionAttempt(
+        ingestionId: String,
+        projection: IngestionProjection,
+    ): ProjectionState? {
+        val session = store.get(ingestionId) ?: return null
+        val current = session.projections.singleOrNull { it.projection == projection } ?: return null
+        val attempted = current.copy(attemptCount = current.attemptCount + 1, lastError = null, updatedAt = now())
+        store.save(session.copy(updatedAt = now(), projections = session.projections.replace(attempted)))
+        return attempted
+    }
+
+    private suspend fun persistOcrResolutionResult(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+        projection: IngestionProjection,
+        previous: ProjectionState,
+        attempted: ProjectionState,
+        result: ProjectionSubmission,
+        metadataJson: String?,
+    ): ProjectionSubmission {
+        val key = previous.idempotencyKey ?: StableIds.sha256(
+            "${projection.wireValue}|${requireNotNull(store.get(ingestionId)).localDocumentId}|ocr-resolution",
+        )
+        return when (result) {
+            is ProjectionSubmission.Failure -> {
+                val current = requireNotNull(store.get(ingestionId))
+                val retainedMetadata = result.metadataJson ?: metadataJson ?: previous.metadataJson
+                if (result.retryable) {
+                    persistFailure(current, projection, attempted, result.message, key, retainedMetadata)
+                } else {
+                    persistBlocked(current, projection, attempted, result.message, key, result.requiresReview, retainedMetadata)
+                }
+                result.copy(metadataJson = retainedMetadata)
+            }
+            is ProjectionSubmission.Success -> {
+                val response = metadataJson?.let {
+                    runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull()
+                }
+                val statusRequiresReview = when (projection) {
+                    IngestionProjection.PRICETRACE_RECEIPT -> response == null ||
+                        !PriceTraceIdentityJson.merchantResolutionIsExact(response) ||
+                        PriceTraceIdentityJson.requiresOcrReview(response)
+                    IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> response == null ||
+                        PriceTraceIdentityJson.requiresOcrReview(response) ||
+                        PriceTraceIdentityJson.standaloneRestaurantIdentityNeedsReview(response)
+                    else -> true
+                }
+                val requiresReview = result.requiresReview || !result.primaryUploaded || statusRequiresReview
+                val persisted = persistSuccess(
+                    session = requireNotNull(store.get(ingestionId)),
+                    projection = projection,
+                    previous = attempted,
+                    key = key,
+                    result = result.copy(metadataJson = metadataJson ?: result.metadataJson, requiresReview = requiresReview),
+                    envelope = envelope,
+                )
+                ProjectionSubmission.Success(
+                    remoteId = persisted.remoteId ?: result.remoteId,
+                    metadataJson = persisted.metadataJson,
+                    requiresReview = requiresReview,
+                )
+            }
+        }
+    }
+
+    private fun receiptMenuFacts(envelope: YeonsikOcrEnvelope, sourceLineId: String): OcrMenuSourceFacts? {
+        val receipt = envelope.receipt ?: return null
+        val line = receipt.lineItems.singleOrNull { it.id == sourceLineId } ?: return null
+        val linkedEstimates = envelope.nutrition.mapNotNull { item ->
+            when (item) {
+                is IngestionNutrition.RestaurantEstimate -> item.takeIf { it.lineId == sourceLineId }?.menuName
+                is IngestionNutrition.RestaurantMenuEstimate -> item.takeIf { it.lineId == sourceLineId }?.menuName
+                else -> null
+            }
+        }
+        if (linkedEstimates.size > 1) return null
+        val itemName = linkedEstimates.singleOrNull()?.takeIf(String::isNotBlank)
+            ?: line.description?.takeIf(String::isNotBlank)
+            ?: return null
+        val menuCode = line.identifiers.filter { it.scheme == "merchant_sku" }.singleOrNull()?.value
+        return OcrMenuSourceFacts(
+            itemName = itemName,
+            sourceMenuCodeNamespace = envelope.merchantCandidate?.sourceNamespace
+                ?: receipt.merchant.catalogNamespace,
+            sourceMenuCode = menuCode,
+        )
+    }
+
+    private fun standaloneMenuRequest(
+        envelope: YeonsikOcrEnvelope,
+        priceObservationClientKey: String,
+        resolutionId: String,
+    ): OcrStandaloneMenuResolutionRequest? {
+        val merchant = envelope.merchantCandidate ?: return null
+        val linkedItems = envelope.nutrition.filterIsInstance<IngestionNutrition.RestaurantMenuEstimate>()
+            .filter { it.priceObservationClientKey == priceObservationClientKey }
+        val item = linkedItems.singleOrNull() ?: return null
+        val itemName = item.menuName.takeIf(String::isNotBlank) ?: return null
+        return OcrStandaloneMenuResolutionRequest(
+            resolutionId = resolutionId,
+            priceObservationClientKey = priceObservationClientKey,
+            merchant = merchant,
+            menuFacts = OcrMenuSourceFacts(itemName = itemName),
+        )
+    }
+
+    private fun mergeReceiptResolutionMetadata(previous: String?, response: String?): String? =
+        mergeServerMetadata(previous, response)
+
+    private fun ProjectionSubmission.metadataJsonOrNull(): String? = when (this) {
+        is ProjectionSubmission.Success -> metadataJson
+        is ProjectionSubmission.Failure -> metadataJson
+    }
+
+    private fun mergeReceiptMenuResolutionMetadata(previous: String?, sourceLineId: String, response: String?): String? {
+        val serverResponse = response?.let { runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull() } ?: return previous
+        if (serverResponse.stringValue("receiptId", "receipt_id") != null) return serverResponse.encodeMetadata()
+        val root = previous?.let { runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull() } ?: return response
+        val lines = (root["lines"] as? JsonArray).orEmpty().map { element ->
+            val line = element as? JsonObject ?: return@map element
+            if (line.stringValue("sourceLineId", "source_line_id") != sourceLineId) return@map element
+            val status = serverResponse.stringValue("status")
+            JsonObject(line.toMutableMap().apply {
+                if (status.equals("needs_ocr_resolution", ignoreCase = true)) {
+                    put("resolutionStatus", JsonPrimitive("needs_ocr_resolution"))
+                    put("restaurantMenuId", JsonNull)
+                    put("catalogProductId", JsonNull)
+                }
+                put("ocrResolution", serverResponse)
+            })
+        }
+        return JsonObject(root.toMutableMap().apply { put("lines", JsonArray(lines)) }).encodeMetadata()
+    }
+
+    private fun mergeStandaloneMenuResolutionMetadata(
+        previous: String?,
+        priceObservationClientKey: String,
+        response: String?,
+    ): String? {
+        val serverResponse = response?.let { runCatching { Json.parseToJsonElement(it) }.getOrNull() } ?: return previous
+        val root = previous?.let { runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull() } ?: return response
+        val observations = (root["observations"] as? JsonArray).orEmpty().map { element ->
+            val row = element as? JsonObject ?: return@map element
+            if (row.stringValue("priceObservationClientKey", "price_observation_client_key") != priceObservationClientKey) {
+                return@map element
+            }
+            JsonObject(row.toMutableMap().apply { put("response", serverResponse) })
+        }
+        return JsonObject(root.toMutableMap().apply { put("observations", JsonArray(observations)) }).encodeMetadata()
+    }
+
+    private fun mergeServerMetadata(previous: String?, response: String?): String? {
+        if (response == null) return previous
+        val parsed = runCatching { Json.parseToJsonElement(response).jsonObject }.getOrNull()
+        return parsed?.encodeMetadata() ?: response
+    }
+
+    private fun JsonObject.stringValue(vararg keys: String): String? = keys.firstNotNullOfOrNull { key ->
+        (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+    }
+
+    private fun JsonObject.encodeMetadata(): String = Json.encodeToString(JsonObject.serializer(), this)
+
+    private fun resolutionNeedsReview(message: String, metadataJson: String?): ProjectionSubmission.Failure =
+        ProjectionSubmission.Failure(message, retryable = false, requiresReview = true, metadataJson = metadataJson)
+
+    private fun resolutionMerchant(envelope: YeonsikOcrEnvelope): MerchantCandidate? {
+        val receiptMerchant = envelope.receipt?.merchant ?: return null
+        val candidate = envelope.merchantCandidate
+        val name = receiptMerchant.name?.takeIf(String::isNotBlank)
+            ?: candidate?.name?.takeIf(String::isNotBlank)
+            ?: return null
+        return MerchantCandidate(
+            name = name,
+            branchName = receiptMerchant.branchName ?: candidate?.branchName,
+            address = receiptMerchant.address ?: candidate?.address,
+            phone = receiptMerchant.phone ?: candidate?.phone,
+            businessRegistrationNumber = receiptMerchant.businessRegistrationNumber
+                ?: candidate?.businessRegistrationNumber,
+            sourceAttachmentIds = candidate?.sourceAttachmentIds.orEmpty(),
+            sourceNamespace = candidate?.sourceNamespace ?: receiptMerchant.catalogNamespace,
+            sourceLocationCode = candidate?.sourceLocationCode ?: receiptMerchant.merchantId,
+            businessKind = if (receiptMerchant.businessKind != com.pricetrace.receiptscanner.domain.BusinessKind.UNKNOWN) {
+                receiptMerchant.businessKind
+            } else {
+                candidate?.businessKind ?: com.pricetrace.receiptscanner.domain.BusinessKind.UNKNOWN
+            },
+        )
     }
 
     /** Submits retryable/ready projections in dependency order in one user action. */

@@ -34,6 +34,24 @@ data class PriceTraceLineIdentity(
     val resolutionStatus: String? = null,
 )
 
+/** OCR-owned follow-up instructions returned by PriceTrace; these values are never user authority. */
+data class PriceTraceOcrResolution(
+    val status: String,
+    val resolutionId: String,
+    val reasonCode: String?,
+    val requiredSourceFacts: List<String>,
+)
+
+data class PriceTraceLineOcrResolution(
+    val sourceLineId: String,
+    val resolution: PriceTraceOcrResolution,
+)
+
+data class PriceTraceStandaloneOcrResolution(
+    val priceObservationClientKey: String,
+    val resolution: PriceTraceOcrResolution,
+)
+
 /** Exact server-issued identity for one Restaurant/Menu Nutrition item. */
 data class PriceTraceRestaurantMenuIdentity(
     val restaurantId: String,
@@ -69,6 +87,70 @@ data class PriceTraceProductIdentity(
 )
 
 object PriceTraceIdentityJson {
+    fun ocrResolution(metadataJson: String?): PriceTraceOcrResolution? = metadataJson?.let { value ->
+        runCatching {
+            val root = kotlinx.serialization.json.Json.parseToJsonElement(value).jsonObject
+            root.ocrResolution()
+        }.getOrNull()
+    }
+
+    fun receiptMenuOcrResolutions(metadataJson: String?): List<PriceTraceLineOcrResolution> = metadataJson?.let { value ->
+        runCatching {
+            val root = kotlinx.serialization.json.Json.parseToJsonElement(value).jsonObject
+            (root["lines"] as? JsonArray).orEmpty().mapNotNull { element ->
+                val line = element as? JsonObject ?: return@mapNotNull null
+                val sourceLineId = line.stringField("sourceLineId", "source_line_id")
+                    ?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                val resolution = line.ocrResolution() ?: return@mapNotNull null
+                if (!resolution.status.equals("needs_ocr_resolution", ignoreCase = true)) return@mapNotNull null
+                PriceTraceLineOcrResolution(sourceLineId, resolution)
+            }
+        }.getOrNull()
+    }.orEmpty()
+
+    fun standaloneMenuOcrResolutions(metadataJson: String?): List<PriceTraceStandaloneOcrResolution> = metadataJson?.let { value ->
+        runCatching {
+            val root = kotlinx.serialization.json.Json.parseToJsonElement(value).jsonObject
+            (root["observations"] as? JsonArray).orEmpty().mapNotNull { element ->
+                val observation = element as? JsonObject ?: return@mapNotNull null
+                val clientKey = observation.stringField("priceObservationClientKey", "price_observation_client_key")
+                    ?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                val response = observation["response"] as? JsonObject ?: return@mapNotNull null
+                val resolution = response.ocrResolution() ?: return@mapNotNull null
+                if (!resolution.status.equals("needs_ocr_resolution", ignoreCase = true)) return@mapNotNull null
+                PriceTraceStandaloneOcrResolution(clientKey, resolution)
+            }
+        }.getOrNull()
+    }.orEmpty()
+
+    fun hasPendingOcrResolution(metadataJson: String?): Boolean {
+        if (ocrResolution(metadataJson)?.status.equals("needs_ocr_resolution", ignoreCase = true)) return true
+        if (receiptMenuOcrResolutions(metadataJson).isNotEmpty()) return true
+        if (standaloneMenuOcrResolutions(metadataJson).isNotEmpty()) return true
+        val root = metadataJson?.let { runCatching { kotlinx.serialization.json.Json.parseToJsonElement(it).jsonObject }.getOrNull() }
+        return root?.let(::requiresOcrReview) == true
+    }
+
+    fun merchantResolutionIsExact(response: JsonObject): Boolean {
+        val merchantStatus = response.stringField("merchantResolutionStatus", "merchant_resolution_status")
+            ?: return false
+        if (!merchantStatus.equals("exact", ignoreCase = true) &&
+            !merchantStatus.equals("resolved", ignoreCase = true)
+        ) return false
+        val nested = (response["ocrResolution"] as? JsonObject)
+            ?: (response["ocr_resolution"] as? JsonObject)
+        if (nested != null && !nested.stringField("status").equals("resolved", ignoreCase = true)) return false
+        return true
+    }
+
+    /** Resolution RPC responses must explicitly close the PT-issued OCR resolution. */
+    fun ocrResolutionIsResolved(response: JsonObject): Boolean {
+        val nested = (response["ocrResolution"] as? JsonObject)
+            ?: (response["ocr_resolution"] as? JsonObject)
+            ?: return false
+        return nested.stringField("status").equals("resolved", ignoreCase = true)
+    }
+
     fun decode(response: JsonObject): PriceTraceIdentity {
         val receiptId = response.stringField("receiptId", "receipt_id")
             ?: error("PriceTrace response is missing receiptId")
@@ -143,18 +225,23 @@ object PriceTraceIdentityJson {
     /** A successful standalone PT response is the authority for receipt-free exact menu IDs. */
     fun exactRestaurantMenuFromStandaloneResponse(response: JsonObject): PriceTraceRestaurantMenuIdentity? {
         if (!response.stringField("kind").equals("restaurant_purchase", ignoreCase = true)) return null
-        val status = response.stringField("merchantResolutionStatus", "merchant_resolution_status")
-            ?: response.stringField("resolutionStatus", "resolution_status")
-        if (status != null && !status.equals("exact", ignoreCase = true) &&
-            !status.equals("resolved", ignoreCase = true)
+        val authorityStatus = response.stringField("authorityStatus", "authority_status")
+        if (authorityStatus != null && !authorityStatus.equals("exact", ignoreCase = true)) return null
+        val merchantStatus = response.stringField("merchantResolutionStatus", "merchant_resolution_status")
+            ?: return null
+        if (!merchantStatus.equals("exact", ignoreCase = true) &&
+            !merchantStatus.equals("resolved", ignoreCase = true)
         ) return null
-        val ocrResolutionStatus = (response["ocrResolution"] as? JsonObject)
-            ?.stringField("status")
-            ?: (response["ocr_resolution"] as? JsonObject)?.stringField("status")
-        if (ocrResolutionStatus != null &&
-            !ocrResolutionStatus.equals("exact", ignoreCase = true) &&
-            !ocrResolutionStatus.equals("resolved", ignoreCase = true)
+        val menuStatus = response.stringField("menuResolutionStatus", "menu_resolution_status") ?: return null
+        if (!menuStatus.equals("resolved", ignoreCase = true) &&
+            !menuStatus.equals("exact", ignoreCase = true)
         ) return null
+        val ocrResolution = (response["ocrResolution"] as? JsonObject)
+            ?: (response["ocr_resolution"] as? JsonObject)
+        if (ocrResolution != null) {
+            val ocrResolutionStatus = ocrResolution.stringField("status") ?: return null
+            if (!ocrResolutionStatus.equals("resolved", ignoreCase = true)) return null
+        }
         val ids = response["authoritativeIds"] as? JsonObject
             ?: response["authoritative_ids"] as? JsonObject
             ?: return null
@@ -174,8 +261,36 @@ object PriceTraceIdentityJson {
         val observations = response["observations"] as? JsonArray
         return observations.orEmpty().any { value ->
             val observation = value as? JsonObject ?: return@any false
-            observation.stringField("kind") == "restaurant_purchase" && observation.hasOcrReviewStatus()
+            val serverResponse = (observation["response"] as? JsonObject) ?: observation
+            serverResponse.stringField("kind") == "restaurant_purchase" && serverResponse.hasOcrReviewStatus()
         }
+    }
+
+    /** A restaurant observation without explicit exact authority remains publication-pending. */
+    fun standaloneRestaurantIdentityNeedsReview(response: JsonObject): Boolean {
+        val observations = response["observations"] as? JsonArray ?: return false
+        return observations.orEmpty().any { value ->
+            val row = value as? JsonObject ?: return@any false
+            val serverResponse = (row["response"] as? JsonObject) ?: row
+            serverResponse.stringField("kind").equals("restaurant_purchase", ignoreCase = true) &&
+                exactRestaurantMenuFromStandaloneResponse(serverResponse) == null
+        }
+    }
+
+    private fun JsonObject.ocrResolution(): PriceTraceOcrResolution? {
+        val resolution = (this["ocrResolution"] as? JsonObject)
+            ?: (this["ocr_resolution"] as? JsonObject)
+            ?: return null
+        val status = resolution.stringField("status") ?: return null
+        val resolutionId = resolution.stringField("resolutionId", "resolution_id") ?: return null
+        return PriceTraceOcrResolution(
+            status = status,
+            resolutionId = resolutionId,
+            reasonCode = resolution.stringField("reasonCode", "reason_code"),
+            requiredSourceFacts = (resolution["requiredSourceFacts"] as? JsonArray)
+                .orEmpty()
+                .mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank) },
+        )
     }
 
     private fun JsonObject.hasOcrReviewStatus(): Boolean {
@@ -185,13 +300,14 @@ object PriceTraceIdentityJson {
             stringField("status"),
         )
         if (statuses.any { status ->
-                listOf("needs_ocr_resolution", "needs_user_selection", "ambiguous")
+                listOf("needs_ocr_resolution", "needs_user_selection", "ambiguous", "unresolved_catalog")
                     .any { it.equals(status, ignoreCase = true) }
             }
         ) return true
         val nested = (this["ocrResolution"] as? JsonObject)
             ?: (this["ocr_resolution"] as? JsonObject)
-        return nested?.hasOcrReviewStatus() == true
+        if (nested?.hasOcrReviewStatus() == true) return true
+        return (this["response"] as? JsonObject)?.hasOcrReviewStatus() == true
     }
 
     private fun restaurantMenuIdentity(

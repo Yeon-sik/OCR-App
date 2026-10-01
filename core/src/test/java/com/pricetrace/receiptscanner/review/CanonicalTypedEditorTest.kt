@@ -1,5 +1,6 @@
 package com.pricetrace.receiptscanner.review
 
+import com.pricetrace.receiptscanner.domain.BusinessKind
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV2Json
 import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
@@ -21,15 +22,36 @@ class CanonicalTypedEditorTest {
         val original = imported.copy(review = imported.review.copy(status = IngestionReviewStatus.READY))
         val controller = CanonicalReviewController(original, now = { "2026-09-15T12:00:00+09:00" })
 
-        assertTrue(controller.editableFields().none { it.path.endsWith(".sub_brand_name") || it.path.endsWith(".merchant_sku") })
-        assertTrue(controller.editableFields().none { it.path.startsWith("merchant_candidate.") })
+        assertTrue(controller.editableFields().none { it.path.endsWith(".sub_brand_name") })
+        assertTrue(controller.editableFields().any { it.path == "receipt.line_items[line-1].merchant_sku" })
+        assertTrue(controller.editableFields().any { it.path == "receipt.merchant.catalog_namespace" })
+        val originalReceipt = requireNotNull(original.receipt)
+        val retailEnvelope = original.copy(
+            merchantCandidate = original.merchantCandidate!!.copy(businessKind = BusinessKind.RETAIL),
+            receipt = originalReceipt.copy(
+                merchant = originalReceipt.merchant.copy(businessKind = BusinessKind.RETAIL),
+            ),
+        )
+        assertTrue(CanonicalReviewController(retailEnvelope).editableFields().none {
+            it.path.endsWith(".merchant_sku") || it.path == "receipt.merchant.catalog_namespace" ||
+                it.path == "receipt.merchant.merchant_id"
+        })
+        assertEquals(
+            setOf("merchant_candidate.source_namespace", "merchant_candidate.source_location_code"),
+            controller.editableFields().filter { it.path.startsWith("merchant_candidate.") }.map { it.path }.toSet(),
+        )
+
+        assertTrue(controller.updateField("merchant_candidate.source_namespace", "verified-source"))
+        assertTrue(controller.updateField("merchant_candidate.source_location_code", "branch-17"))
+        assertEquals("verified-source", controller.state.value.envelope.merchantCandidate!!.sourceNamespace)
+        assertEquals("branch-17", controller.state.value.envelope.merchantCandidate!!.sourceLocationCode)
 
         assertTrue(controller.updateField("receipt.merchant.name", "수정 식당"))
         assertEquals("수정 식당", controller.state.value.envelope.receipt!!.merchant.name)
         assertEquals("수정 식당", controller.state.value.envelope.merchantCandidate!!.name)
         assertTrue(controller.state.value.edits.any { it.fieldPath == "merchant_candidate.name" })
 
-        val originalConfidence = original.receipt!!.lineItems.single { it.id == "line-1" }.confidence
+        val originalConfidence = originalReceipt.lineItems.single { it.id == "line-1" }.confidence
         assertTrue(controller.updateField("receipt.line_items[line-1].description", "우동"))
         assertEquals("우동", controller.state.value.envelope.receipt!!.lineItems.single().description)
         assertEquals(originalConfidence, controller.state.value.envelope.receipt!!.lineItems.single().confidence)

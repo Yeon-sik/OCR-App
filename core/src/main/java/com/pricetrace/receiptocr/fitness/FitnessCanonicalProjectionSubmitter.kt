@@ -16,6 +16,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /** Publishes only canonical Nutrition contracts for the integrated OCR envelope. */
 class FitnessCanonicalProjectionSubmitter(
@@ -213,18 +214,23 @@ class FitnessCanonicalProjectionSubmitter(
         }
     }
 
-    /** Standalone rows are returned in request order; the local client key selects that request index. */
+    /** Resolve the exact per-observation server response by its local request correlation key. */
     private fun standaloneIdentityFor(
         request: ProjectionRequest,
         envelope: com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope,
         priceObservationClientKey: String,
     ): PriceTraceRestaurantMenuIdentity? {
-        val index = envelope.priceObservations.indexOfFirst { it.clientKey == priceObservationClientKey }
-        if (index < 0) return null
         val raw = request.dependencyMetadataJson[IngestionProjection.PRICETRACE_PRICE_OBSERVATION] ?: return null
         val root = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return null
-        val row = (root["observations"] as? JsonArray)?.getOrNull(index) as? JsonObject ?: return null
-        return PriceTraceIdentityJson.exactRestaurantMenuFromStandaloneResponse(row)
+        val row = (root["observations"] as? JsonArray)
+            ?.mapNotNull { it as? JsonObject }
+            ?.singleOrNull {
+                runCatching { it["priceObservationClientKey"]?.jsonPrimitive?.content }.getOrNull() ==
+                    priceObservationClientKey
+            }
+            ?: return null
+        val response = row["response"] as? JsonObject ?: return null
+        return PriceTraceIdentityJson.exactRestaurantMenuFromStandaloneResponse(response)
     }
 
     private fun failure(message: String, retryable: Boolean, responses: List<String>): ProjectionSubmission.Failure =

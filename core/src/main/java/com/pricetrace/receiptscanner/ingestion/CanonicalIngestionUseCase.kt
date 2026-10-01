@@ -36,7 +36,7 @@ data class CanonicalConfirmationResult(
  */
 class CanonicalIngestionUseCase(
     private val store: IngestionSessionStore,
-    submitters: Map<IngestionProjection, IngestionProjectionSubmitter> = emptyMap(),
+    private val submitters: Map<IngestionProjection, IngestionProjectionSubmitter> = emptyMap(),
     private val importer: ExternalJsonImporter = ExternalJsonImporter(),
     private val now: () -> String = { OffsetDateTime.now().toString() },
 ) {
@@ -256,6 +256,18 @@ class CanonicalIngestionUseCase(
                 is IngestionStartResult.Failure -> return CanonicalConfirmationResult(result, promoted)
             }
         }
+        when (val resolution = resolvePendingMerchantIdentityAndResume(ingestionId, promoted)) {
+            is ProjectionSubmission.Failure -> return CanonicalConfirmationResult(
+                IngestionStartResult.Failure(listOf(resolution.message)), promoted,
+            )
+            is ProjectionSubmission.Success -> if (resolution.requiresReview) {
+                return CanonicalConfirmationResult(
+                    IngestionStartResult.Failure(listOf("pricetrace_ocr_identity_still_needs_review")), promoted,
+                )
+            }
+            null -> Unit
+        }
+        latest = store.get(ingestionId) ?: latest
         return CanonicalConfirmationResult(IngestionStartResult.Success(latest), promoted)
     }
 
@@ -263,13 +275,48 @@ class CanonicalIngestionUseCase(
         ingestionId: String,
         envelope: YeonsikOcrEnvelope,
         selectedProjections: Set<IngestionProjection>,
-    ): List<ProjectionState> = orchestrator.submitSelectedProjections(ingestionId, envelope, selectedProjections)
+    ): List<ProjectionState> {
+        when (val resolution = resolvePendingMerchantIdentityAndResume(ingestionId, envelope)) {
+            is ProjectionSubmission.Failure -> return store.get(ingestionId)?.projections.orEmpty()
+            is ProjectionSubmission.Success -> if (resolution.requiresReview) {
+                return store.get(ingestionId)?.projections.orEmpty()
+            }
+            null -> Unit
+        }
+        return orchestrator.submitSelectedProjections(ingestionId, envelope, selectedProjections)
+    }
 
     suspend fun retrySelected(
         ingestionId: String,
         envelope: YeonsikOcrEnvelope,
         selectedProjections: Set<IngestionProjection>,
-    ): List<ProjectionState> = orchestrator.retrySelectedProjections(ingestionId, envelope, selectedProjections)
+    ): List<ProjectionState> = submitSelected(ingestionId, envelope, selectedProjections)
+
+    /** Shared OCR-only resolution and Fitness resume path used by Android and Desktop. */
+    private suspend fun resolvePendingMerchantIdentityAndResume(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+    ): ProjectionSubmission? {
+        val result = orchestrator.resolvePendingOcrIdentity(ingestionId, envelope) ?: return null
+        if (result is ProjectionSubmission.Success && !result.requiresReview &&
+            envelope.nutrition.any {
+                it is IngestionNutrition.RestaurantEstimate || it is IngestionNutrition.RestaurantMenuEstimate
+            }
+        ) {
+            val nutritionState = orchestrator.submitProjection(
+                ingestionId, IngestionProjection.FITNESS_NUTRITION, envelope,
+            )
+            if (nutritionState.status != ProjectionStatus.UPLOADED) {
+                return ProjectionSubmission.Failure(
+                    message = nutritionState.lastError ?: "fitness_nutrition_projection_not_uploaded",
+                    retryable = nutritionState.status == ProjectionStatus.FAILED,
+                    requiresReview = nutritionState.status == ProjectionStatus.BLOCKED,
+                    metadataJson = nutritionState.metadataJson,
+                )
+            }
+        }
+        return result
+    }
 }
 
 typealias CanonicalIngestionController = CanonicalIngestionUseCase

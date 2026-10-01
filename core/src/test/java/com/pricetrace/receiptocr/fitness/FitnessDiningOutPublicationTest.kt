@@ -23,6 +23,7 @@ import com.pricetrace.receiptscanner.nutrition.NutritionContract
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -69,7 +70,7 @@ class FitnessDiningOutPublicationTest {
             estimate = estimate.estimate,
         )))
         val rowIdentity = menuIdentity(firstId = 202)
-        val priceResponse = standaloneMetadata(rowIdentity)
+        val priceResponse = standaloneMetadata(rowIdentity, source.priceObservations.single().clientKey)
         val backend = FakeNutritionBackend()
 
         val result = FitnessCanonicalProjectionSubmitter(gateway(backend)).submit(
@@ -85,6 +86,92 @@ class FitnessDiningOutPublicationTest {
         assertEquals(1, backend.publicationCommitCount)
         assertEquals("null", backend.canonicalBodies.single()["p_pricetrace_identity"].toString())
         assertExactIdentity(rowIdentity, backend.publicationBodies.single())
+    }
+
+    @Test
+    fun legacyStandaloneFourIdsWithoutResolutionStatusesNeverCallPublicationRpc() = runBlocking {
+        val source = YeonsikOcrV3Json.decode(readExample("yeonsik-ocr.v3.restaurant.example.json"), "legacy-standalone")
+        val estimate = receiptEnvelope().nutrition.single() as IngestionNutrition.RestaurantEstimate
+        val priceKey = source.priceObservations.single().clientKey
+        val envelope = source.copy(nutrition = listOf(IngestionNutrition.RestaurantMenuEstimate(
+            clientKey = "legacy-menu",
+            menuName = "Noodles",
+            priceObservationClientKey = priceKey,
+            estimate = estimate.estimate,
+        )))
+        val backend = FakeNutritionBackend()
+
+        val result = FitnessCanonicalProjectionSubmitter(gateway(backend)).submit(
+            request(
+                envelope,
+                "legacy-standalone-no-status",
+                dependencyMetadataJson = mapOf(
+                    IngestionProjection.PRICETRACE_PRICE_OBSERVATION to legacyStandaloneMetadata(menuIdentity(601), priceKey),
+                ),
+            ),
+        )
+
+        assertTrue("$result", result is ProjectionSubmission.Failure)
+        assertTrue((result as ProjectionSubmission.Failure).requiresReview)
+        assertEquals(1, backend.canonicalCreateCount)
+        assertEquals(0, backend.publicationCommitCount)
+        assertEquals(1, backend.requests.size)
+        assertTrue(backend.requests.single().url.endsWith("/rpc/import_canonical_nutrition_v3"))
+        assertEquals("food-estimate.v1", backend.canonicalBodies.single()["p_input_contract"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun standaloneRestaurantIdentityFailsClosedForEveryNonResolvedStatus() {
+        val statuses = listOf(null, "unknown", "pending", "unverified", "ambiguous", "needs_ocr_resolution")
+        fun ids() = buildJsonObject {
+            put("restaurantId", JsonPrimitive(id(901)))
+            put("restaurantLocationId", JsonPrimitive(id(902)))
+            put("restaurantMenuId", JsonPrimitive(id(903)))
+            put("catalogProductId", JsonPrimitive(id(904)))
+        }
+
+        statuses.forEach { status ->
+            val unresolvedMerchant = buildJsonObject {
+                put("kind", JsonPrimitive("restaurant_purchase"))
+                status?.let { put("merchantResolutionStatus", JsonPrimitive(it)) }
+                put("menuResolutionStatus", JsonPrimitive("resolved"))
+                put("authoritativeIds", ids())
+            }
+            val unresolvedMenu = buildJsonObject {
+                put("kind", JsonPrimitive("restaurant_purchase"))
+                put("merchantResolutionStatus", JsonPrimitive("exact"))
+                status?.let { put("menuResolutionStatus", JsonPrimitive(it)) }
+                put("authoritativeIds", ids())
+            }
+            val unresolvedOcrResolution = buildJsonObject {
+                put("kind", JsonPrimitive("restaurant_purchase"))
+                put("merchantResolutionStatus", JsonPrimitive("exact"))
+                put("menuResolutionStatus", JsonPrimitive("resolved"))
+                put("ocrResolution", buildJsonObject {
+                    status?.let { put("status", JsonPrimitive(it)) }
+                })
+                put("authoritativeIds", ids())
+            }
+
+            assertEquals(null, PriceTraceIdentityJson.exactRestaurantMenuFromStandaloneResponse(unresolvedMerchant))
+            assertEquals(null, PriceTraceIdentityJson.exactRestaurantMenuFromStandaloneResponse(unresolvedMenu))
+            assertEquals(null, PriceTraceIdentityJson.exactRestaurantMenuFromStandaloneResponse(unresolvedOcrResolution))
+        }
+
+        val explicitNullStatuses = buildJsonObject {
+            put("kind", JsonPrimitive("restaurant_purchase"))
+            put("merchantResolutionStatus", JsonNull)
+            put("menuResolutionStatus", JsonNull)
+            put("authoritativeIds", ids())
+        }
+        val genericLegacyResolutionStatus = buildJsonObject {
+            put("kind", JsonPrimitive("restaurant_purchase"))
+            put("merchantResolutionStatus", JsonPrimitive("exact"))
+            put("resolutionStatus", JsonPrimitive("resolved"))
+            put("authoritativeIds", ids())
+        }
+        assertEquals(null, PriceTraceIdentityJson.exactRestaurantMenuFromStandaloneResponse(explicitNullStatuses))
+        assertEquals(null, PriceTraceIdentityJson.exactRestaurantMenuFromStandaloneResponse(genericLegacyResolutionStatus))
     }
 
     @Test
@@ -107,6 +194,63 @@ class FitnessDiningOutPublicationTest {
 
         assertTrue(PriceTraceIdentityJson.requiresOcrReview(standalone))
         assertEquals(null, PriceTraceIdentityJson.exactRestaurantMenuFromStandaloneResponse(standalone))
+        assertTrue(PriceTraceIdentityJson.requiresOcrReview(buildJsonObject {
+            put("observations", JsonArray(listOf(buildJsonObject {
+                put("priceObservationClientKey", JsonPrimitive("price-1"))
+                put("response", standalone)
+            })))
+        }))
+    }
+
+    @Test
+    fun pendingOcrResolutionsAreFoundAfterExactRowsWithNullResolutionMetadata() {
+        val lineMetadata = Json.encodeToString(JsonObject.serializer(), buildJsonObject {
+            put("lines", JsonArray(listOf(
+                buildJsonObject {
+                    put("sourceLineId", JsonPrimitive("line-exact"))
+                    put("resolutionStatus", JsonPrimitive("resolved"))
+                    put("ocrResolution", JsonNull)
+                },
+                buildJsonObject {
+                    put("sourceLineId", JsonPrimitive("line-pending"))
+                    put("resolutionStatus", JsonPrimitive("needs_ocr_resolution"))
+                    put("ocrResolution", buildJsonObject {
+                        put("status", JsonPrimitive("needs_ocr_resolution"))
+                        put("resolutionId", JsonPrimitive(id(999)))
+                        put("reasonCode", JsonPrimitive("menu_identity_ambiguous"))
+                        put("requiredSourceFacts", JsonArray(emptyList()))
+                    })
+                },
+            )))
+        })
+        val standaloneMetadata = Json.encodeToString(JsonObject.serializer(), buildJsonObject {
+            put("observations", JsonArray(listOf(
+                buildJsonObject {
+                    put("priceObservationClientKey", JsonPrimitive("price-exact"))
+                    put("response", buildJsonObject { put("ocrResolution", JsonNull) })
+                },
+                buildJsonObject {
+                    put("priceObservationClientKey", JsonPrimitive("price-pending"))
+                    put("response", buildJsonObject {
+                        put("ocrResolution", buildJsonObject {
+                            put("status", JsonPrimitive("needs_ocr_resolution"))
+                            put("resolutionId", JsonPrimitive(id(998)))
+                            put("requiredSourceFacts", JsonArray(emptyList()))
+                        })
+                    })
+                },
+            )))
+        })
+
+        assertEquals(
+            listOf("line-pending"),
+            PriceTraceIdentityJson.receiptMenuOcrResolutions(lineMetadata).map { it.sourceLineId },
+        )
+        assertEquals(
+            listOf("price-pending"),
+            PriceTraceIdentityJson.standaloneMenuOcrResolutions(standaloneMetadata)
+                .map { it.priceObservationClientKey },
+        )
     }
 
     @Test
@@ -380,16 +524,48 @@ class FitnessDiningOutPublicationTest {
         catalogProductId = id(firstId + 3),
     )
 
-    private fun standaloneMetadata(identity: com.pricetrace.receiptscanner.ingestion.PriceTraceRestaurantMenuIdentity): String = Json.encodeToString(
+    private fun standaloneMetadata(
+        identity: com.pricetrace.receiptscanner.ingestion.PriceTraceRestaurantMenuIdentity,
+        clientKey: String,
+    ): String = Json.encodeToString(
         JsonObject.serializer(),
         buildJsonObject {
             put("observations", JsonArray(listOf(buildJsonObject {
-                put("kind", JsonPrimitive("restaurant_purchase"))
-                put("authoritativeIds", buildJsonObject {
-                    put("restaurantId", JsonPrimitive(identity.restaurantId))
-                    put("restaurantLocationId", JsonPrimitive(identity.restaurantLocationId))
-                    put("restaurantMenuId", JsonPrimitive(identity.restaurantMenuId))
-                    put("catalogProductId", JsonPrimitive(identity.catalogProductId))
+                put("priceObservationClientKey", JsonPrimitive(clientKey))
+                put("response", buildJsonObject {
+                    put("kind", JsonPrimitive("restaurant_purchase"))
+                    put("authorityStatus", JsonPrimitive("exact"))
+                    put("merchantResolutionStatus", JsonPrimitive("exact"))
+                    put("menuResolutionStatus", JsonPrimitive("exact"))
+                    put("observationId", JsonPrimitive("observation-$clientKey"))
+                    put("ocrResolution", JsonNull)
+                    put("authoritativeIds", buildJsonObject {
+                        put("restaurantId", JsonPrimitive(identity.restaurantId))
+                        put("restaurantLocationId", JsonPrimitive(identity.restaurantLocationId))
+                        put("restaurantMenuId", JsonPrimitive(identity.restaurantMenuId))
+                        put("catalogProductId", JsonPrimitive(identity.catalogProductId))
+                    })
+                })
+            })))
+        },
+    )
+
+    private fun legacyStandaloneMetadata(
+        identity: com.pricetrace.receiptscanner.ingestion.PriceTraceRestaurantMenuIdentity,
+        clientKey: String,
+    ): String = Json.encodeToString(
+        JsonObject.serializer(),
+        buildJsonObject {
+            put("observations", JsonArray(listOf(buildJsonObject {
+                put("priceObservationClientKey", JsonPrimitive(clientKey))
+                put("response", buildJsonObject {
+                    put("kind", JsonPrimitive("restaurant_purchase"))
+                    put("authoritativeIds", buildJsonObject {
+                        put("restaurantId", JsonPrimitive(identity.restaurantId))
+                        put("restaurantLocationId", JsonPrimitive(identity.restaurantLocationId))
+                        put("restaurantMenuId", JsonPrimitive(identity.restaurantMenuId))
+                        put("catalogProductId", JsonPrimitive(identity.catalogProductId))
+                    })
                 })
             })))
         },

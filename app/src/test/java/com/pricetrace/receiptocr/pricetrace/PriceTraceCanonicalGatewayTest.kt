@@ -121,6 +121,193 @@ class PriceTraceCanonicalGatewayTest {
     }
 
     @Test
+    fun ocrMerchantResolutionUsesPtIssuedResolutionIdAndAuthenticatedOwnerRpc() = runTest {
+        val rawResponse = """{"receiptId":"receipt-1","merchantResolutionStatus":"exact","restaurantId":"restaurant-1","restaurantLocationId":"location-1","ocrResolution":{"schemaVersion":"ocr-resolution.v1","status":"resolved","resolutionId":"pt-resolution-1","reasonCode":null,"requiredSourceFacts":[]}}"""
+        val transport = QueueTransport(PriceObservationHttpResponse(200, rawResponse))
+        val merchant = MerchantCandidate(
+            name = "Reviewed Restaurant",
+            branchName = "Main",
+            address = "서울시 중구 테스트로 1",
+            businessKind = BusinessKind.FOOD_SERVICE,
+            sourceNamespace = "demo",
+            sourceLocationCode = "main-1",
+        )
+
+        val result = PriceTraceCanonicalProjectionSubmitter(
+            PriceTraceCanonicalGateway(FakeStore(signedIn()), transport),
+        ).resolveMerchantIdentity(
+            OcrMerchantIdentityResolutionRequest(
+                resolutionId = "pt-resolution-1",
+                merchant = merchant,
+                receipt = receipt().copy(merchant = receipt().merchant.copy(businessKind = BusinessKind.FOOD_SERVICE)),
+            ),
+        )
+
+        assertTrue("$result", result is ProjectionSubmission.Success)
+        result as ProjectionSubmission.Success
+        assertFalse(result.requiresReview)
+        assertEquals(rawResponse, result.metadataJson)
+        val request = transport.requests.single()
+        assertEquals(
+            "https://pricetrace.example.com/rest/v1/rpc/resolve_ocr_merchant_identity_v1",
+            request.url,
+        )
+        assertEquals("Bearer access-token", request.headers["Authorization"])
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        assertEquals(setOf("p_resolution_id", "p_merchant", "p_user_verified"), body.keys)
+        assertEquals("pt-resolution-1", body["p_resolution_id"]?.jsonPrimitive?.content)
+        assertEquals("true", body["p_user_verified"]?.jsonPrimitive?.content)
+        val sentMerchant = body["p_merchant"]!!.jsonObject
+        assertEquals("Reviewed Restaurant", sentMerchant["merchant_name"]?.jsonPrimitive?.content)
+        assertEquals("food_service", sentMerchant["business_kind"]?.jsonPrimitive?.content)
+        assertEquals("demo", sentMerchant["source_namespace"]?.jsonPrimitive?.content)
+        assertEquals("main-1", sentMerchant["source_location_code"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun ocrReceiptMenuResolutionUsesPtIssuedLineResolutionIdAndAuthenticatedOwnerRpc() = runTest {
+        val rawResponse = """{"receiptId":"receipt-1","merchantResolutionStatus":"exact","restaurantId":"restaurant-1","restaurantLocationId":"location-1","lines":[{"sourceLineId":"line-1","resolutionStatus":"resolved","restaurantMenuId":"menu-1","catalogProductId":"catalog-1","ocrResolution":null}]}"""
+        val transport = QueueTransport(PriceObservationHttpResponse(200, rawResponse))
+        val foodServiceReceipt = receipt().copy(
+            merchant = receipt().merchant.copy(
+                businessKind = BusinessKind.FOOD_SERVICE,
+                catalogNamespace = "menu-source",
+            ),
+        )
+
+        val result = PriceTraceCanonicalProjectionSubmitter(
+            PriceTraceCanonicalGateway(FakeStore(signedIn()), transport),
+        ).resolveReceiptMenuIdentity(
+            OcrReceiptMenuResolutionRequest(
+                resolutionId = "pt-menu-resolution-1",
+                sourceLineId = "line-1",
+                menuFacts = OcrMenuSourceFacts(
+                    itemName = "Reviewed Noodles",
+                    sourceMenuCodeNamespace = "menu-source",
+                    sourceMenuCode = "SKU-1",
+                ),
+                receipt = foodServiceReceipt,
+            ),
+        )
+
+        assertTrue("$result", result is ProjectionSubmission.Success)
+        result as ProjectionSubmission.Success
+        assertFalse(result.requiresReview)
+        assertEquals(rawResponse, result.metadataJson)
+        val request = transport.requests.single()
+        assertEquals(
+            "https://pricetrace.example.com/rest/v1/rpc/resolve_ocr_receipt_menu_identity_v1",
+            request.url,
+        )
+        assertEquals("Bearer access-token", request.headers["Authorization"])
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        assertEquals(setOf("p_resolution_id", "p_menu_facts", "p_user_verified"), body.keys)
+        assertEquals("pt-menu-resolution-1", body["p_resolution_id"]?.jsonPrimitive?.content)
+        assertEquals("true", body["p_user_verified"]?.jsonPrimitive?.content)
+        val facts = body["p_menu_facts"]!!.jsonObject
+        assertEquals("Reviewed Noodles", facts["item_name"]?.jsonPrimitive?.content)
+        assertEquals("menu-source", facts["source_product_code_namespace"]?.jsonPrimitive?.content)
+        assertEquals("SKU-1", facts["source_product_code"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun ocrReceiptMenuResolutionPreservesPtIssuedNeedsReviewEnvelope() = runTest {
+        val rawResponse = """{"schemaVersion":"ocr-resolution.v1","status":"needs_ocr_resolution","resolutionId":"pt-menu-resolution-2","reasonCode":"menu_identity_ambiguous","requiredSourceFacts":["item_name"]}"""
+        val transport = QueueTransport(PriceObservationHttpResponse(200, rawResponse))
+        val receipt = receipt().copy(merchant = receipt().merchant.copy(businessKind = BusinessKind.FOOD_SERVICE))
+
+        val result = PriceTraceCanonicalProjectionSubmitter(
+            PriceTraceCanonicalGateway(FakeStore(signedIn()), transport),
+        ).resolveReceiptMenuIdentity(
+            OcrReceiptMenuResolutionRequest(
+                resolutionId = "pt-menu-resolution-2",
+                sourceLineId = "line-1",
+                menuFacts = OcrMenuSourceFacts(itemName = "Noodles"),
+                receipt = receipt,
+            ),
+        )
+
+        assertTrue("$result", result is ProjectionSubmission.Success)
+        result as ProjectionSubmission.Success
+        assertTrue(result.requiresReview)
+        assertEquals("pt-menu-resolution-2", result.remoteId)
+        assertEquals(rawResponse, result.metadataJson)
+    }
+
+    @Test
+    fun ocrStandaloneMenuResolutionUsesPtIssuedResolutionIdAndV5ExactAuthority() = runTest {
+        val rawResponse = """{"kind":"restaurant_purchase","observationId":"observation-1","authorityStatus":"exact","merchantResolutionStatus":"exact","menuResolutionStatus":"exact","ocrResolution":null,"authoritativeIds":{"restaurantId":"restaurant-1","restaurantLocationId":"location-1","restaurantMenuId":"menu-1","catalogProductId":"catalog-1"}}"""
+        val transport = QueueTransport(PriceObservationHttpResponse(200, rawResponse))
+        val result = PriceTraceCanonicalProjectionSubmitter(
+            PriceTraceCanonicalGateway(FakeStore(signedIn()), transport),
+        ).resolveStandaloneMenuIdentity(
+            OcrStandaloneMenuResolutionRequest(
+                resolutionId = "pt-standalone-menu-resolution-1",
+                priceObservationClientKey = "price-observation-1",
+                merchant = MerchantCandidate(
+                    name = "Reviewed Restaurant",
+                    branchName = "Main",
+                    businessKind = BusinessKind.FOOD_SERVICE,
+                    sourceNamespace = "restaurant-source",
+                    sourceLocationCode = "branch-1",
+                ),
+                menuFacts = OcrMenuSourceFacts(
+                    itemName = "Reviewed Noodles",
+                    sourceMenuCodeNamespace = "menu-source",
+                    sourceMenuCode = "MENU-7",
+                ),
+            ),
+        )
+
+        assertTrue("$result", result is ProjectionSubmission.Success)
+        result as ProjectionSubmission.Success
+        assertFalse(result.requiresReview)
+        assertTrue(result.primaryUploaded)
+        assertEquals(rawResponse, result.metadataJson)
+        val request = transport.requests.single()
+        assertEquals(
+            "https://pricetrace.example.com/rest/v1/rpc/resolve_ocr_standalone_restaurant_menu_v1",
+            request.url,
+        )
+        assertEquals("Bearer access-token", request.headers["Authorization"])
+        val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
+        assertEquals(setOf("p_resolution_id", "p_merchant", "p_item", "p_user_verified"), body.keys)
+        assertEquals("pt-standalone-menu-resolution-1", body["p_resolution_id"]?.jsonPrimitive?.content)
+        assertEquals("true", body["p_user_verified"]?.jsonPrimitive?.content)
+        val merchant = body["p_merchant"]!!.jsonObject
+        assertEquals("Reviewed Restaurant", merchant["merchant_name"]?.jsonPrimitive?.content)
+        assertEquals("restaurant-source", merchant["source_namespace"]?.jsonPrimitive?.content)
+        val item = body["p_item"]!!.jsonObject
+        assertEquals("Reviewed Noodles", item["item_name"]?.jsonPrimitive?.content)
+        assertEquals("menu-source", item["source_menu_code_namespace"]?.jsonPrimitive?.content)
+        assertEquals("MENU-7", item["source_menu_code"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun ocrStandaloneMenuResolutionPreservesPtIssuedNeedsReviewResponse() = runTest {
+        val rawResponse = """{"kind":"restaurant_purchase","observationId":null,"authorityStatus":"needs_ocr_resolution","merchantResolutionStatus":"exact","menuResolutionStatus":"needs_ocr_resolution","authoritativeIds":{"restaurantId":null,"restaurantLocationId":null,"restaurantMenuId":null,"catalogProductId":null},"ocrResolution":{"schemaVersion":"ocr-resolution.v1","status":"needs_ocr_resolution","resolutionId":"pt-standalone-resolution-2","reasonCode":"menu_identity_ambiguous","requiredSourceFacts":["item_name"]}}"""
+        val transport = QueueTransport(PriceObservationHttpResponse(200, rawResponse))
+
+        val result = PriceTraceCanonicalProjectionSubmitter(
+            PriceTraceCanonicalGateway(FakeStore(signedIn()), transport),
+        ).resolveStandaloneMenuIdentity(
+            OcrStandaloneMenuResolutionRequest(
+                resolutionId = "pt-standalone-resolution-2",
+                priceObservationClientKey = "price-observation-2",
+                merchant = MerchantCandidate(name = "Reviewed Restaurant", businessKind = BusinessKind.FOOD_SERVICE),
+                menuFacts = OcrMenuSourceFacts(itemName = "Noodles"),
+            ),
+        )
+
+        assertTrue("$result", result is ProjectionSubmission.Success)
+        result as ProjectionSubmission.Success
+        assertTrue(result.requiresReview)
+        assertFalse(result.primaryUploaded)
+        assertEquals("pt-standalone-resolution-2", result.remoteId)
+        assertEquals(rawResponse, result.metadataJson)
+    }
+
+    @Test
     fun standalonePriceObservationUsesDedicatedRpcAndKeepsCashOsOutOfThePayload() = runTest {
         val transport = QueueTransport(
             PriceObservationHttpResponse(200, """{"observationId":"observation-1","replayed":false}"""),
@@ -190,8 +377,10 @@ class PriceTraceCanonicalGatewayTest {
         val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
             .submitStandalonePriceObservations("standalone-price-key", envelope)
         val success = result as PriceTraceCanonicalOutcome.Success
-        assertEquals("observation-1", success.response["observations"]!!.jsonArray.single()
-            .jsonObject["observationId"]?.jsonPrimitive?.content)
+        val observationResult = success.response["observations"]!!.jsonArray.single().jsonObject
+        assertEquals("price-1", observationResult["priceObservationClientKey"]?.jsonPrimitive?.content)
+        assertEquals("observation-1", observationResult["response"]!!.jsonObject
+            ["observationId"]?.jsonPrimitive?.content)
 
         val request = transport.requests.single()
         assertEquals(
@@ -691,8 +880,10 @@ class PriceTraceCanonicalGatewayTest {
         val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
             .submitStandalonePriceObservations("restaurant-price-key", envelope)
         val success = result as PriceTraceCanonicalOutcome.Success
-        assertEquals("restaurant-observation-1", success.response["observations"]!!.jsonArray.single()
-            .jsonObject["observationId"]?.jsonPrimitive?.content)
+        val observationResult = success.response["observations"]!!.jsonArray.single().jsonObject
+        assertEquals("restaurant-price-1", observationResult["priceObservationClientKey"]?.jsonPrimitive?.content)
+        assertEquals("restaurant-observation-1", observationResult["response"]!!.jsonObject
+            ["observationId"]?.jsonPrimitive?.content)
 
         val request = transport.requests.single()
         val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
@@ -947,15 +1138,15 @@ class PriceTraceCanonicalGatewayTest {
         val transport = QueueTransport(
             PriceObservationHttpResponse(
                 200,
-                """{"receiptId":"receipt-1","storeId":"store-1","restaurantId":"restaurant-1","restaurantLocationId":"location-1","observationIds":[],"lines":[{"sourceLineId":"line-1","receiptItemId":"item-1","productId":"product-1","storeProductId":"store-product-1","catalogProductId":"catalog-1","restaurantMenuId":"menu-1","observationId":null,"restaurantObservationId":null,"resolutionStatus":"unresolved_catalog"}]}""",
+                """{"receiptId":"receipt-1","storeId":"store-1","restaurantId":"restaurant-1","restaurantLocationId":"location-1","merchantResolutionStatus":"exact","observationIds":[],"lines":[{"sourceLineId":"line-1","receiptItemId":"item-1","productId":"product-1","storeProductId":"store-product-1","catalogProductId":"catalog-1","restaurantMenuId":"menu-1","observationId":null,"restaurantObservationId":null,"resolutionStatus":"unresolved_catalog"}]}""",
             ),
             PriceObservationHttpResponse(
                 200,
-                """{"receiptId":"receipt-1","observationIds":["observation-1"],"lines":[{"sourceLineId":"line-1","observationId":"observation-1","restaurantObservationId":null,"resolutionStatus":"resolved"}]}""",
+                """{"receiptId":"receipt-1","restaurantId":"restaurant-1","restaurantLocationId":"location-1","merchantResolutionStatus":"exact","ocrResolution":{"schemaVersion":"ocr-resolution.v1","status":"resolved","resolutionId":"00000000-0000-4000-8000-000000000001","reasonCode":null,"requiredSourceFacts":[]},"observationIds":["observation-1"],"lines":[{"sourceLineId":"line-1","observationId":"observation-1","restaurantObservationId":null,"restaurantMenuId":"menu-1","catalogProductId":"catalog-1","resolutionStatus":"resolved"}]}""",
             ),
             PriceObservationHttpResponse(
                 200,
-                """{"receiptId":"receipt-1","observationIds":[],"lines":[{"sourceLineId":"line-1","observationId":null,"restaurantObservationId":null,"resolutionStatus":"unresolved_catalog"}]}""",
+                """{"receiptId":"receipt-1","merchantResolutionStatus":"exact","observationIds":[],"lines":[{"sourceLineId":"line-1","observationId":null,"restaurantObservationId":null,"resolutionStatus":"unresolved_catalog"}]}""",
             ),
         )
         val submitter = PriceTraceCanonicalProjectionSubmitter(
@@ -981,6 +1172,7 @@ class PriceTraceCanonicalGatewayTest {
         val receiptResult = submitter.submit(request(IngestionProjection.PRICETRACE_RECEIPT))
             as ProjectionSubmission.Success
         assertTrue(receiptResult.primaryUploaded)
+        assertTrue(receiptResult.requiresReview)
         assertTrue(receiptResult.alsoUploaded.isEmpty())
         assertEquals(
             PriceTraceIdentity(
@@ -988,6 +1180,7 @@ class PriceTraceCanonicalGatewayTest {
                 storeId = "store-1",
                 restaurantId = "restaurant-1",
                 restaurantLocationId = "location-1",
+                merchantResolutionStatus = "exact",
                 lines = listOf(
                     PriceTraceLineIdentity(
                         sourceLineId = "line-1",
@@ -996,6 +1189,7 @@ class PriceTraceCanonicalGatewayTest {
                         storeProductId = "store-product-1",
                         catalogProductId = "catalog-1",
                         restaurantMenuId = "menu-1",
+                        resolutionStatus = "unresolved_catalog",
                     ),
                 ),
             ),
@@ -1013,6 +1207,7 @@ class PriceTraceCanonicalGatewayTest {
         val incompleteObservationResult = submitter.submit(request(IngestionProjection.PRICETRACE_PRICE_OBSERVATION))
             as ProjectionSubmission.Success
         assertFalse(incompleteObservationResult.primaryUploaded)
+        assertTrue(incompleteObservationResult.requiresReview)
         assertEquals(
             setOf(IngestionProjection.PRICETRACE_RECEIPT),
             incompleteObservationResult.alsoUploaded,
