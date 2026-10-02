@@ -13,6 +13,17 @@ import java.io.ByteArrayOutputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.Base64
+
+private const val TEST_USER_ID = "11111111-1111-1111-1111-111111111111"
+private const val OTHER_USER_ID = "22222222-2222-2222-2222-222222222222"
+
+private fun jwtToken(userId: String, tag: String = "signed"): String {
+    val encoder = Base64.getUrlEncoder().withoutPadding()
+    val header = encoder.encodeToString("{\"alg\":\"none\",\"typ\":\"JWT\"}".toByteArray())
+    val payload = encoder.encodeToString("{\"sub\":\"$userId\"}".toByteArray())
+    return "$header.$payload.$tag"
+}
 
 class EvidenceSupabaseArchivePortTest {
     @Test
@@ -32,7 +43,7 @@ class EvidenceSupabaseArchivePortTest {
         )
 
         assertTrue(result is EvidenceArchiveResult.Success)
-        assertEquals(4, transport.requests.size)
+        assertEquals(5, transport.requests.size)
         assertTrue(transport.requests.any { "/rest/v1/evidence_objects" in it.url })
         assertTrue(transport.requests.any { "/rest/v1/evidence_bindings" in it.url })
     }
@@ -203,7 +214,7 @@ class EvidenceSupabaseArchivePortTest {
         val transport = ScriptedTransport(
             mutableListOf(
                 EvidenceHttpResponse(401, "expired"),
-                EvidenceHttpResponse(200, "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"user\":{\"id\":\"11111111-1111-1111-1111-111111111111\"}}"),
+                EvidenceHttpResponse(200, authResponse(TEST_USER_ID, jwtToken(TEST_USER_ID, "new"))),
                 EvidenceHttpResponse(201, "[{\"id\":\"artifact-1\"}]"),
                 EvidenceHttpResponse(200, "{}"),
                 EvidenceHttpResponse(201, "[{\"id\":\"object-1\"}]"),
@@ -216,7 +227,7 @@ class EvidenceSupabaseArchivePortTest {
         assertEquals(1, transport.requests.count { "grant_type=refresh_token" in it.url })
         assertEquals(2, transport.requests.count { "/rest/v1/canonical_artifacts" in it.url })
         assertTrue(transport.requests.single { "/storage/v1/object/" in it.url }.url.endsWith("/${item.sha256}.jpg"))
-        assertEquals("new-access", transport.requests.first { "/rest/v1/canonical_artifacts" in it.url && it.headers["Authorization"]?.contains("new-access") == true }
+        assertEquals(jwtToken(TEST_USER_ID, "new"), transport.requests.first { "/rest/v1/canonical_artifacts" in it.url && it.headers["Authorization"]?.contains(jwtToken(TEST_USER_ID, "new")) == true }
             .headers["Authorization"]?.substringAfter("Bearer "))
     }
 
@@ -253,12 +264,211 @@ class EvidenceSupabaseArchivePortTest {
         )
 
         assertEquals(CanonicalRevisionArchiveResult.Success("revision-1", 1), result)
-        val revisionBody = Json.parseToJsonElement(transport.requests[0].body!!.toString(Charsets.UTF_8)).jsonObject
+        assertTrue(transport.requests.any { it.method == "GET" && it.url.endsWith("/auth/v1/user") })
+        val revisionPost = transport.requests.single {
+            it.method == "POST" && "/rest/v1/canonical_revisions" in it.url
+        }
+        val revisionBody = Json.parseToJsonElement(revisionPost.body!!.toString(Charsets.UTF_8)).jsonObject
         assertEquals("artifact-1", revisionBody["canonical_artifact_id"]?.toString()?.trim('"'))
-        val eventBody = Json.parseToJsonElement(transport.requests[1].body!!.toString(Charsets.UTF_8)).jsonObject
+        assertEquals(TEST_USER_ID, revisionBody["owner_id"]?.toString()?.trim('"'))
+        val eventPost = transport.requests.single {
+            it.method == "POST" && "/rest/v1/canonical_edit_events" in it.url
+        }
+        val eventBody = Json.parseToJsonElement(eventPost.body!!.toString(Charsets.UTF_8)).jsonObject
         assertEquals("100.0", eventBody["previous_value"]?.toString())
         assertEquals("120.0", eventBody["new_value"]?.toString())
         assertEquals("{\"user_modified\":true}", eventBody["provenance"]?.toString())
+    }
+
+
+    @Test
+    fun mismatchedConfiguredUserAndJwtSubjectFailsBeforeRevisionPost() = runTest {
+        val store = SignedInStore(
+            userId = TEST_USER_ID,
+            accessToken = jwtToken(OTHER_USER_ID),
+            refreshToken = "",
+        )
+        val transport = ScriptedTransport(mutableListOf())
+        val result = EvidenceSupabaseArchivePort(store, transport)
+            .archiveCanonicalRevision(canonicalRevisionRequest())
+
+        assertTrue(result is CanonicalRevisionArchiveResult.Failure)
+        val issue = (result as CanonicalRevisionArchiveResult.Failure).issue
+        assertTrue(issue.contains("Evidence session identity mismatch"))
+        assertTrue(transport.requests.none {
+            it.method == "POST" && "/rest/v1/canonical_revisions" in it.url
+        })
+    }
+
+    @Test
+    fun refreshRepairsMixedSessionBeforeRevisionPublication() = runTest {
+        val store = SignedInStore(
+            userId = TEST_USER_ID,
+            accessToken = jwtToken(OTHER_USER_ID),
+            refreshToken = "refresh-for-other-user",
+        )
+        val transport = ScriptedTransport(
+            responses = mutableListOf(
+                EvidenceHttpResponse(200, authResponse(OTHER_USER_ID, jwtToken(OTHER_USER_ID, "refreshed"))),
+                EvidenceHttpResponse(201, "[{\"id\":\"revision-1\",\"revision_seq\":1}]"),
+            ),
+            artifactOwnerId = OTHER_USER_ID,
+        )
+        val result = EvidenceSupabaseArchivePort(store, transport)
+            .archiveCanonicalRevision(canonicalRevisionRequest())
+
+        assertEquals(CanonicalRevisionArchiveResult.Success("revision-1", 1), result)
+        assertEquals(OTHER_USER_ID, store.read().userId)
+        assertTrue(store.read().isSignedIn)
+        assertEquals(
+            1,
+            transport.requests.count { "grant_type=refresh_token" in it.url },
+        )
+        val revisionPost = transport.requests.single {
+            it.method == "POST" && "/rest/v1/canonical_revisions" in it.url
+        }
+        assertEquals(
+            OTHER_USER_ID,
+            Json.parseToJsonElement(revisionPost.body!!.toString(Charsets.UTF_8))
+                .jsonObject["owner_id"]?.toString()?.trim('"'),
+        )
+    }
+
+    @Test
+    fun remoteAuthUserMismatchIsRejectedWithoutRevisionPost() = runTest {
+        val transport = ScriptedTransport(
+            responses = mutableListOf(),
+            remoteAuthUserId = OTHER_USER_ID,
+        )
+        val result = EvidenceSupabaseArchivePort(
+            SignedInStore(refreshToken = ""),
+            transport,
+        ).archiveCanonicalRevision(canonicalRevisionRequest())
+
+        assertTrue(result is CanonicalRevisionArchiveResult.Failure)
+        assertTrue((result as CanonicalRevisionArchiveResult.Failure).issue.contains("Auth user"))
+        assertTrue(transport.requests.none {
+            it.method == "POST" && "/rest/v1/canonical_revisions" in it.url
+        })
+    }
+
+    @Test
+    fun staleCanonicalArtifactOwnerFailsBeforeRevisionPost() = runTest {
+        val transport = ScriptedTransport(
+            responses = mutableListOf(),
+            artifactOwnerId = OTHER_USER_ID,
+        )
+        val result = EvidenceSupabaseArchivePort(SignedInStore(), transport)
+            .archiveCanonicalRevision(canonicalRevisionRequest())
+
+        assertTrue(result is CanonicalRevisionArchiveResult.Failure)
+        assertTrue((result as CanonicalRevisionArchiveResult.Failure).issue.contains(
+            "Evidence session does not own the archived canonical artifact. Re-authentication/re-archive required.",
+        ))
+        assertTrue(transport.requests.any {
+            it.method == "GET" && "/rest/v1/canonical_artifacts" in it.url && "select=id,owner_id" in it.url
+        })
+        assertTrue(transport.requests.none {
+            it.method == "POST" && "/rest/v1/canonical_revisions" in it.url
+        })
+    }
+
+    @Test
+    fun staleParentRevisionOwnerFailsBeforeRevisionPost() = runTest {
+        val transport = ScriptedTransport(
+            responses = mutableListOf(),
+            parentRevisionOwnerId = OTHER_USER_ID,
+        )
+        val result = EvidenceSupabaseArchivePort(SignedInStore(), transport)
+            .archiveCanonicalRevision(canonicalRevisionRequest(parentRevisionId = "parent-1"))
+
+        assertTrue(result is CanonicalRevisionArchiveResult.Failure)
+        assertTrue((result as CanonicalRevisionArchiveResult.Failure).issue.contains(
+            "Evidence session does not own the parent canonical revision",
+        ))
+        assertTrue(transport.requests.none {
+            it.method == "POST" && "/rest/v1/canonical_revisions" in it.url
+        })
+    }
+
+    @Test
+    fun reauthenticatedSessionRetriesTheSamePendingRevisionRequest() = runTest {
+        val store = SignedInStore(
+            userId = TEST_USER_ID,
+            accessToken = jwtToken(OTHER_USER_ID),
+            refreshToken = "",
+        )
+        val transport = ScriptedTransport(
+            mutableListOf(EvidenceHttpResponse(201, "[{\"id\":\"revision-1\",\"revision_seq\":1}]")),
+        )
+        val port = EvidenceSupabaseArchivePort(store, transport)
+        val request = canonicalRevisionRequest()
+
+        val first = port.archiveCanonicalRevision(request)
+        assertTrue(first is CanonicalRevisionArchiveResult.Failure)
+        assertTrue((first as CanonicalRevisionArchiveResult.Failure).issue.contains("identity mismatch"))
+        assertTrue(transport.requests.none {
+            it.method == "POST" && "/rest/v1/canonical_revisions" in it.url
+        })
+
+        store.replaceSession(TEST_USER_ID, jwtToken(TEST_USER_ID, "reauth"), "reauth-refresh")
+        val retried = port.archiveCanonicalRevision(request)
+
+        assertEquals(CanonicalRevisionArchiveResult.Success("revision-1", 1), retried)
+        assertEquals(
+            1,
+            transport.requests.count { it.method == "POST" && "/rest/v1/canonical_revisions" in it.url },
+        )
+        val post = transport.requests.single { it.method == "POST" && "/rest/v1/canonical_revisions" in it.url }
+        val body = Json.parseToJsonElement(post.body!!.toString(Charsets.UTF_8)).jsonObject
+        assertEquals(request.revisionSeq, body["revision_seq"]?.toString()?.toLong())
+        assertEquals(request.canonicalArtifactId, body["canonical_artifact_id"]?.toString()?.trim('"'))
+    }
+
+    @Test
+    fun existingCheckpointWithForeignArtifactDoesNotResumeArchive() = runTest {
+        val canonicalJson = Files.readString(Path.of("..", "examples", "yeonsik-ocr.v3.restaurant.example.json"))
+        val manifest = YeonsikBundleManifest(
+            YEONSIK_BUNDLE_VERSION,
+            "canonical.json",
+            digest(canonicalJson.toByteArray()),
+            emptyList(),
+        )
+        val bundle = YeonsikBundle(
+            manifest,
+            YeonsikBundleManifestCodec.encode(manifest),
+            canonicalJson,
+            YeonsikOcrEnvelopeCodec.decode(canonicalJson, "foreign-checkpoint"),
+        )
+        val transport = ScriptedTransport(
+            responses = mutableListOf(),
+            artifactOwnerId = OTHER_USER_ID,
+        )
+        val checkpoint = EvidenceArchiveCheckpoint(canonicalArtifactId = "artifact-1")
+        val result = EvidenceSupabaseArchivePort(SignedInStore(), transport)
+            .archive(EvidenceArchiveRequest(bundle) { error("no evidence expected") }, checkpoint)
+
+        assertTrue(result is EvidenceArchiveResult.Failure)
+        assertTrue((result as EvidenceArchiveResult.Failure).issue.contains(
+            "Evidence session does not own the archived canonical artifact",
+        ))
+        assertTrue(transport.requests.none { "/storage/v1/object/" in it.url })
+    }
+
+    @Test
+    fun actualRlsRejectionHasActionableDatabaseError() = runTest {
+        val transport = ScriptedTransport(
+            responses = mutableListOf(
+                EvidenceHttpResponse(403, "{\"code\":\"42501\",\"message\":\"new row violates row-level security policy\"}"),
+            ),
+        )
+        val result = EvidenceSupabaseArchivePort(SignedInStore(), transport)
+            .archiveCanonicalRevision(canonicalRevisionRequest())
+
+        assertTrue(result is CanonicalRevisionArchiveResult.Failure)
+        val issue = (result as CanonicalRevisionArchiveResult.Failure).issue
+        assertTrue(issue.contains("Supabase RLS rejected canonical revision insert-or-reuse (403/42501)"))
+        assertTrue(issue.contains("Re-authenticate"))
     }
 
     private suspend fun archiveWithUploadResponse(response: EvidenceHttpResponse): Pair<EvidenceArchiveResult, ScriptedTransport> {
@@ -300,32 +510,88 @@ class EvidenceSupabaseArchivePortTest {
 
     private class ScriptedTransport(
         private val responses: MutableList<EvidenceHttpResponse>,
+        private val remoteAuthUserId: String? = null,
+        private val artifactOwnerId: String? = TEST_USER_ID,
+        private val parentRevisionOwnerId: String? = TEST_USER_ID,
     ) : EvidenceHttpTransport {
         val requests = mutableListOf<EvidenceHttpRequest>()
+
         override suspend fun execute(request: EvidenceHttpRequest): EvidenceHttpResponse {
             requests += request
             request.bodyStream?.invoke()?.use { input -> input.copyTo(ByteArrayOutputStream()) }
+
+            if (request.method == "GET" && request.url.endsWith("/auth/v1/user")) {
+                val token = request.headers["Authorization"]?.substringAfter("Bearer ").orEmpty()
+                val userId = remoteAuthUserId ?: evidenceAccessTokenSubject(token) ?: TEST_USER_ID
+                return EvidenceHttpResponse(200, """{"id":"$userId"}""")
+            }
+            if (request.method == "GET" &&
+                "/rest/v1/canonical_artifacts?" in request.url &&
+                "select=id,owner_id" in request.url
+            ) {
+                val body = artifactOwnerId?.let { """[{"id":"artifact-1","owner_id":"$it"}]""" } ?: "[]"
+                return EvidenceHttpResponse(200, body)
+            }
+            if (request.method == "GET" &&
+                "/rest/v1/canonical_revisions?" in request.url &&
+                "select=id,canonical_artifact_id,owner_id" in request.url
+            ) {
+                val body = parentRevisionOwnerId?.let {
+                    """[{"id":"parent-1","canonical_artifact_id":"artifact-1","owner_id":"$it"}]"""
+                } ?: "[]"
+                return EvidenceHttpResponse(200, body)
+            }
             return responses.removeFirst()
         }
     }
 
-    private class SignedInStore : EvidenceSupabaseStore {
+    private class SignedInStore(
+        userId: String = TEST_USER_ID,
+        accessToken: String = jwtToken(userId),
+        refreshToken: String = "refresh",
+    ) : EvidenceSupabaseStore {
         private var config = EvidenceSupabaseConfig(
             url = "https://evidence.example.test",
             publishableKey = "sb_publishable_12345678901234567890",
-            userId = "11111111-1111-1111-1111-111111111111",
+            userId = userId,
             email = "test@example.com",
-            accessToken = "token",
-            refreshToken = "refresh",
+            accessToken = accessToken,
+            refreshToken = refreshToken,
         )
+
         override fun read(): EvidenceSupabaseConfig = config
         override fun saveConnection(url: String, publishableKey: String) = Result.success(config)
+
         override fun saveSession(userId: String, email: String, accessToken: String, refreshToken: String): Result<EvidenceSupabaseConfig> {
             config = config.copy(userId = userId, email = email, accessToken = accessToken, refreshToken = refreshToken)
             return Result.success(config)
         }
-        override fun clearSession() = true
+
+        fun replaceSession(userId: String, accessToken: String, refreshToken: String) {
+            config = config.copy(userId = userId, accessToken = accessToken, refreshToken = refreshToken)
+        }
+
+        override fun clearSession(): Boolean {
+            config = config.copy(userId = "", email = "", accessToken = "", refreshToken = "")
+            return true
+        }
     }
+
+    private fun canonicalRevisionRequest(parentRevisionId: String? = null): CanonicalRevisionArchiveRequest {
+        val canonicalJson = "{\"schema_version\":\"yeonsik-ocr.v4\"}"
+        return CanonicalRevisionArchiveRequest(
+            canonicalArtifactId = "artifact-1",
+            revisionSeq = 1,
+            parentRevisionId = parentRevisionId,
+            canonicalSha256 = digest(canonicalJson.toByteArray()),
+            canonicalJson = canonicalJson,
+            schemaVersion = "yeonsik-ocr.v4",
+            mode = "purchase",
+        )
+    }
+
+    private fun authResponse(userId: String, accessToken: String = jwtToken(userId)): String =
+        """{"access_token":"$accessToken","refresh_token":"refresh-$userId","user":{"id":"$userId"}}"""
 
     private fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes).joinToString("") { "%02x".format(it) }

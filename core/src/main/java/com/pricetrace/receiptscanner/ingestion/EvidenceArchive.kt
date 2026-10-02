@@ -36,7 +36,11 @@ data class EvidenceSupabaseConfig(
     val refreshToken: String = "",
 ) {
     val isConnectionConfigured: Boolean get() = validateConnection(url, publishableKey) == null
-    val isSignedIn: Boolean get() = isConnectionConfigured && userId.isNotBlank() && accessToken.isNotBlank()
+    /** Local consistency only; protected operations still verify the token with Supabase Auth. */
+    val isSignedIn: Boolean get() =
+        isConnectionConfigured &&
+            userId.isNotBlank() &&
+            userId == evidenceAccessTokenSubject(accessToken)
 
     companion object {
         fun validateConnection(rawUrl: String, rawKey: String): String? {
@@ -67,6 +71,19 @@ data class EvidenceSupabaseConfig(
         }
     }
 }
+
+/**
+ * Reads the access token subject only to detect mixed local session fields.
+ * Supabase Auth remains the authority: protected calls also verify /auth/v1/user.
+ */
+internal fun evidenceAccessTokenSubject(accessToken: String): String? = runCatching {
+    val payload = accessToken.split('.').getOrNull(1) ?: return@runCatching null
+    val padded = payload + "=".repeat((4 - payload.length % 4) % 4)
+    val claims = Json.parseToJsonElement(
+        String(Base64.getUrlDecoder().decode(padded), StandardCharsets.UTF_8),
+    ).jsonObject
+    claims["sub"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+}.getOrNull()
 
 interface EvidenceSupabaseStore {
     fun read(): EvidenceSupabaseConfig
@@ -268,7 +285,13 @@ class EvidenceSupabaseArchivePort(
             }
             progress = checkpoint.copy(bundleFingerprint = request.bundle.bundleFingerprint)
             val auth = AuthContext(ensureAuthenticated())
-            val artifactId = progress.canonicalArtifactId ?: insertOrReuseCanonical(auth, request.bundle)
+            val artifactId = progress.canonicalArtifactId?.let { existingArtifactId ->
+                requireCanonicalArtifactOwnership(auth, existingArtifactId)
+                progress.latestRevisionId?.let { latestRevisionId ->
+                    requireCanonicalRevisionOwnership(auth, existingArtifactId, latestRevisionId)
+                }
+                existingArtifactId
+            } ?: insertOrReuseCanonical(auth, request.bundle)
             progress = progress.copy(canonicalArtifactId = artifactId)
             request.bundle.manifest.evidence.forEach { item ->
                 val objectId = progress.evidenceObjectIdsBySha256[item.sha256] ?: run {
@@ -302,6 +325,10 @@ class EvidenceSupabaseArchivePort(
             }
             val canonicalJson = json.parseToJsonElement(request.canonicalJson)
             val auth = AuthContext(ensureAuthenticated())
+            requireCanonicalArtifactOwnership(auth, request.canonicalArtifactId)
+            request.parentRevisionId?.let { parentRevisionId ->
+                requireCanonicalRevisionOwnership(auth, request.canonicalArtifactId, parentRevisionId)
+            }
             val body = buildJsonObject {
                 put("owner_id", auth.config.userId)
                 put("canonical_artifact_id", request.canonicalArtifactId)
@@ -487,22 +514,118 @@ class EvidenceSupabaseArchivePort(
     ): EvidenceSupabaseConfig {
         val current = store.read()
         EvidenceSupabaseConfig.validateConnection(current.url, current.publishableKey)?.let(::error)
-        if (current.isSignedIn && !force) return current
-        require(providedEmail.isNotBlank() && providedPassword.isNotBlank()) { "Evidence credentials are missing" }
-        val body = buildJsonObject { put("email", providedEmail); put("password", providedPassword) }.encoded()
+
+        var identityIssue: String? = null
+        if (current.userId.isNotBlank() || current.accessToken.isNotBlank()) {
+            val tokenUserId = evidenceAccessTokenSubject(current.accessToken)
+            identityIssue = when {
+                tokenUserId == null ->
+                    "Evidence session identity mismatch: the saved access token has no readable JWT subject."
+                current.userId != tokenUserId ->
+                    "Evidence session identity mismatch: saved user ID does not match the access token subject."
+                else -> null
+            }
+        }
+
+        if (!force && identityIssue == null && current.isSignedIn) {
+            val remoteUserId = runCatching { fetchRemoteAuthUserId(current) }
+            if (remoteUserId.getOrNull() == current.userId) return current
+            identityIssue = remoteUserId.exceptionOrNull()?.message
+                ?: "Evidence Auth user does not match the saved session identity."
+        }
+
+        var refreshIssue: String? = null
+        if (!force && current.refreshToken.isNotBlank()) {
+            val refreshed = runCatching { refreshSession(current) }
+            refreshed.getOrNull()?.let { return it }
+            refreshIssue = refreshed.exceptionOrNull()?.message
+        }
+
+        if (providedEmail.isNotBlank() && providedPassword.isNotBlank()) {
+            return signInWithPassword(current, providedEmail.trim(), providedPassword)
+        }
+
+        if (identityIssue == null && refreshIssue == null) error("Evidence credentials are missing")
+        val reason = identityIssue ?: "Evidence session could not be verified with Supabase Auth."
+        val recovery = refreshIssue?.let { " Token refresh failed: $it" }.orEmpty()
+        error("$reason Re-authenticate with the Evidence email and password.$recovery")
+    }
+
+    private suspend fun signInWithPassword(
+        previous: EvidenceSupabaseConfig,
+        email: String,
+        password: String,
+    ): EvidenceSupabaseConfig {
+        val body = buildJsonObject { put("email", email); put("password", password) }.encoded()
         val response = transport.execute(
             EvidenceHttpRequest(
                 "POST",
-                current.url.trimEnd('/') + "/auth/v1/token?grant_type=password",
-                mapOf("apikey" to current.publishableKey, "Content-Type" to "application/json"),
+                previous.url.trimEnd('/') + "/auth/v1/token?grant_type=password",
+                mapOf("apikey" to previous.publishableKey, "Content-Type" to "application/json"),
                 body.toByteArray(StandardCharsets.UTF_8),
             ),
         ).requireSuccess("Evidence sign-in")
         val root = json.parseToJsonElement(response.body).jsonObject
-        val userId = root["user"]?.jsonObject?.string("id") ?: error("Evidence auth response missing user id")
         val accessToken = requireNotNull(root.string("access_token")) { "Evidence auth response missing access token" }
         val refreshToken = requireNotNull(root.string("refresh_token")) { "Evidence auth response missing refresh token" }
-        return store.saveSession(userId, providedEmail, accessToken, refreshToken).getOrThrow()
+        val tokenUserId = evidenceAccessTokenSubject(accessToken)
+            ?: error("Evidence auth response access token has no valid JWT subject.")
+        val responseUserId = root["user"]?.jsonObject?.string("id")
+        require(responseUserId == null || responseUserId == tokenUserId) {
+            "Evidence auth response user ID does not match the access token subject."
+        }
+        return persistVerifiedSession(
+            previous = previous,
+            userId = tokenUserId,
+            email = root["user"]?.jsonObject?.string("email") ?: email,
+            accessToken = accessToken,
+            refreshToken = refreshToken,
+        )
+    }
+
+    private suspend fun persistVerifiedSession(
+        previous: EvidenceSupabaseConfig,
+        userId: String,
+        email: String,
+        accessToken: String,
+        refreshToken: String,
+    ): EvidenceSupabaseConfig {
+        val tokenUserId = evidenceAccessTokenSubject(accessToken)
+            ?: error("Evidence access token has no valid JWT subject.")
+        require(userId == tokenUserId) {
+            "Evidence session identity mismatch: user ID does not match the access token subject."
+        }
+        val candidate = previous.copy(
+            userId = userId,
+            email = email,
+            accessToken = accessToken,
+            refreshToken = refreshToken,
+        )
+        val remoteUserId = fetchRemoteAuthUserId(candidate)
+        require(remoteUserId == userId) {
+            "Evidence session identity mismatch: Supabase Auth user does not match the access token subject."
+        }
+
+        if (previous.userId.isNotBlank() && previous.userId != userId) {
+            check(store.clearSession()) { "Stale Evidence session could not be cleared before re-authentication." }
+        }
+        val saved = store.saveSession(userId, email, accessToken, refreshToken).getOrThrow()
+        require(saved.userId == userId && evidenceAccessTokenSubject(saved.accessToken) == remoteUserId) {
+            "Evidence session store returned inconsistent identity fields."
+        }
+        return saved
+    }
+
+    private suspend fun fetchRemoteAuthUserId(config: EvidenceSupabaseConfig): String {
+        val response = transport.execute(
+            EvidenceHttpRequest(
+                method = "GET",
+                url = config.url.trimEnd('/') + "/auth/v1/user",
+                headers = authHeaders(config),
+            ),
+        ).requireSuccess("Evidence Auth identity verification")
+        return json.parseToJsonElement(response.body).jsonObject.string("id")
+            ?: error("Evidence Auth identity response is missing a user ID.")
     }
 
     private suspend fun insertOrReuseCanonical(auth: AuthContext, bundle: YeonsikBundle): String {
@@ -652,8 +775,57 @@ class EvidenceSupabaseArchivePort(
         val root = json.parseToJsonElement(response.body).jsonObject
         val accessToken = requireNotNull(root.string("access_token")) { "Evidence refresh response missing access token" }
         val refreshToken = root.string("refresh_token") ?: current.refreshToken
-        val userId = root["user"]?.jsonObject?.string("id") ?: current.userId
-        return store.saveSession(userId, current.email, accessToken, refreshToken).getOrThrow()
+        val tokenUserId = evidenceAccessTokenSubject(accessToken)
+            ?: error("Evidence refresh response access token has no valid JWT subject.")
+        val responseUserId = root["user"]?.jsonObject?.string("id")
+        require(responseUserId == null || responseUserId == tokenUserId) {
+            "Evidence refresh response user ID does not match the access token subject."
+        }
+        return persistVerifiedSession(
+            previous = store.read(),
+            userId = tokenUserId,
+            email = root["user"]?.jsonObject?.string("email") ?: current.email,
+            accessToken = accessToken,
+            refreshToken = refreshToken,
+        )
+    }
+
+    private suspend fun requireCanonicalArtifactOwnership(
+        auth: AuthContext,
+        canonicalArtifactId: String,
+    ) {
+        val response = executeJson(
+            auth,
+            "GET",
+            "/rest/v1/canonical_artifacts?id=eq.${urlEncode(canonicalArtifactId)}&select=id,owner_id",
+            "",
+            "return=minimal",
+        ).requireSuccess("canonical artifact ownership lookup")
+        val ownerId = response.firstObjectOrNull()?.string("owner_id")
+        if (ownerId != auth.config.userId) {
+            error("Evidence session does not own the archived canonical artifact. Re-authentication/re-archive required.")
+        }
+    }
+
+    private suspend fun requireCanonicalRevisionOwnership(
+        auth: AuthContext,
+        canonicalArtifactId: String,
+        revisionId: String,
+    ) {
+        val response = executeJson(
+            auth,
+            "GET",
+            "/rest/v1/canonical_revisions?id=eq.${urlEncode(revisionId)}&canonical_artifact_id=eq.${urlEncode(canonicalArtifactId)}&select=id,canonical_artifact_id,owner_id",
+            "",
+            "return=minimal",
+        ).requireSuccess("canonical parent revision ownership lookup")
+        val row = response.firstObjectOrNull()
+        if (row == null ||
+            row.string("canonical_artifact_id") != canonicalArtifactId ||
+            row.string("owner_id") != auth.config.userId
+        ) {
+            error("Evidence session does not own the parent canonical revision for this artifact. Re-authentication/re-archive required.")
+        }
     }
 
     private suspend fun findCanonical(auth: AuthContext, bundle: YeonsikBundle): String {
@@ -755,6 +927,10 @@ class EvidenceSupabaseArchivePort(
         val code = root?.let { value ->
             listOf("code", "error", "message")
                 .firstNotNullOfOrNull { key -> (value[key] as? JsonPrimitive)?.contentOrNull }
+        }
+        if (statusCode == 403 && code == "42501") {
+            return "Supabase RLS rejected $label ($statusCode/$code) after the Evidence session and owner lookup. " +
+                "Re-authenticate; if it persists, verify the deployed owner policy and migration."
         }
         return buildString {
             append("$label failed ($statusCode)")

@@ -494,6 +494,7 @@ class DesktopIngestionRegressionTest {
         assertEquals("revision-1", retried.bundleMetadata?.archiveCheckpoint?.latestRevisionId)
         assertEquals(listOf("merchant_candidate.name"), retried.reviewEdits.map { it.fieldPath })
         assertEquals(2, archive.revisionArchiveCalls)
+        assertEquals(archive.revisionRequests[0], archive.revisionRequests[1])
 
         val restarted = DesktopIngestionController(
             store = store,
@@ -755,6 +756,7 @@ class DesktopIngestionRegressionTest {
             private set
         var revisionArchiveCalls: Int = 0
             private set
+        val revisionRequests = mutableListOf<CanonicalRevisionArchiveRequest>()
 
         override suspend fun archive(
             request: EvidenceArchiveRequest,
@@ -782,6 +784,7 @@ class DesktopIngestionRegressionTest {
             request: CanonicalRevisionArchiveRequest,
         ): CanonicalRevisionArchiveResult {
             revisionArchiveCalls += 1
+            revisionRequests += request
             return if (revisionArchiveCalls <= revisionFailuresBeforeSuccess) {
                 CanonicalRevisionArchiveResult.Failure(
                     issue = "revision archive test failure",
