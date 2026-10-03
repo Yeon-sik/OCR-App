@@ -40,9 +40,11 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.review.CanonicalEditableField
 import com.pricetrace.receiptscanner.review.CanonicalFieldRegistry
 import com.pricetrace.receiptscanner.review.CanonicalFieldType
@@ -468,20 +470,62 @@ fun DestinationStatus(badge: ReviewDestinationBadge) {
     }
 }
 
+internal data class CanonicalReviewFieldGroups(
+    val visibleFields: List<CanonicalEditableField>,
+    val emptyOptionalFields: List<CanonicalEditableField>,
+)
+
+internal fun canonicalReviewFieldGroups(envelope: YeonsikOcrEnvelope): CanonicalReviewFieldGroups {
+    val fields = CanonicalFieldRegistry.fields(envelope)
+    val nutritionLabels = envelope.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>()
+    val linkedProductLabelPaths = nutritionLabels
+        .mapNotNull { nutrition ->
+            val product = envelope.productCandidates.singleOrNull { it.clientKey == nutrition.productClientKey }
+                ?: return@mapNotNull null
+            if (product.productName != nutrition.draft.productName) return@mapNotNull null
+            "nutrition[${nutrition.clientKey}].product_name"
+        }
+        .toSet()
+    val displayFields = fields.filterNot { it.path in linkedProductLabelPaths }.map { field ->
+        val productIndex = envelope.productCandidates.indexOfFirst {
+            field.path == "product_candidates[${it.clientKey}].product_name"
+        }
+        val nutritionIndex = nutritionLabels.indexOfFirst {
+            field.path == "nutrition[${it.clientKey}].product_name"
+        }
+        when {
+            productIndex >= 0 -> field.copy(
+                label = if (envelope.productCandidates.size == 1) "상품명"
+                else "상품 ${productIndex + 1} · 판매 상품명",
+            )
+            nutritionIndex >= 0 -> field.copy(
+                label = if (nutritionLabels.size == 1) "라벨 상품명"
+                else "영양 라벨 ${nutritionIndex + 1} · 상품명",
+            )
+            else -> field
+        }
+    }
+    return CanonicalReviewFieldGroups(
+        visibleFields = displayFields.filter { !it.nullable || !it.value.isNullOrBlank() },
+        emptyOptionalFields = displayFields.filter { it.nullable && it.value.isNullOrBlank() },
+    )
+}
+
 @Composable
 private fun EditableCanonicalSection(
-    envelope: com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope,
+    envelope: YeonsikOcrEnvelope,
     edits: List<com.pricetrace.receiptscanner.review.CanonicalReviewEdit>,
     fieldErrors: Map<String, String>,
     busy: Boolean,
     onEdit: ((CanonicalReviewController) -> Boolean) -> Unit,
 ) {
-    val fields = remember(envelope) { CanonicalFieldRegistry.fields(envelope) }
-    if (fields.isEmpty()) return
+    val (visibleFields, emptyOptionalFields) = remember(envelope) { canonicalReviewFieldGroups(envelope) }
+    if (visibleFields.isEmpty() && emptyOptionalFields.isEmpty()) return
     var editorVisible by remember(envelope) { mutableStateOf(false) }
+    var showEmptyOptionalFields by remember(envelope) { mutableStateOf(false) }
     CollectorSection(
         "수정",
-        "허용된 canonical 필드만 수정합니다. source·evidence·식별자·전송 대상은 변경하지 않습니다.",
+        "상품명처럼 연결된 값은 한 번만 표시합니다. 필수 값과 입력된 값부터 확인하세요.",
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
             CollectorButton(
@@ -514,7 +558,7 @@ private fun EditableCanonicalSection(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             ) {
                 Column(Modifier.padding(CollectorTokens.space3), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space4)) {
-                    fields.forEach { field ->
+                    visibleFields.forEach { field ->
                         AccessibleField(
                             field = field,
                             modified = CanonicalFieldRegistry.isModified(field, edits),
@@ -524,13 +568,46 @@ private fun EditableCanonicalSection(
                             onApply = { value -> onEdit { it.updateField(field.path, value) } },
                         )
                     }
+                    if (emptyOptionalFields.isNotEmpty()) {
+                        CollectorButton(
+                            label = if (showEmptyOptionalFields) "빈 선택 항목 접기"
+                            else "비어 있는 선택 항목 ${emptyOptionalFields.size}개 보기",
+                            onClick = { showEmptyOptionalFields = !showEmptyOptionalFields },
+                            enabled = !busy,
+                            emphasized = false,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    if (showEmptyOptionalFields) {
+                        emptyOptionalFields.forEach { field ->
+                            AccessibleField(
+                                field = field,
+                                modified = CanonicalFieldRegistry.isModified(field, edits),
+                                initialValue = edits.firstOrNull { it.fieldPath == field.path }?.previousValue,
+                                error = fieldErrors[field.path],
+                                busy = busy,
+                                onApply = { value -> onEdit { it.updateField(field.path, value) } },
+                            )
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-/** Common field semantics: permanent label, error text, field type, and change status. */
+internal fun canonicalFieldContentDescription(
+    field: CanonicalEditableField,
+    modified: Boolean,
+    error: String?,
+): String = buildString {
+    append(field.label)
+    append(if (field.nullable) ", 선택 항목" else ", 필수 항목")
+    if (modified) append(", 수정됨")
+    error?.let { append(", 오류: $it") }
+}
+
+/** Common field semantics: permanent label, requirement, error text, and change status. */
 @Composable
 fun AccessibleField(
     field: CanonicalEditableField,
@@ -543,12 +620,7 @@ fun AccessibleField(
     var draft by remember(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
     Column(
         modifier = Modifier.fillMaxWidth().semantics {
-            contentDescription = buildString {
-                append(field.label)
-                append(", ${field.type.wireValue}")
-                if (modified) append(", 수정됨")
-                error?.let { append(", 오류: $it") }
-            }
+            contentDescription = canonicalFieldContentDescription(field, modified, error)
         },
         verticalArrangement = Arrangement.spacedBy(CollectorTokens.space1),
     ) {
@@ -556,7 +628,7 @@ fun AccessibleField(
             Text(field.label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
             Text(
                 buildString {
-                    append(field.type.wireValue)
+                    append(if (field.nullable) "선택" else "필수")
                     if (modified) append(" · 수정됨")
                 },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -579,7 +651,7 @@ fun AccessibleField(
                     onValueChange = { draft = it },
                     modifier = Modifier.weight(1f).collectorFocusOutline(CollectorTokens.controlShape),
                     enabled = !busy,
-                    label = { Text("${field.label} 새 값") },
+                    label = { Text("새 값") },
                     singleLine = field.type != CanonicalFieldType.DATETIME,
                     isError = error != null,
                     supportingText = error?.let { message -> { Text(message) } },

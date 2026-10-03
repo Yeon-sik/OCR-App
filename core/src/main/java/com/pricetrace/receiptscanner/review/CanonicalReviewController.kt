@@ -578,6 +578,26 @@ class CanonicalReviewController(
         applied: YeonsikOcrEnvelope,
         path: String,
     ): YeonsikOcrEnvelope {
+        val productMatch = productPath.matchEntire(path)
+        if (productMatch != null && productMatch.groupValues[2] == "product_name") {
+            val productClientKey = productMatch.groupValues[1]
+            val previousProduct = original.productCandidates.singleOrNull { it.clientKey == productClientKey }
+                ?: return applied
+            val nextProduct = applied.productCandidates.singleOrNull { it.clientKey == productClientKey }
+                ?: return applied
+            val linkedNutrition = applied.nutrition.map { item ->
+                if (item is IngestionNutrition.ProductLabel &&
+                    item.productClientKey == productClientKey &&
+                    item.draft.productName == previousProduct.productName
+                ) {
+                    item.copy(draft = item.draft.copy(productName = nextProduct.productName))
+                } else {
+                    item
+                }
+            }
+            return applied.copy(nutrition = linkedNutrition)
+        }
+
         val lineMatch = receiptLinePath.matchEntire(path)
         if (lineMatch == null || lineMatch.groupValues[2] != "description") return applied
         val originalLine = original.receipt?.lineItems?.findByKey(lineMatch.groupValues[1]) ?: return applied
@@ -607,6 +627,30 @@ class CanonicalReviewController(
     ): List<FieldChange> = buildList {
         if (path.startsWith("receipt.merchant.")) {
             addAll(merchantCandidateChanges(original, applied))
+        }
+        val productMatch = productPath.matchEntire(path)
+        if (productMatch != null && productMatch.groupValues[2] == "product_name") {
+            val productClientKey = productMatch.groupValues[1]
+            val previousProduct = original.productCandidates.singleOrNull { it.clientKey == productClientKey }
+            val nextProduct = applied.productCandidates.singleOrNull { it.clientKey == productClientKey }
+            if (previousProduct != null && nextProduct != null) {
+                original.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>()
+                    .filter { it.productClientKey == productClientKey && it.draft.productName == previousProduct.productName }
+                    .forEach { previousNutrition ->
+                        val nextNutrition = applied.nutrition.singleOrNull { it.clientKey == previousNutrition.clientKey }
+                            as? IngestionNutrition.ProductLabel ?: return@forEach
+                        if (previousNutrition.draft.productName != nextNutrition.draft.productName) {
+                            add(
+                                FieldChange(
+                                    fieldPath = "nutrition[${previousNutrition.clientKey}].product_name",
+                                    previousValue = previousNutrition.draft.productName,
+                                    newValue = nextNutrition.draft.productName,
+                                    valueType = CanonicalFieldType.TEXT,
+                                ),
+                            )
+                        }
+                    }
+            }
         }
         val lineMatch = receiptLinePath.matchEntire(path)
         if (lineMatch != null && lineMatch.groupValues[2] == "description") {
