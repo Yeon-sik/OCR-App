@@ -461,14 +461,24 @@ class EvidenceSupabaseArchivePortTest {
             responses = mutableListOf(
                 EvidenceHttpResponse(403, "{\"code\":\"42501\",\"message\":\"new row violates row-level security policy\"}"),
             ),
+            parentRevisionOwnerId = TEST_USER_ID,
         )
         val result = EvidenceSupabaseArchivePort(SignedInStore(), transport)
-            .archiveCanonicalRevision(canonicalRevisionRequest())
+            .archiveCanonicalRevision(canonicalRevisionRequest(parentRevisionId = "parent-1", revisionSeq = 2))
 
         assertTrue(result is CanonicalRevisionArchiveResult.Failure)
         val issue = (result as CanonicalRevisionArchiveResult.Failure).issue
-        assertTrue(issue.contains("Supabase RLS rejected canonical revision insert-or-reuse (403/42501)"))
-        assertTrue(issue.contains("Re-authenticate"))
+        assertTrue(issue.contains("Evidence canonical revision RLS rejected an insert after session/artifact ownership validation."))
+        assertTrue(issue.contains("The deployed canonical_revisions_owner_insert policy may be outdated or invalid."))
+        assertTrue("new row violates row-level security policy" !in issue)
+        val parentPreflight = transport.requests.indexOfFirst {
+            it.method == "GET" && "select=id,canonical_artifact_id,owner_id" in it.url
+        }
+        val revisionInsert = transport.requests.indexOfFirst {
+            it.method == "POST" && "/rest/v1/canonical_revisions?" in it.url
+        }
+        assertTrue(parentPreflight >= 0)
+        assertTrue(revisionInsert > parentPreflight)
     }
 
     private suspend fun archiveWithUploadResponse(response: EvidenceHttpResponse): Pair<EvidenceArchiveResult, ScriptedTransport> {
@@ -577,11 +587,14 @@ class EvidenceSupabaseArchivePortTest {
         }
     }
 
-    private fun canonicalRevisionRequest(parentRevisionId: String? = null): CanonicalRevisionArchiveRequest {
+    private fun canonicalRevisionRequest(
+        parentRevisionId: String? = null,
+        revisionSeq: Long = 1,
+    ): CanonicalRevisionArchiveRequest {
         val canonicalJson = "{\"schema_version\":\"yeonsik-ocr.v4\"}"
         return CanonicalRevisionArchiveRequest(
             canonicalArtifactId = "artifact-1",
-            revisionSeq = 1,
+            revisionSeq = revisionSeq,
             parentRevisionId = parentRevisionId,
             canonicalSha256 = digest(canonicalJson.toByteArray()),
             canonicalJson = canonicalJson,

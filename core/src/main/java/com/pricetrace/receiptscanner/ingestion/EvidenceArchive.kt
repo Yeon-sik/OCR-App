@@ -929,6 +929,10 @@ class EvidenceSupabaseArchivePort(
                 .firstNotNullOfOrNull { key -> (value[key] as? JsonPrimitive)?.contentOrNull }
         }
         if (statusCode == 403 && code == "42501") {
+            if (label == "canonical revision insert-or-reuse") {
+                return "Evidence canonical revision RLS rejected an insert after session/artifact ownership validation. " +
+                    "The deployed canonical_revisions_owner_insert policy may be outdated or invalid."
+            }
             return "Supabase RLS rejected $label ($statusCode/$code) after the Evidence session and owner lookup. " +
                 "Re-authenticate; if it persists, verify the deployed owner policy and migration."
         }
