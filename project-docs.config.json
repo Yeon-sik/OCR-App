@@ -1,0 +1,33 @@
+{
+  "$schema": "./.github/project-docs/project-docs.config.schema.json",
+  "version": 1,
+  "canonicalBranch": "main",
+  "publicationMode": "manual",
+  "documents": [
+    {
+      "key": "intro",
+      "label": "OCR-App 프로젝트 소개",
+      "path": "docs/Project_Intro.md",
+      "requiredSections": [
+        "30초 요약",
+        "문제와 해결",
+        "핵심 기능과 결과",
+        "검증 현황",
+        "현재 한계와 다음 단계"
+      ]
+    },
+    {
+      "key": "detail",
+      "label": "OCR-App 프로젝트 상세",
+      "path": "docs/Project_Detail.md",
+      "requiredSections": [
+        "문서 목적과 범위",
+        "시스템 아키텍처",
+        "핵심 기술 의사결정",
+        "테스트와 검증 전략",
+        "배포·운영·복구",
+        "한계, 기술 부채, 다음 단계"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,126 @@
+name: Validate and publish project docs
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "project-docs.config.json"
+      - ".github/project-docs/**"
+      - ".github/workflows/project-docs-notion.yml"
+  push:
+    paths:
+      - "docs/**"
+      - "project-docs.config.json"
+      - ".github/project-docs/**"
+      - ".github/workflows/project-docs-notion.yml"
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Validate only, or publish after validation
+        required: true
+        type: choice
+        options:
+          - validate
+          - publish
+        default: validate
+      confirmation:
+        description: Type PUBLISH to authorize a Notion write
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-docs-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      publication_mode: ${{ steps.publication-mode.outputs.mode }}
+      canonical_ref: ${{ steps.publication-mode.outputs.canonical_ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.18.0
+          package-manager-cache: false
+
+      - name: Reject an unconfirmed publication request
+        if: ${{ inputs.operation == 'publish' && inputs.confirmation != 'PUBLISH' }}
+        run: |
+          echo "::error::Publication requires the exact confirmation PUBLISH."
+          exit 1
+
+      - name: Verify the tracked runtime bundle
+        run: |
+          git ls-files --error-unmatch \
+            project-docs.config.json \
+            .github/project-docs/project-docs.config.schema.json \
+            .github/project-docs/project-docs-config.mjs \
+            .github/project-docs/validate-project-docs.mjs \
+            .github/project-docs/sync-project-docs-to-notion.mjs \
+            .github/workflows/project-docs-notion.yml
+
+      - name: Validate configured project documents
+        run: >-
+          node .github/project-docs/validate-project-docs.mjs
+          --config project-docs.config.json
+          --require-tracked
+
+      - name: Resolve publication mode
+        id: publication-mode
+        run: >-
+          node -e
+          "const fs = require('node:fs');
+          const config = JSON.parse(fs.readFileSync('project-docs.config.json', 'utf8'));
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+          'mode=' + (config.publicationMode || 'manual') + '\n' +
+          'canonical_ref=refs/heads/' + (config.canonicalBranch || 'main') + '\n');"
+
+      - name: Render a publication dry run
+        run: >-
+          node .github/project-docs/sync-project-docs-to-notion.mjs
+          --config project-docs.config.json
+
+  publish:
+    needs: validate
+    if: >-
+      (github.event_name == 'push' &&
+      github.ref == needs.validate.outputs.canonical_ref &&
+      needs.validate.outputs.publication_mode == 'on-main-push') ||
+      (github.event_name == 'workflow_dispatch' &&
+      inputs.operation == 'publish' &&
+      inputs.confirmation == 'PUBLISH')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: "notion-production"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.18.0
+          package-manager-cache: false
+
+      - name: Publish configured documents to Notion
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_PAGE_IDS_JSON: ${{ secrets.NOTION_PAGE_IDS_JSON }}
+          PROJECT_DOCS_PUBLISH_APPROVED: "true"
+        run: >-
+          node .github/project-docs/sync-project-docs-to-notion.mjs
+          --config project-docs.config.json
+          --apply
