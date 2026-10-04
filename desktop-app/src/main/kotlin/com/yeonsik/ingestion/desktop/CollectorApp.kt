@@ -18,6 +18,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.movableContentOf
+import androidx.compose.runtime.key
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -50,8 +54,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 private enum class CompactCollectorPane(val label: String) {
-    INBOX("Inbox"),
-    REVIEW("검토"),
+    INBOX("작업 목록"),
+    REVIEW("검수"),
     EVIDENCE("원본"),
 }
 
@@ -136,6 +140,12 @@ fun YeonsikCollectorApp(
         }
     }
 
+    var sourceContext by remember(state.ingestionId) { mutableStateOf("검수할 항목을 선택하세요") }
+    val selectSource: (List<String>, String) -> Unit = { ids, context ->
+        sourceContext = context + if (ids.isEmpty()) " · 연결된 원본 정보 없음" else " · 정확한 위치 정보 없음"
+        state.evidence.firstOrNull { it.attachmentId in ids || it.pageId in ids }?.let { selectedEvidenceId = it.attachmentId }
+        compactPane = CompactCollectorPane.EVIDENCE
+    }
     val inbox: @Composable () -> Unit = {
         InboxSidebar(
             batchState = batchState,
@@ -153,6 +163,8 @@ fun YeonsikCollectorApp(
         )
     }
     val review: @Composable () -> Unit = {
+        key(state.ingestionId) {
+        CompositionLocalProvider(LocalDesktopSourceSelection provides selectSource) {
         ReviewWorkspace(
             state = state,
             selectedProjections = effectiveSelectedProjections,
@@ -213,7 +225,10 @@ fun YeonsikCollectorApp(
             },
         )
     }
+        }
+        }
     val evidence: @Composable () -> Unit = {
+        CompositionLocalProvider(LocalDesktopSourceContext provides sourceContext) {
         EvidenceInspector(
             state = state,
             selectedType = evidenceType,
@@ -247,6 +262,7 @@ fun YeonsikCollectorApp(
         )
     }
 
+    }
     AppShell(
         compactPane = compactPane,
         onCompactPaneSelected = { compactPane = it },
@@ -264,29 +280,36 @@ private fun AppShell(
     review: @Composable () -> Unit,
     evidence: @Composable () -> Unit,
 ) {
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background,
-    ) {
-        BoxWithConstraints(Modifier.fillMaxSize().padding(CollectorTokens.panePadding)) {
-            if (maxWidth >= 1080.dp) {
-                Row(
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalArrangement = Arrangement.spacedBy(CollectorTokens.paneGap),
-                ) {
-                    Box(Modifier.width(276.dp).fillMaxHeight()) { inbox() }
-                    Box(Modifier.weight(1f).fillMaxHeight()) { review() }
-                    Box(Modifier.width(332.dp).fillMaxHeight()) { evidence() }
+    val paneStates = rememberSaveableStateHolder()
+    // Retain composition, drafts and scroll state when the panes move during resize.
+    val movableInbox = remember { movableContentOf<@Composable () -> Unit> { content -> paneStates.SaveableStateProvider("inbox") { content() } } }
+    val movableReview = remember { movableContentOf<@Composable () -> Unit> { content -> paneStates.SaveableStateProvider("review") { content() } } }
+    val movableEvidence = remember { movableContentOf<@Composable () -> Unit> { content -> paneStates.SaveableStateProvider("source") { content() } } }
+    var sourceWidth by remember { mutableStateOf(WorkspacePreferences.sourceWidth) }
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val windowWidth = maxWidth.value.toInt()
+            val layout = workspaceLayout(windowWidth)
+            Column(Modifier.fillMaxSize().padding(if (maxHeight < 640.dp) 8.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                CompactPaneTabs(compactPane, onCompactPaneSelected)
+                if (layout != WorkspaceLayout.COMPACT) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CollectorButton("원본 좁게", { sourceWidth = (sourceWidth - 40).coerceAtLeast(320); WorkspacePreferences.sourceWidth = sourceWidth }, emphasized = false)
+                    CollectorButton("원본 넓게", { sourceWidth = (sourceWidth + 40).coerceAtMost(560); WorkspacePreferences.sourceWidth = sourceWidth }, emphasized = false)
                 }
-            } else {
-                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
-                    CompactPaneTabs(compactPane, onCompactPaneSelected)
-                    Box(Modifier.weight(1f).fillMaxWidth()) {
-                        when (compactPane) {
-                            CompactCollectorPane.INBOX -> inbox()
-                            CompactCollectorPane.REVIEW -> review()
-                            CompactCollectorPane.EVIDENCE -> evidence()
+                Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (layout == WorkspaceLayout.LARGE) Box(Modifier.width(240.dp).fillMaxHeight()) { movableInbox(inbox) }
+                    if (layout == WorkspaceLayout.COMPACT || layout == WorkspaceLayout.MEDIUM && compactPane == CompactCollectorPane.INBOX) {
+                        Box(Modifier.weight(1f).fillMaxHeight()) {
+                            when (compactPane) {
+                                CompactCollectorPane.INBOX -> movableInbox(inbox)
+                                CompactCollectorPane.REVIEW -> movableReview(review)
+                                CompactCollectorPane.EVIDENCE -> movableEvidence(evidence)
+                            }
                         }
+                    } else {
+                        Box(Modifier.weight(1f).fillMaxHeight()) { movableReview(review) }
+                        val available = windowWidth - if (layout == WorkspaceLayout.LARGE) 240 else 0
+                        Box(Modifier.width(sourceWidth.coerceAtMost(available - 520).coerceAtLeast(320).dp).fillMaxHeight()) { movableEvidence(evidence) }
                     }
                 }
             }

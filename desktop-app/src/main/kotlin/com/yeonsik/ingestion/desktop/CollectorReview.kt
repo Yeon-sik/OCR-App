@@ -21,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -136,16 +137,14 @@ fun ReviewWorkspace(
                 state.bundleMetadata.verificationEventRecorded) &&
             revisionReady && selectedProjections.isNotEmpty()
 
-        Column(
-            modifier = Modifier.fillMaxSize().padding(CollectorTokens.space4).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(CollectorTokens.space5),
-        ) {
+        Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             ReviewHeader(
                 state = state,
                 title = reviewTitle(state, model.rows),
                 onDeveloperInfoVisibleChanged = onDeveloperInfoVisibleChanged,
                 developerInfoVisible = developerInfoVisible,
             )
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             state.error?.let { ValidationMessage(it, CollectorStatusKind.ERROR) }
             state.notice?.let { ValidationMessage(it, CollectorStatusKind.PROCESSING, recoveryHint = null) }
 
@@ -172,9 +171,15 @@ fun ReviewWorkspace(
             }
 
             SourceSummary(state, model.rows)
-            ReceiptSection(model.rows)
-            NutritionSection(model.rows)
-            PurchaseAndGenericSections(model.rows)
+            if (state.reviewFieldErrors.isNotEmpty()) ValidationMessage(
+                "수정 필요 ${state.reviewFieldErrors.size}개 · 아래 편집 항목을 확인하세요", CollectorStatusKind.ERROR)
+            var showAllValues by rememberSaveable { mutableStateOf(false) }
+            CollectorButton(if (showAllValues) "전체 값 접기" else "전체 값 ${model.rows.size}개 보기", { showAllValues = !showAllValues }, emphasized = false)
+            if (showAllValues) {
+                ReceiptSection(model.rows)
+                NutritionSection(model.rows)
+                PurchaseAndGenericSections(model.rows)
+            }
             EditableCanonicalSection(
                 envelope = envelope,
                 edits = state.reviewEdits,
@@ -189,6 +194,15 @@ fun ReviewWorkspace(
                 busy = busy,
                 onProjectionSelected = onProjectionSelected,
             )
+            if (developerInfoVisible) {
+                DeveloperInfoPanel(
+                    state = state,
+                    onImportJson = onImportJson,
+                    onClose = { onDeveloperInfoVisibleChanged(false) },
+                )
+            }
+            }
+            Column(Modifier.fillMaxWidth().heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
             ConfirmAndSubmitSection(
                 state = state,
                 busy = busy,
@@ -203,12 +217,6 @@ fun ReviewWorkspace(
                 onDismissSubmitConfirmation = onDismissSubmitConfirmation,
                 onConfirmSubmit = onConfirmSubmit,
             )
-            if (developerInfoVisible) {
-                DeveloperInfoPanel(
-                    state = state,
-                    onImportJson = onImportJson,
-                    onClose = { onDeveloperInfoVisibleChanged(false) },
-                )
             }
         }
     }
@@ -397,7 +405,8 @@ private fun ReviewRowGroup(title: String, rows: List<ReviewRow>) {
 
 @Composable
 private fun HumanReviewRow(row: ReviewRow) {
-    var detailsVisible by remember(row.id) { mutableStateOf(false) }
+    val selectSource = LocalDesktopSourceSelection.current
+    var detailsVisible by rememberSaveable(row.id) { mutableStateOf(false) }
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(CollectorTokens.space1),
@@ -424,6 +433,7 @@ private fun HumanReviewRow(row: ReviewRow) {
                 }
             }
         }
+        CollectorButton("원본 대조", { selectSource(row.evidence.flatMap { it.sourceIds }, "${row.item} · 현재 값: ${row.value}") }, emphasized = false)
         if (row.details.isNotEmpty()) {
             CollectorButton(
                 label = if (detailsVisible) "상세 접기" else "상세 보기",
@@ -521,8 +531,8 @@ private fun EditableCanonicalSection(
 ) {
     val (visibleFields, emptyOptionalFields) = remember(envelope) { canonicalReviewFieldGroups(envelope) }
     if (visibleFields.isEmpty() && emptyOptionalFields.isEmpty()) return
-    var editorVisible by remember(envelope) { mutableStateOf(false) }
-    var showEmptyOptionalFields by remember(envelope) { mutableStateOf(false) }
+    var editorVisible by rememberSaveable { mutableStateOf(false) }
+    var showEmptyOptionalFields by rememberSaveable { mutableStateOf(false) }
     CollectorSection(
         "수정",
         "상품명처럼 연결된 값은 한 번만 표시합니다. 필수 값과 입력된 값부터 확인하세요.",
@@ -550,7 +560,7 @@ private fun EditableCanonicalSection(
                 modifier = Modifier.weight(1f),
             )
         }
-        if (editorVisible) {
+        if (editorVisible || fieldErrors.isNotEmpty()) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = CollectorTokens.panelShape,
@@ -558,7 +568,7 @@ private fun EditableCanonicalSection(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             ) {
                 Column(Modifier.padding(CollectorTokens.space3), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space4)) {
-                    visibleFields.forEach { field ->
+                    visibleFields.sortedBy { if (it.path in fieldErrors) 0 else 1 }.forEach { field ->
                         AccessibleField(
                             field = field,
                             modified = CanonicalFieldRegistry.isModified(field, edits),
@@ -617,7 +627,7 @@ fun AccessibleField(
     busy: Boolean,
     onApply: (String?) -> Unit,
 ) {
-    var draft by remember(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
+    var draft by rememberSaveable(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
     Column(
         modifier = Modifier.fillMaxWidth().semantics {
             contentDescription = canonicalFieldContentDescription(field, modified, error)
