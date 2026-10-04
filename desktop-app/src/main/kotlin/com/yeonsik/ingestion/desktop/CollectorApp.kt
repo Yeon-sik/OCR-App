@@ -1,6 +1,11 @@
 package com.yeonsik.ingestion.desktop
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.*
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -53,7 +58,7 @@ import kotlinx.coroutines.withContext
 import java.nio.file.Files
 import java.nio.file.Path
 
-private enum class CompactCollectorPane(val label: String) {
+internal enum class CompactCollectorPane(val label: String) {
     INBOX("작업 목록"),
     REVIEW("검수"),
     EVIDENCE("원본"),
@@ -164,104 +169,104 @@ fun YeonsikCollectorApp(
     }
     val review: @Composable () -> Unit = {
         key(state.ingestionId) {
-        CompositionLocalProvider(LocalDesktopSourceSelection provides selectSource) {
-        ReviewWorkspace(
-            state = state,
-            selectedProjections = effectiveSelectedProjections,
-            busy = anyBusy,
-            verificationBasis = verificationBasis,
-            revisionReady = revisionReady,
-            developerInfoVisible = showDeveloperInfo,
-            submitConfirmationOpen = submitConfirmationOpen,
-            onChooseBundles = {
-                if (!anyBusy) importBundles(NativeFileDialogs.chooseBundles())
-            },
-            onDropBundles = importBundles,
-            onVerificationBasisSelected = { verificationBasis = it },
-            onProjectionSelected = { projection ->
-                val next = effectiveSelectedProjections.toMutableSet()
-                if (!next.add(projection)) next.remove(projection)
-                selectedProjections = next
-            },
-            onEdit = editStructured,
-            onVerify = {
-                runIo {
-                    controller.verify(
-                        if (state.bundleMetadata == null) verificationBasis else VerificationBasis.SOURCE_EVIDENCE,
-                    )
-                    batchCoordinator.syncActiveItem()
-                    refreshRecent()
-                }
-            },
-            onOpenSubmitConfirmation = { submitConfirmationOpen = true },
-            onDismissSubmitConfirmation = { submitConfirmationOpen = false },
-            onConfirmSubmit = {
-                submitConfirmationOpen = false
-                runIo {
-                    controller.submit(effectiveSelectedProjections)
-                    batchCoordinator.syncActiveItem()
-                    refreshRecent()
-                }
-            },
-            onRetryArchive = {
-                runIo {
-                    controller.archiveEvidence()
-                    batchCoordinator.syncActiveItem()
-                    refreshRecent()
-                }
-            },
-            onRetryRevision = {
-                runIo {
-                    controller.retryCanonicalRevision()
-                    batchCoordinator.syncActiveItem()
-                    refreshRecent()
-                }
-            },
-            onDeveloperInfoVisibleChanged = { showDeveloperInfo = it },
-            onImportJson = {
-                NativeFileDialogs.chooseJson().firstOrNull()?.let { file ->
-                    runIo { controller.importJson(java.nio.file.Files.readString(file)); refreshRecent() }
-                }
-            },
-        )
+            CompositionLocalProvider(LocalDesktopSourceSelection provides selectSource,
+                LocalDesktopSourceValue provides { sourceContext = it + " · 정확한 위치 정보 없음" }) {
+                ReviewWorkspace(
+                    state = state,
+                    selectedProjections = effectiveSelectedProjections,
+                    busy = anyBusy,
+                    verificationBasis = verificationBasis,
+                    revisionReady = revisionReady,
+                    developerInfoVisible = showDeveloperInfo,
+                    submitConfirmationOpen = submitConfirmationOpen,
+                    onChooseBundles = {
+                        if (!anyBusy) importBundles(NativeFileDialogs.chooseBundles())
+                    },
+                    onDropBundles = importBundles,
+                    onVerificationBasisSelected = { verificationBasis = it },
+                    onProjectionSelected = { projection ->
+                        val next = effectiveSelectedProjections.toMutableSet()
+                        if (!next.add(projection)) next.remove(projection)
+                        selectedProjections = next
+                    },
+                    onEdit = editStructured,
+                    onVerify = {
+                        runIo {
+                            controller.verify(
+                                if (state.bundleMetadata == null) verificationBasis else VerificationBasis.SOURCE_EVIDENCE,
+                            )
+                            batchCoordinator.syncActiveItem()
+                            refreshRecent()
+                        }
+                    },
+                    onOpenSubmitConfirmation = { submitConfirmationOpen = true },
+                    onDismissSubmitConfirmation = { submitConfirmationOpen = false },
+                    onConfirmSubmit = {
+                        submitConfirmationOpen = false
+                        runIo {
+                            controller.submit(effectiveSelectedProjections)
+                            batchCoordinator.syncActiveItem()
+                            refreshRecent()
+                        }
+                    },
+                    onRetryArchive = {
+                        runIo {
+                            controller.archiveEvidence()
+                            batchCoordinator.syncActiveItem()
+                            refreshRecent()
+                        }
+                    },
+                    onRetryRevision = {
+                        runIo {
+                            controller.retryCanonicalRevision()
+                            batchCoordinator.syncActiveItem()
+                            refreshRecent()
+                        }
+                    },
+                    onDeveloperInfoVisibleChanged = { showDeveloperInfo = it },
+                    onImportJson = {
+                        NativeFileDialogs.chooseJson().firstOrNull()?.let { file ->
+                            runIo { controller.importJson(java.nio.file.Files.readString(file)); refreshRecent() }
+                        }
+                    },
+                )
+            }
+        }
     }
-        }
-        }
     val evidence: @Composable () -> Unit = {
         CompositionLocalProvider(LocalDesktopSourceContext provides sourceContext) {
-        EvidenceInspector(
-            state = state,
-            selectedType = evidenceType,
-            selectedEvidenceId = selectedEvidenceId,
-            busy = anyBusy,
-            onTypeSelected = { evidenceType = it },
-            onEvidenceSelected = { selectedEvidenceId = it },
-            onChooseEvidence = {
-                if (state.session != null && !anyBusy) {
-                    NativeFileDialogs.chooseEvidence().takeIf { it.isNotEmpty() }?.let { paths ->
-                        runIo {
-                            controller.attachEvidence(paths, evidenceType)
-                            batchCoordinator.syncActiveItem()
-                            refreshRecent()
+            EvidenceInspector(
+                state = state,
+                selectedType = evidenceType,
+                selectedEvidenceId = selectedEvidenceId,
+                busy = anyBusy,
+                onTypeSelected = { evidenceType = it },
+                onEvidenceSelected = { selectedEvidenceId = it },
+                onChooseEvidence = {
+                    if (state.session != null && !anyBusy) {
+                        NativeFileDialogs.chooseEvidence().takeIf { it.isNotEmpty() }?.let { paths ->
+                            runIo {
+                                controller.attachEvidence(paths, evidenceType)
+                                batchCoordinator.syncActiveItem()
+                                refreshRecent()
+                            }
                         }
                     }
-                }
-            },
-            onDropEvidence = { paths ->
-                if (state.session != null) {
-                    val accepted = paths.filter { it.fileName.toString().substringAfterLast('.', "").lowercase() in evidenceExtensions }
-                    if (accepted.isNotEmpty()) {
-                        runIo {
-                            controller.attachEvidence(accepted, evidenceType)
-                            batchCoordinator.syncActiveItem()
-                            refreshRecent()
+                },
+                onDropEvidence = { paths ->
+                    if (state.session != null) {
+                        val accepted = paths.filter { it.fileName.toString().substringAfterLast('.', "").lowercase() in evidenceExtensions }
+                        if (accepted.isNotEmpty()) {
+                            runIo {
+                                controller.attachEvidence(accepted, evidenceType)
+                                batchCoordinator.syncActiveItem()
+                                refreshRecent()
+                            }
                         }
                     }
-                }
-            },
-        )
-    }
-
+                },
+            )
+        }
     }
     AppShell(
         compactPane = compactPane,
@@ -269,24 +274,47 @@ fun YeonsikCollectorApp(
         inbox = inbox,
         review = review,
         evidence = evidence,
+        onOpen = { if (!anyBusy) importBundles(NativeFileDialogs.chooseBundles()) },
     )
 }
 
 @Composable
-private fun AppShell(
+internal fun AppShell(
     compactPane: CompactCollectorPane,
     onCompactPaneSelected: (CompactCollectorPane) -> Unit,
     inbox: @Composable () -> Unit,
     review: @Composable () -> Unit,
     evidence: @Composable () -> Unit,
+    onOpen: () -> Unit = {},
 ) {
+    val focusTargets = remember { CompactCollectorPane.entries.associateWith { FocusRequester() } }
+    var focusedPane by remember { mutableStateOf(CompactCollectorPane.REVIEW) }
+    var pendingFocus by remember { mutableStateOf<CompactCollectorPane?>(null) }
+    LaunchedEffect(pendingFocus) {
+        pendingFocus?.let { focusTargets.getValue(it).requestFocus(); pendingFocus = null }
+    }
+    fun paneModifier(pane: CompactCollectorPane) = Modifier
+        .focusRequester(focusTargets.getValue(pane))
+        .onFocusChanged { if (it.hasFocus) focusedPane = pane }
+        .collectorFocusOutline().focusable()
     val paneStates = rememberSaveableStateHolder()
     // Retain composition, drafts and scroll state when the panes move during resize.
     val movableInbox = remember { movableContentOf<@Composable () -> Unit> { content -> paneStates.SaveableStateProvider("inbox") { content() } } }
     val movableReview = remember { movableContentOf<@Composable () -> Unit> { content -> paneStates.SaveableStateProvider("review") { content() } } }
     val movableEvidence = remember { movableContentOf<@Composable () -> Unit> { content -> paneStates.SaveableStateProvider("source") { content() } } }
     var sourceWidth by remember { mutableStateOf(WorkspacePreferences.sourceWidth) }
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+    Surface(Modifier.fillMaxSize().onKeyEvent { event ->
+        // Bubble from TextField first. No global Ctrl+Z/Y interception.
+        if (event.type == KeyEventType.KeyDown && event.isCtrlPressed && event.key == Key.O) { onOpen(); true } else false
+    }.onPreviewKeyEvent { event ->
+        if (event.type == KeyEventType.KeyDown && event.key == Key.F6) {
+            val panes = CompactCollectorPane.entries
+            val next = panes[(focusedPane.ordinal + if (event.isShiftPressed) 2 else 1) % panes.size]
+            onCompactPaneSelected(next)
+            pendingFocus = next
+            true
+        } else false
+    }, color = MaterialTheme.colorScheme.background) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val windowWidth = maxWidth.value.toInt()
             val layout = workspaceLayout(windowWidth)
@@ -297,9 +325,9 @@ private fun AppShell(
                     CollectorButton("원본 넓게", { sourceWidth = (sourceWidth + 40).coerceAtMost(560); WorkspacePreferences.sourceWidth = sourceWidth }, emphasized = false)
                 }
                 Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (layout == WorkspaceLayout.LARGE) Box(Modifier.width(240.dp).fillMaxHeight()) { movableInbox(inbox) }
+                    if (layout == WorkspaceLayout.LARGE) Box(Modifier.width(240.dp).fillMaxHeight().then(paneModifier(CompactCollectorPane.INBOX))) { movableInbox(inbox) }
                     if (layout == WorkspaceLayout.COMPACT || layout == WorkspaceLayout.MEDIUM && compactPane == CompactCollectorPane.INBOX) {
-                        Box(Modifier.weight(1f).fillMaxHeight()) {
+                        Box(Modifier.weight(1f).fillMaxHeight().then(paneModifier(compactPane))) {
                             when (compactPane) {
                                 CompactCollectorPane.INBOX -> movableInbox(inbox)
                                 CompactCollectorPane.REVIEW -> movableReview(review)
@@ -307,9 +335,9 @@ private fun AppShell(
                             }
                         }
                     } else {
-                        Box(Modifier.weight(1f).fillMaxHeight()) { movableReview(review) }
+                        Box(Modifier.weight(1f).fillMaxHeight().then(paneModifier(CompactCollectorPane.REVIEW))) { movableReview(review) }
                         val available = windowWidth - if (layout == WorkspaceLayout.LARGE) 240 else 0
-                        Box(Modifier.width(sourceWidth.coerceAtMost(available - 520).coerceAtLeast(320).dp).fillMaxHeight()) { movableEvidence(evidence) }
+                        Box(Modifier.width(sourceWidth.coerceAtMost(available - 520).coerceAtLeast(320).dp).fillMaxHeight().then(paneModifier(CompactCollectorPane.EVIDENCE))) { movableEvidence(evidence) }
                     }
                 }
             }

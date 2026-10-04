@@ -1,6 +1,8 @@
 package com.yeonsik.ingestion.desktop
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.input.key.*
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,6 +48,7 @@ import java.nio.file.Path
 import javax.imageio.ImageIO
 
 internal val LocalDesktopSourceSelection = staticCompositionLocalOf<(List<String>, String) -> Unit> { { _, _ -> } }
+internal val LocalDesktopSourceValue = staticCompositionLocalOf<(String) -> Unit> { {} }
 internal val LocalDesktopSourceContext = staticCompositionLocalOf { "" }
 
 @Composable
@@ -246,7 +249,15 @@ private fun SourceImageCanvas(bitmap: ImageBitmap, identity: String, modifier: M
             CollectorButton("화면 맞춤", { scale = 1f; pan = Offset.Zero }, emphasized = false)
             Text("${(scale * 100).toInt()}%", Modifier.align(Alignment.CenterVertically))
         }
-        Box(Modifier.weight(1f).fillMaxWidth().clipToBounds().pointerInput(identity, scale) {
+        Text("원본에 포커스: + / − 확대·축소 · 0 화면 맞춤", style = MaterialTheme.typography.bodySmall)
+        Box(Modifier.weight(1f).fillMaxWidth().clipToBounds().collectorFocusOutline().onKeyEvent { event ->
+            if (event.type != KeyEventType.KeyDown || event.isCtrlPressed || event.isAltPressed) false else when (event.key) {
+                Key.Equals, Key.Plus -> { scale = (scale * 1.25f).coerceAtMost(8f); true }
+                Key.Minus -> { scale = (scale / 1.25f).coerceAtLeast(1f); if (scale == 1f) pan = Offset.Zero; true }
+                Key.Zero -> { scale = 1f; pan = Offset.Zero; true }
+                else -> false
+            }
+        }.focusable().pointerInput(identity, scale) {
             detectDragGestures { change, delta -> change.consume(); if (scale > 1f) pan += delta }
         }) {
             Image(bitmap, "원본 이미지. 확대 후 끌어서 이동", Modifier.fillMaxSize().graphicsLayer(

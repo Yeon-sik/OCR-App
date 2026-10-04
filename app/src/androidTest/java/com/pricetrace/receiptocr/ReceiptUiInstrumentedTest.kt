@@ -1,6 +1,11 @@
 package com.pricetrace.receiptocr
 
 import android.content.Context
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -78,6 +83,23 @@ import java.util.UUID
 class ReceiptUiInstrumentedTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun largeTextKeepsHomeActionAndSourceReturnUsable() {
+        var state by mutableStateOf(ReceiptAppUiState())
+        composeRule.setContent {
+            val density = LocalDensity.current.density
+            CompositionLocalProvider(LocalDensity provides Density(density, fontScale = 1.5f)) {
+                ReceiptOcrTheme { ReceiptOcrContent(uiState = state) }
+            }
+        }
+        composeRule.onNodeWithTag("new_work_button").assertIsDisplayed().assertHeightIsAtLeast(48.dp)
+        composeRule.runOnIdle { state = state.copy(screen = AppScreen.FIELD_REVIEW, receipt = receipt(false)) }
+        composeRule.onNodeWithTag("review_source_button").assertIsDisplayed().assertHeightIsAtLeast(48.dp).performClick()
+        composeRule.onNodeWithTag("source_unavailable").assertIsDisplayed()
+        composeRule.onNodeWithTag("source_return").performClick()
+        composeRule.onNodeWithTag("review_source_button").assertIsDisplayed()
+    }
 
     @Test
     fun scannerCancellationAndFailureRemainVisibleStates() {
@@ -819,7 +841,8 @@ class ReceiptUiInstrumentedTest {
         composeRule.onNodeWithTag("consumption_item_unit_meal-1_product-1").performScrollTo().performTextReplacement("g")
         composeRule.onNodeWithTag("consumption_item_amount_status_meal-1_product-1")
             .performTextReplacement("measured")
-        composeRule.onNodeWithTag("confirm_consumption_review").performClick()
+        composeRule.onNodeWithTag("consumption_review").performScrollToNode(hasTestTag("confirm_consumption_review"))
+        composeRule.onNodeWithTag("confirm_consumption_review").assertIsDisplayed().assertIsEnabled().performClick()
         composeRule.runOnIdle {
             assertEquals("2026-09-06T09:10:00+09:00", consumedAt)
             assertEquals("45", amount)

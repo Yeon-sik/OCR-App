@@ -1,6 +1,5 @@
 package com.pricetrace.receiptocr
 
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -34,6 +33,7 @@ import java.io.File
 internal data class ReviewSourceSelection(
     val label: String = "검수 내용", val value: String = "", val pageId: String? = null,
     val boxes: List<BoundingBox> = emptyList(), val recognizedText: String? = null,
+    val attachmentIds: List<String> = emptyList(),
 )
 internal val LocalReviewSource = staticCompositionLocalOf<(ReviewSourceSelection, Boolean) -> Unit> { { _, _ -> } }
 internal val LocalReviewContext = staticCompositionLocalOf { ReviewSourceSelection() }
@@ -96,7 +96,7 @@ internal fun ReviewSourceDialog(pages: List<ReceiptPage>, resolve: (String) -> F
                     items(orderedPages, key = { it.id }) { page ->
                         EvidenceImage(page, resolve(page.storageKey), if (page.id == selection.pageId) selection.boxes else emptyList(), true, 420)
                     }
-                    items(bundleFiles.entries.toList(), key = { it.key }) { (_, path) -> ReviewFileImage(File(path)) }
+                    items(bundleFiles.entries.sortedBy { if (it.key in selection.attachmentIds) 0 else 1 }, key = { it.key }) { (_, path) -> ReviewFileImage(File(path)) }
                     if (pages.isEmpty() && bundleFiles.isEmpty()) item {
                         Text("연결된 원본 이미지가 없습니다. 원본이 필요한 작업은 원본을 첨부한 뒤 확정하세요.", Modifier.testTag("source_unavailable"))
                     }

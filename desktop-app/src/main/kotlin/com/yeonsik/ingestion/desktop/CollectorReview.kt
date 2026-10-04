@@ -24,6 +24,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
@@ -146,83 +147,83 @@ fun ReviewWorkspace(
                 developerInfoVisible = developerInfoVisible,
             )
             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            state.error?.let { ValidationMessage(it, CollectorStatusKind.ERROR) }
-            state.notice?.let { ValidationMessage(it, CollectorStatusKind.PROCESSING, recoveryHint = null) }
+                state.error?.let { ValidationMessage(it, CollectorStatusKind.ERROR) }
+                state.notice?.let { ValidationMessage(it, CollectorStatusKind.PROCESSING, recoveryHint = null) }
 
-            if (state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.FAILED) {
-                InlineRecoveryAction(
-                    title = "증거 보관을 완료해야 합니다",
-                    message = state.bundleMetadata.archiveError ?: "증거 보관에 실패했습니다.",
-                    buttonLabel = "보관 다시 시도",
-                    busy = busy,
-                    onAction = onRetryArchive,
-                )
-            }
-            if (state.bundleMetadata?.pendingRevision != null ||
-                state.bundleMetadata?.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.FAILED
-            ) {
-                InlineRecoveryAction(
-                    title = "수정본 보관을 완료해야 합니다",
-                    message = state.bundleMetadata.revisionArchiveError
-                        ?: "수정한 검수본이 아직 보관되지 않았습니다.",
-                    buttonLabel = "수정본 보관 다시 시도",
-                    busy = busy,
-                    onAction = onRetryRevision,
-                )
-            }
+                if (state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.FAILED) {
+                    InlineRecoveryAction(
+                        title = "증거 보관을 완료해야 합니다",
+                        message = state.bundleMetadata.archiveError ?: "증거 보관에 실패했습니다.",
+                        buttonLabel = "보관 다시 시도",
+                        busy = busy,
+                        onAction = onRetryArchive,
+                    )
+                }
+                if (state.bundleMetadata?.pendingRevision != null ||
+                    state.bundleMetadata?.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.FAILED
+                ) {
+                    InlineRecoveryAction(
+                        title = "수정본 보관을 완료해야 합니다",
+                        message = state.bundleMetadata.revisionArchiveError
+                            ?: "수정한 검수본이 아직 보관되지 않았습니다.",
+                        buttonLabel = "수정본 보관 다시 시도",
+                        busy = busy,
+                        onAction = onRetryRevision,
+                    )
+                }
 
-            if (state.bundleMetadata != null && !state.bundleMetadata.verificationEventRecorded && state.session != null &&
-                state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint) {
-                InlineRecoveryAction("검수 기록 저장 미완료", "검수 내용은 확정됐지만 기록 저장이 완료되지 않았습니다.",
-                    "검수 기록 다시 저장", busy, onVerify)
-            }
-            SourceSummary(state, model.rows)
-            if (state.reviewFieldErrors.isNotEmpty()) ValidationMessage(
-                "수정 필요 ${state.reviewFieldErrors.size}개 · 아래 편집 항목을 확인하세요", CollectorStatusKind.ERROR)
-            var showAllValues by rememberSaveable { mutableStateOf(false) }
-            CollectorButton(if (showAllValues) "전체 값 접기" else "전체 값 ${model.rows.size}개 보기", { showAllValues = !showAllValues }, emphasized = false)
-            if (showAllValues) {
-                ReceiptSection(model.rows)
-                NutritionSection(model.rows)
-                PurchaseAndGenericSections(model.rows)
-            }
-            EditableCanonicalSection(
-                envelope = envelope,
-                edits = state.reviewEdits,
-                fieldErrors = state.reviewFieldErrors,
-                busy = busy,
-                onEdit = onEdit,
-            )
-            DestinationSection(
-                state = state,
-                destinations = model.destinations,
-                selectedProjections = selectedProjections,
-                busy = busy,
-                onProjectionSelected = onProjectionSelected,
-            )
-            if (developerInfoVisible) {
-                DeveloperInfoPanel(
+                if (state.bundleMetadata != null && !state.bundleMetadata.verificationEventRecorded && state.session != null &&
+                    state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint) {
+                    InlineRecoveryAction("검수 기록 저장 미완료", "검수 내용은 확정됐지만 기록 저장이 완료되지 않았습니다.",
+                        "검수 기록 다시 저장", busy, onVerify)
+                }
+                SourceSummary(state, model.rows)
+                if (state.reviewFieldErrors.isNotEmpty()) ValidationMessage(
+                    "수정 필요 ${state.reviewFieldErrors.size}개 · 아래 편집 항목을 확인하세요", CollectorStatusKind.ERROR)
+                var showAllValues by rememberSaveable { mutableStateOf(false) }
+                CollectorButton(if (showAllValues) "전체 값 접기" else "전체 값 ${model.rows.size}개 보기", { showAllValues = !showAllValues }, emphasized = false)
+                if (showAllValues) {
+                    ReceiptSection(model.rows)
+                    NutritionSection(model.rows)
+                    PurchaseAndGenericSections(model.rows)
+                }
+                EditableCanonicalSection(
+                    envelope = envelope,
+                    edits = state.reviewEdits,
+                    fieldErrors = state.reviewFieldErrors,
+                    busy = busy,
+                    onEdit = onEdit,
+                )
+                DestinationSection(
                     state = state,
-                    onImportJson = onImportJson,
-                    onClose = { onDeveloperInfoVisibleChanged(false) },
+                    destinations = model.destinations,
+                    selectedProjections = selectedProjections,
+                    busy = busy,
+                    onProjectionSelected = onProjectionSelected,
                 )
-            }
+                if (developerInfoVisible) {
+                    DeveloperInfoPanel(
+                        state = state,
+                        onImportJson = onImportJson,
+                        onClose = { onDeveloperInfoVisibleChanged(false) },
+                    )
+                }
             }
             Column(Modifier.fillMaxWidth().heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
-            ConfirmAndSubmitSection(
-                state = state,
-                busy = busy,
-                canVerify = canVerify,
-                canSubmit = canSubmit,
-                verificationBasis = verificationBasis,
-                selectedProjections = selectedProjections,
-                submitConfirmationOpen = submitConfirmationOpen,
-                onVerificationBasisSelected = onVerificationBasisSelected,
-                onVerify = onVerify,
-                onOpenSubmitConfirmation = onOpenSubmitConfirmation,
-                onDismissSubmitConfirmation = onDismissSubmitConfirmation,
-                onConfirmSubmit = onConfirmSubmit,
-            )
+                ConfirmAndSubmitSection(
+                    state = state,
+                    busy = busy,
+                    canVerify = canVerify,
+                    canSubmit = canSubmit,
+                    verificationBasis = verificationBasis,
+                    selectedProjections = selectedProjections,
+                    submitConfirmationOpen = submitConfirmationOpen,
+                    onVerificationBasisSelected = onVerificationBasisSelected,
+                    onVerify = onVerify,
+                    onOpenSubmitConfirmation = onOpenSubmitConfirmation,
+                    onDismissSubmitConfirmation = onDismissSubmitConfirmation,
+                    onConfirmSubmit = onConfirmSubmit,
+                )
             }
         }
     }
@@ -633,6 +634,7 @@ fun AccessibleField(
     busy: Boolean,
     onApply: (String?) -> Unit,
 ) {
+    val sourceValue = LocalDesktopSourceValue.current
     var draft by rememberSaveable(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
     Column(
         modifier = Modifier.fillMaxWidth().semantics {
@@ -664,8 +666,8 @@ fun AccessibleField(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2), verticalAlignment = Alignment.Top) {
                 OutlinedTextField(
                     value = draft,
-                    onValueChange = { draft = it },
-                    modifier = Modifier.weight(1f).collectorFocusOutline(CollectorTokens.controlShape),
+                    onValueChange = { draft = it; sourceValue("${field.label} · 미적용 값: $it") },
+                    modifier = Modifier.weight(1f).collectorFocusOutline(CollectorTokens.controlShape).onFocusChanged { if (it.isFocused) sourceValue("${field.label} · 현재 편집값: $draft") },
                     enabled = !busy,
                     label = { Text("새 값") },
                     singleLine = field.type != CanonicalFieldType.DATETIME,

@@ -63,6 +63,8 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
@@ -1360,7 +1362,7 @@ private fun AppReviewTable(
         }
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("인식 정보 및 전송 계획 · ${model.schema}", style = MaterialTheme.typography.titleMedium)
+        Text("인식한 값 · 보낼 내용", style = MaterialTheme.typography.titleMedium)
         if (CanonicalFieldRegistry.fields(envelope).isNotEmpty()) {
             CanonicalTypedReviewEditor(
                 envelope = envelope,
@@ -1396,7 +1398,7 @@ private fun CanonicalTypedReviewEditor(
                 }
             }
             Text(
-                "허용된 typed field만 편집됩니다. source/evidence/식별자/전송 대상은 변경할 수 없습니다.",
+                "수정 가능한 값만 표시합니다. 원본과 식별 정보는 읽기 전용입니다.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -1421,7 +1423,8 @@ private fun CanonicalTypedReviewField(
     error: String?,
     onApply: (String?) -> Unit,
 ) {
-    var draft by remember(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
+    val sourceAction = LocalReviewSource.current
+    var draft by rememberSaveable(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
     val fieldTag = if (field.path == "receipt.merchant.name") {
         "canonical_review_merchant_name"
     } else {
@@ -1431,7 +1434,7 @@ private fun CanonicalTypedReviewField(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(field.label, style = MaterialTheme.typography.labelMedium)
             Text(
-                field.type.wireValue + if (modified) " · 수정됨" else "",
+                (if (field.nullable) "선택 항목" else "필수 항목") + if (modified) " · 수정됨" else "",
                 style = MaterialTheme.typography.labelSmall,
                 color = if (modified) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1461,8 +1464,9 @@ private fun CanonicalTypedReviewField(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedTextField(
                     value = draft,
-                    onValueChange = { draft = it },
-                    label = { Text(field.type.wireValue) },
+                    onValueChange = { draft = it; sourceAction(ReviewSourceSelection(field.label, it), false) },
+                    label = { Text("현재 값") },
+                    isError = error != null,
                     singleLine = field.type != CanonicalFieldType.DATETIME,
                     keyboardOptions = KeyboardOptions(
                         keyboardType = when (field.type) {
@@ -1471,7 +1475,7 @@ private fun CanonicalTypedReviewField(
                             else -> KeyboardType.Text
                         },
                     ),
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).onFocusChanged { if (it.isFocused) sourceAction(ReviewSourceSelection(field.label, draft), false) },
                 )
                 MaterialOutlinedButton(
                     onClick = { onApply(draft.takeIf(String::isNotBlank)) },
@@ -1656,19 +1660,20 @@ private fun ReceiptBenefitKind.canonicalDisplayName(): String = when (this) {
 private fun AppReceiptReviewTable(receipt: ReceiptV2, verified: Boolean) {
     val model = ReviewViewModel.fromReceipt(receipt, verified)
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("인식 정보 및 전송 계획 · ${model.schema}", style = MaterialTheme.typography.titleMedium)
+        Text("인식한 값 · 보낼 내용", style = MaterialTheme.typography.titleMedium)
         model.rows.forEach { row -> AppReviewTableRow(row) }
     }
 }
 
 @Composable
 private fun AppReviewTableRow(row: ReviewRow) {
-    var expanded by remember(row.id) { mutableStateOf(false) }
+    val sourceAction = LocalReviewSource.current
+    var expanded by rememberSaveable(row.id) { mutableStateOf(false) }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("${row.section} · ${row.item}", style = MaterialTheme.typography.labelMedium)
             Text(row.value, style = MaterialTheme.typography.bodyLarge)
-            row.confidence?.let { Text("confidence $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            row.confidence?.let { Text("인식 신뢰도 $it · 검수 여부와 별개", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             if (row.evidence.isNotEmpty()) {
                 Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -1685,6 +1690,8 @@ private fun AppReviewTableRow(row: ReviewRow) {
                     row.destinations.forEach { badge -> AppReviewDestinationBadge(badge) }
                 }
             }
+            TextButton(onClick = { sourceAction(ReviewSourceSelection(row.item, row.value,
+                attachmentIds = row.evidence.flatMap { it.sourceIds }), true) }) { Text("원본 대조") }
             if (row.details.isNotEmpty()) {
                 TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "상세 접기" else "상세 보기") }
             }
@@ -1744,7 +1751,7 @@ private fun MerchantCandidateReviewScreen(
         item {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Merchant candidate", style = MaterialTheme.typography.titleMedium)
+                    Text("가게 정보", style = MaterialTheme.typography.titleMedium)
                     Text("판매처 · " + candidate.name)
                     candidate.branchName?.takeIf(String::isNotBlank)?.let { Text("지점 · " + it) }
                     candidate.address?.takeIf(String::isNotBlank)?.let { Text("주소 · " + it) }
@@ -1879,7 +1886,7 @@ private fun ProductCandidateReviewScreen(
                     onClick = onOpenNutritionReview,
                     modifier = Modifier.fillMaxWidth().testTag("open_nutrition_review_from_product_candidate"),
                 ) {
-                    Text("ProductLabel nutrition 검수로 이동")
+                    Text("연결된 영양 정보 검수")
                 }
             }
         }
@@ -2658,13 +2665,13 @@ private fun CanonicalNutritionReviewEntry(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("관련 nutrition artifact 검수", fontWeight = FontWeight.SemiBold)
+            Text("연결된 영양 정보 검수", fontWeight = FontWeight.SemiBold)
             Text("receipt 검수와 분리된 확인입니다. 현재 $verifiedCount/${totalCount}개를 검수했습니다.")
             Button(
                 onClick = onOpen,
                 modifier = Modifier.fillMaxWidth().testTag("open_canonical_nutrition_review"),
             ) {
-                Text("nutrition 원본 검수 열기")
+                Text("영양 정보 원본 검수 열기")
             }
         }
     }
@@ -2782,7 +2789,7 @@ private fun ConsumptionReviewScreen(
                             onConsumedAtChanged(consumption.clientKey, it)
                         },
                         modifier = Modifier.fillMaxWidth().testTag("consumption_consumed_at_${consumption.clientKey}"),
-                        label = { Text("consumed_at") },
+                        label = { Text("섭취 시각") },
                         singleLine = true,
                     )
                     consumption.items.forEach { item ->
@@ -2818,7 +2825,7 @@ private fun ConsumptionReviewScreen(
                                     modifier = Modifier.weight(1f).testTag(
                                         "consumption_item_amount_${consumption.clientKey}_${item.nutritionClientKey}",
                                     ),
-                                    label = { Text("amount") },
+                                    label = { Text("섭취량") },
                                     singleLine = true,
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 )
@@ -2835,7 +2842,7 @@ private fun ConsumptionReviewScreen(
                                     modifier = Modifier.weight(1f).testTag(
                                         "consumption_item_unit_${consumption.clientKey}_${item.nutritionClientKey}",
                                     ),
-                                    label = { Text("unit") },
+                                    label = { Text("단위") },
                                     singleLine = true,
                                 )
                             }
@@ -2958,7 +2965,7 @@ private fun CanonicalRestaurantNutritionReviewScreen(
             }
         }
         if (artifacts.isEmpty()) {
-            item { Text("검수할 restaurant nutrition artifact가 없습니다.") }
+            item { Text("검수할 식당 영양 정보가 없습니다.") }
         }
     }
 }
@@ -5470,7 +5477,7 @@ private fun ReviewTextField(
             else -> null
         },
         singleLine = supporting == null,
-        modifier = Modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) sourceAction(sourceContext.copy(label = label, value = value), false) }.let { modifier ->
+        modifier = Modifier.fillMaxWidth().semantics { stateDescription = if (isError) "확인 필요" else if (value.isBlank()) "값 미확인" else "현재 값" }.onFocusChanged { if (it.isFocused) sourceAction(sourceContext.copy(label = label, value = value), false) }.let { modifier ->
             testTag?.let(modifier::testTag) ?: modifier
         },
     )
@@ -5557,7 +5564,7 @@ private fun ScreenHeader(title: String, subtitle: String, onBack: () -> Unit) {
             modifier = Modifier.heightIn(min = 48.dp),
         ) { Text("← 이전") }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = MaterialTheme.typography.headlineSmall)
+            Text(title, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
             Text(
                 subtitle,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -5569,7 +5576,7 @@ private fun ScreenHeader(title: String, subtitle: String, onBack: () -> Unit) {
 
 @Composable
 private fun SectionTitle(value: String) {
-    Text(value, style = MaterialTheme.typography.titleLarge)
+    Text(value, style = MaterialTheme.typography.titleLarge, modifier = Modifier.semantics { heading() })
 }
 
 @Composable
@@ -5593,7 +5600,7 @@ private fun Button(
         onClick = onClick,
         modifier = modifier.heightIn(min = 52.dp),
         enabled = enabled,
-        shape = CircleShape,
+        shape = MaterialTheme.shapes.small,
         colors = ButtonDefaults.buttonColors(
             containerColor = MaterialTheme.colorScheme.inverseSurface,
             contentColor = MaterialTheme.colorScheme.inverseOnSurface,
@@ -5616,7 +5623,7 @@ private fun OutlinedButton(
         onClick = onClick,
         modifier = modifier.heightIn(min = 48.dp),
         enabled = enabled,
-        shape = CircleShape,
+        shape = MaterialTheme.shapes.small,
         colors = ButtonDefaults.outlinedButtonColors(
             containerColor = MaterialTheme.colorScheme.surface,
             contentColor = MaterialTheme.colorScheme.onSurface,
@@ -5637,7 +5644,7 @@ private fun Card(
     modifier: Modifier = Modifier,
     shape: Shape = MaterialTheme.shapes.medium,
     colors: CardColors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    elevation: CardElevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    elevation: CardElevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     MaterialCard(
