@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -11,6 +12,7 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextReplacement
@@ -169,6 +171,7 @@ class ReceiptUiInstrumentedTest {
         composeRule.onNodeWithTag("api_settings_button").performClick()
         composeRule.onNodeWithTag("api_settings").assertIsDisplayed()
         composeRule.onNodeWithTag("gemini_api_key_input").assertIsDisplayed()
+        composeRule.onNodeWithTag("api_settings").performScrollToNode(hasTestTag("nutrition_supabase_url"))
         composeRule.onNodeWithTag("nutrition_supabase_url").assertIsDisplayed()
         composeRule.runOnIdle { assertTrue(opened) }
     }
@@ -391,6 +394,7 @@ class ReceiptUiInstrumentedTest {
         }
 
         composeRule.onNodeWithTag("merchant_name_field").performTextReplacement("수정상점")
+        composeRule.onNodeWithTag("field_review").performScrollToNode(hasTestTag("issued_local_time_field"))
         composeRule.onNodeWithTag("issued_local_time_field").performTextReplacement("18:07")
         composeRule.runOnIdle {
             assertEquals("수정상점", merchantEdit)
@@ -525,6 +529,7 @@ class ReceiptUiInstrumentedTest {
         composeRule.onNodeWithTag("gemini_api_key_input").performTextReplacement("test-api-key-with-more-than-twenty-chars")
         composeRule.onNodeWithTag("save_gemini_api_key_button").performClick()
         composeRule.onNodeWithTag("clear_gemini_api_key_button").performClick()
+        composeRule.onNodeWithTag("ai_correction_review").performScrollToNode(hasTestTag("request_ai_corrections_button"))
         composeRule.onNodeWithTag("request_ai_corrections_button").assertIsEnabled()
         composeRule.runOnIdle {
             assertEquals(0, requestClicks)
@@ -700,6 +705,21 @@ class ReceiptUiInstrumentedTest {
     }
 
     @Test
+    fun sourceOverlayReturnsToSameEditedReviewAndMissingSourceStaysHonest() {
+        var state by mutableStateOf(ReceiptAppUiState(screen = AppScreen.FIELD_REVIEW, receipt = receipt(false)))
+        composeRule.setContent {
+            ReceiptOcrTheme { ReceiptOcrContent(uiState = state,
+                onMerchantNameChanged = { name -> state = state.copy(receipt = state.receipt!!.copy(merchant = state.receipt!!.merchant.copy(name = name))) }) }
+        }
+        composeRule.onNodeWithTag("merchant_name_field").performTextReplacement("수정한 가게")
+        composeRule.onNodeWithTag("review_source_button").performClick()
+        composeRule.onNodeWithTag("source_unavailable").assertIsDisplayed()
+        composeRule.onNodeWithTag("source_return").performClick()
+        composeRule.onNodeWithTag("merchant_name_field").assertTextContains("수정한 가게")
+        composeRule.onNodeWithTag("field_review").assertExists()
+    }
+
+    @Test
     fun importPreviewShowsCanonicalSummaryAndExposesActions() {
         var started = false
         var attached = false
@@ -773,6 +793,7 @@ class ReceiptUiInstrumentedTest {
             ReceiptOcrTheme {
                 ReceiptOcrContent(
                     uiState = state,
+                    canonicalConsumptionArtifacts = state.canonicalConsumptionArtifacts,
                     onConsumptionConsumedAtChanged = { _, value -> consumedAt = value },
                     onConsumptionItemAmountChanged = { _, _, value -> amount = value },
                     onConsumptionItemUnitChanged = { _, _, value -> unit = value },
@@ -783,16 +804,17 @@ class ReceiptUiInstrumentedTest {
         }
 
         composeRule.onNodeWithTag("consumption_review").assertIsDisplayed()
-        composeRule.onNodeWithText("UNVERIFIED").assertIsDisplayed()
-        composeRule.onNodeWithText("unknown").assertIsDisplayed()
+        composeRule.onNodeWithTag("consumption_review").performScrollToNode(hasTestTag("consumption_artifact_meal-1"))
+        composeRule.onNodeWithText("UNVERIFIED").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("unknown").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("consumption_review").performScrollToNode(
             hasTestTag("consumption_item_amount_status_meal-1_product-1"),
         )
-        composeRule.onNodeWithTag("consumption_consumed_at_meal-1").performTextReplacement(
+        composeRule.onNodeWithTag("consumption_consumed_at_meal-1").performScrollTo().performTextReplacement(
             "2026-09-06T09:10:00+09:00",
         )
-        composeRule.onNodeWithTag("consumption_item_amount_meal-1_product-1").performTextReplacement("45")
-        composeRule.onNodeWithTag("consumption_item_unit_meal-1_product-1").performTextReplacement("g")
+        composeRule.onNodeWithTag("consumption_item_amount_meal-1_product-1").performScrollTo().performTextReplacement("45")
+        composeRule.onNodeWithTag("consumption_item_unit_meal-1_product-1").performScrollTo().performTextReplacement("g")
         composeRule.onNodeWithTag("consumption_item_amount_status_meal-1_product-1")
             .performTextReplacement("measured")
         composeRule.onNodeWithTag("confirm_consumption_review").performClick()
@@ -844,6 +866,9 @@ class ReceiptUiInstrumentedTest {
             ReceiptOcrTheme {
                 ReceiptOcrContent(
                     uiState = state,
+                    canonicalNutritionCount = state.canonicalNutritionCount,
+                    productCandidates = state.productCandidates,
+                    productCandidateVerifiedKeys = state.productCandidateVerifiedKeys,
                     onShowCanonicalNutritionReview = { nutritionReviewOpened += 1 },
                     onConfirmProductCandidates = {
                         confirmed += 1
@@ -855,16 +880,20 @@ class ReceiptUiInstrumentedTest {
         }
 
         composeRule.onNodeWithTag("product_candidate_review").assertIsDisplayed()
-        composeRule.onNodeWithText("Test Drink").assertIsDisplayed()
-        composeRule.onNodeWithText("브랜드 · Test Brand").assertIsDisplayed()
+        composeRule.onNodeWithTag("product_candidate_review").performScrollToNode(hasTestTag("product_candidate_product-1"))
+        composeRule.onNodeWithText("Test Drink").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("브랜드 · Test Brand").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("product_candidate_review").performScrollToNode(hasTestTag("confirm_product_candidates"))
         composeRule.onNodeWithTag("confirm_product_candidates").assertIsEnabled().performClick()
         composeRule.runOnIdle {
             assertEquals(1, confirmed)
         }
+        composeRule.onNodeWithTag("product_candidate_review").performScrollToNode(hasTestTag("submit_product_candidates"))
         composeRule.onNodeWithTag("submit_product_candidates").assertIsEnabled().performClick()
         composeRule.runOnIdle {
             assertEquals(1, submitted)
         }
+        composeRule.onNodeWithTag("product_candidate_review").performScrollToNode(hasTestTag("open_nutrition_review_from_product_candidate"))
         composeRule.onNodeWithTag("open_nutrition_review_from_product_candidate").performClick()
         composeRule.runOnIdle {
             assertEquals(1, nutritionReviewOpened)

@@ -57,6 +57,12 @@ import androidx.compose.material3.Button as MaterialButton
 import androidx.compose.material3.Card as MaterialCard
 import androidx.compose.material3.OutlinedButton as MaterialOutlinedButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
@@ -330,11 +336,20 @@ fun ReceiptOcrContent(
         )
         return
     }
+    var reviewSource by remember(uiState.currentDocumentId, canonicalJsonValidatorState.ingestionId) { mutableStateOf(ReviewSourceSelection()) }
+    var sourceOpen by rememberSaveable(uiState.currentDocumentId, canonicalJsonValidatorState.ingestionId) { mutableStateOf(false) }
+    val bundleFiles = if (uiState.screen == AppScreen.CANONICAL_JSON_VALIDATOR) canonicalJsonValidatorState.bundle?.evidencePaths.orEmpty() else emptyMap()
+    if (sourceOpen) ReviewSourceDialog(pages, resolvePageFile, bundleFiles, reviewSource, { sourceOpen = false })
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onBackground,
     ) { innerPadding ->
-        Column(Modifier.fillMaxSize().padding(innerPadding)) {
+        Column(Modifier.fillMaxSize().padding(innerPadding).imePadding()) {
+            if (uiState.screen in reviewWorkspaceScreens) ReviewWorkspaceBar(
+                uiState, reviewSource, pages.isNotEmpty() || bundleFiles.isNotEmpty(), { sourceOpen = true },
+                onShowFields, onShowItems, onShowReconciliation,
+                { onShowOnlyAttentionItemsChanged(true); onShowItems() },
+            )
             uiState.message?.let { message ->
                 MessageCard(message, onDismissMessage)
             }
@@ -403,6 +418,8 @@ fun ReceiptOcrContent(
                     onOpen = onShowProductCandidateReview,
                 )
             }
+            CompositionLocalProvider(LocalReviewSource provides { selection, open -> reviewSource = selection; if (open) sourceOpen = true }) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
             when (uiState.screen) {
                 AppScreen.SESSION_LIST -> SessionListScreen(
                     sessions = sessions,
@@ -779,6 +796,8 @@ fun ReceiptOcrContent(
                     onBack = onBack,
                 )
             }
+            }
+            }
         }
     }
 }
@@ -792,7 +811,7 @@ private fun ExternalSourceImageRequiredBanner(onAttach: () -> Unit) {
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("원본 이미지가 필요합니다.", fontWeight = FontWeight.SemiBold)
-            Text("External JSON 데이터는 원본 이미지를 첨부하고 확인한 뒤에만 확정·저장할 수 있습니다.")
+            Text("가져온 값은 원본 이미지를 첨부하고 확인한 뒤에만 확정·저장할 수 있습니다.")
             MaterialOutlinedButton(
                 onClick = onAttach,
                 modifier = Modifier.fillMaxWidth().testTag("attach_external_source_image_button"),
@@ -3352,7 +3371,7 @@ private fun FieldReviewScreen(
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item { ScreenHeader("영수증 필드 검수", "OCR 초안을 원본과 직접 비교하세요.", onBack) }
+        item { ScreenHeader("기본 정보", "OCR 초안을 원본과 직접 비교하세요.", onBack) }
         item { ReviewToolbar(progress, canUndo, canRedo, onUndo, onRedo) }
         pages.firstOrNull()?.let { page ->
             item { EvidenceImage(page, resolvePageFile(page.storageKey), emptyList(), zoomEnabled = true) }
@@ -3514,7 +3533,7 @@ private fun FieldReviewScreen(
                 }
             }
         }
-        item { Button(onClick = onNext, modifier = Modifier.fillMaxWidth().testTag("fields_next_button")) { Text("상품 행 검수") } }
+        item { Button(onClick = onNext, modifier = Modifier.fillMaxWidth().testTag("fields_next_button")) { Text("항목 확인") } }
     }
 }
 
@@ -3558,7 +3577,7 @@ fun ItemReviewScreen(
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        item { ScreenHeader("상품 행 검수", "할인·세금·수수료를 상품으로 바꾸지 마세요.", onBack) }
+        item { ScreenHeader("항목 확인", "할인·세금·수수료를 상품으로 바꾸지 마세요.", onBack) }
         item { ReviewToolbar(progress, canUndo, canRedo, onUndo, onRedo) }
         item {
             OutlinedButton(
@@ -3981,7 +4000,10 @@ private fun LineItemCard(
         ?.filter { line -> line.id in item.sourceLineReferences }
         .orEmpty()
     val page = highlightedLines.firstOrNull()?.pageId?.let { pageId -> pages.firstOrNull { it.id == pageId } }
-    val highlightBoxes = highlightedLines.mapNotNull { it.boundingBox }
+    val highlightBoxes = highlightedLines.filter { it.pageId == page?.id }.mapNotNull { it.boundingBox }
+    val sourceAction = LocalReviewSource.current
+    val sourceContext = ReviewSourceSelection(item.description.orEmpty(), item.netAmountMinor?.toString().orEmpty(), page?.id, highlightBoxes, highlightedLines.joinToString("\n") { it.text })
+    CompositionLocalProvider(LocalReviewContext provides sourceContext) {
     Card(
         modifier = Modifier.fillMaxWidth().testTag(
             if (item.confidence == ConfidenceLevel.LOW) "low_confidence_${item.id}" else "line_item_${item.id}",
@@ -4004,6 +4026,7 @@ private fun LineItemCard(
                 }
                 LineTypeMenu(item.type, onTypeChanged)
             }
+            TextButton(onClick = { sourceAction(sourceContext, true) }, modifier = Modifier.testTag("source_for_${item.id}")) { Text("현재 항목 원본 대조") }
             page?.let {
                 EvidenceImage(it, resolvePageFile(it.storageKey), highlightBoxes, zoomEnabled = true, height = 180)
             }
@@ -4078,6 +4101,7 @@ private fun LineItemCard(
             },
         )
     }
+    }
 }
 
 @Composable
@@ -4125,12 +4149,12 @@ private fun ReconciliationScreen(
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        item { ScreenHeader("합계 검증", "행 합계 보존식과 필수 필드를 확인합니다.", onBack) }
+        item { ScreenHeader("합계 검증", "항목 금액과 최종 결제금액이 맞는지 확인합니다.", onBack) }
         item { ReviewToolbar(progress, canUndo, canRedo, onUndo, onRedo) }
         item {
             Card {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("행 net 합계: ${reconciliation?.lineNetTotalMinor ?: "계산 불가"}")
+                    Text("항목 금액 합계: ${reconciliation?.lineNetTotalMinor ?: "계산 불가"}")
                     Text("영수증 최종 합계: ${receipt.totals.grandTotalAmountMinor ?: "누락"}")
                     Text(
                         "차이: ${reconciliation?.differenceMinor ?: "계산 불가"}",
@@ -4168,7 +4192,7 @@ private fun ReconciliationScreen(
                 )
             }
         } else {
-            item { Text("모든 user_verified 필수 조건을 통과했습니다.", color = ReceiptPositive) }
+            item { Text("필수 조건을 통과했습니다. 원본을 확인한 뒤 직접 확정하세요.", color = ReceiptPositive) }
         }
         item {
             ReviewTextField(
@@ -4186,7 +4210,7 @@ private fun ReconciliationScreen(
         }
         item {
             Button(onClick = onConfirmVerified, modifier = Modifier.fillMaxWidth().testTag("confirm_verified_button")) {
-                Text("검수 완료 · user_verified 확정")
+                Text("검수 확정")
             }
         }
     }
@@ -5301,7 +5325,7 @@ private fun Double.asPercent(): String = String.format(Locale.US, "%.1f%%", this
 private fun Double?.asPercentOrNa(): String = this?.asPercent() ?: "N/A (분모 없음)"
 
 @Composable
-private fun EvidenceImage(
+internal fun EvidenceImage(
     page: ReceiptPage,
     file: File,
     highlights: List<BoundingBox>,
@@ -5322,7 +5346,7 @@ private fun EvidenceImage(
     Card {
         Column {
             Box(
-                modifier = Modifier.fillMaxWidth().height(height.dp)
+                modifier = Modifier.fillMaxWidth().height(height.dp).clipToBounds()
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center,
             ) {
@@ -5385,7 +5409,7 @@ private fun EvidenceImage(
                 }
             }
             Text(
-                "페이지 ${page.pageIndex + 1} · ${page.width}×${page.height} · SHA-256 ${page.sha256.take(12)}… · r${page.revision}",
+                "원본 · 페이지 ${page.pageIndex + 1} · 두 손가락으로 확대",
                 modifier = Modifier.padding(12.dp),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -5393,7 +5417,7 @@ private fun EvidenceImage(
     }
 }
 
-private fun decodeSampledBitmap(file: File): android.graphics.Bitmap? {
+internal fun decodeSampledBitmap(file: File): android.graphics.Bitmap? {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeFile(file.absolutePath, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
@@ -5411,9 +5435,11 @@ private fun ReviewTextField(
     supporting: String? = null,
     testTag: String? = null,
 ) {
+    val sourceAction = LocalReviewSource.current
+    val sourceContext = LocalReviewContext.current
     OutlinedTextField(
         value = value,
-        onValueChange = onValueChange,
+        onValueChange = { next -> onValueChange(next); sourceAction(sourceContext.copy(label = label, value = next), false) },
         label = { Text(label) },
         isError = isError,
         supportingText = when {
@@ -5422,7 +5448,7 @@ private fun ReviewTextField(
             else -> null
         },
         singleLine = supporting == null,
-        modifier = Modifier.fillMaxWidth().let { modifier ->
+        modifier = Modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) sourceAction(sourceContext.copy(label = label, value = value), false) }.let { modifier ->
             testTag?.let(modifier::testTag) ?: modifier
         },
     )
@@ -5441,7 +5467,7 @@ private fun ReviewToolbar(
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (progress != null) {
                 Text(
-                    "행 ${progress.settledLineItemCount}/${progress.lineItemCount} 확인 · " +
+                    "자동 검사상 문제 없는 행 ${progress.settledLineItemCount}/${progress.lineItemCount} · " +
                         "차단 ${progress.blockingIssueCount}건 · 주의 ${progress.warningIssueCount}건",
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
