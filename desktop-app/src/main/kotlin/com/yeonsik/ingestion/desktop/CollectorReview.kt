@@ -41,6 +41,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner
 import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
@@ -163,13 +164,18 @@ fun ReviewWorkspace(
                 InlineRecoveryAction(
                     title = "수정본 보관을 완료해야 합니다",
                     message = state.bundleMetadata.revisionArchiveError
-                        ?: "수정한 canonical revision이 아직 보관되지 않았습니다.",
+                        ?: "수정한 검수본이 아직 보관되지 않았습니다.",
                     buttonLabel = "수정본 보관 다시 시도",
                     busy = busy,
                     onAction = onRetryRevision,
                 )
             }
 
+            if (state.bundleMetadata != null && !state.bundleMetadata.verificationEventRecorded && state.session != null &&
+                state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint) {
+                InlineRecoveryAction("검수 기록 저장 미완료", "검수 내용은 확정됐지만 기록 저장이 완료되지 않았습니다.",
+                    "검수 기록 다시 저장", busy, onVerify)
+            }
             SourceSummary(state, model.rows)
             if (state.reviewFieldErrors.isNotEmpty()) ValidationMessage(
                 "수정 필요 ${state.reviewFieldErrors.size}개 · 아래 편집 항목을 확인하세요", CollectorStatusKind.ERROR)
@@ -750,13 +756,14 @@ private fun DestinationSection(
     busy: Boolean,
     onProjectionSelected: (IngestionProjection) -> Unit,
 ) {
-    CollectorSection("전송 대상", "대상 이름과 상태를 확인하고 전송할 항목을 선택합니다.") {
+    CollectorSection("보낼 곳 · 보낼 내용", "대상 이름과 상태를 확인하고 전송할 항목을 선택합니다.") {
         if (destinations.isNotEmpty()) {
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
                 destinations.forEach { DestinationStatus(it) }
             }
         }
         val projections = state.session?.projections.orEmpty().filterNot { it.status == ProjectionStatus.DISABLED }
+        Text(deliveryProgressLabel(projections.map { it.status }), style = MaterialTheme.typography.bodyMedium)
         if (projections.isEmpty()) {
             Text("활성 전송 대상이 없습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         } else {
@@ -785,6 +792,8 @@ private fun DestinationSection(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.bodySmall,
                             )
+                            val dependencies = state.envelope?.let { CanonicalProjectionPlanner.plan(it).dependencies[projection.projection] }.orEmpty()
+                            if (dependencies.isNotEmpty()) Text("먼저 처리: ${dependencies.joinToString { DesktopUiLabels.projection(it) }}", style = MaterialTheme.typography.bodySmall)
                             projection.lastError?.let { ValidationMessage(it, CollectorStatusKind.ERROR, compact = true) }
                         }
                     }
@@ -824,7 +833,7 @@ private fun ConfirmAndSubmitSection(
                 }
             }
         } else {
-            Text("검수 기준: 원본 증거 기반 (번들)", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            Text("검수 기준: 원본 자료와 대조", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
             CollectorButton(
@@ -835,7 +844,7 @@ private fun ConfirmAndSubmitSection(
                 contentDescription = "검수 확정. 현재 수정과 증거를 다시 검증합니다.",
             )
             CollectorButton(
-                label = "전송",
+                label = if (state.session?.projections?.any { it.projection in selectedProjections && it.status == ProjectionStatus.FAILED } == true) "선택한 실패 항목 다시 보내기" else "선택한 곳에 보내기",
                 onClick = onOpenSubmitConfirmation,
                 enabled = canSubmit,
                 emphasized = false,
@@ -853,12 +862,18 @@ private fun ConfirmAndSubmitSection(
                 Column(Modifier.padding(CollectorTokens.space3), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
                     Text("전송 확인", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "검수된 canonical 자료를 ${selectedProjections.size}개 대상으로 전송합니다. 전송 후 대상 시스템의 상태가 변경될 수 있습니다.",
+                        "선택한 곳에 검수된 자료를 보냅니다. 필요한 선행 작업은 기존 처리 순서를 따르며, 이미 성공한 대상은 다시 보내지 않습니다.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
+                    selectedProjections.forEach { projection ->
+                        Text(DesktopUiLabels.projection(projection), style = MaterialTheme.typography.labelLarge)
+                        state.envelope?.let { CanonicalProjectionPlanner.plan(it).dependencies[projection] }?.takeIf { it.isNotEmpty() }?.let { dependencies ->
+                            Text("먼저 처리: ${dependencies.joinToString { DesktopUiLabels.projection(it) }}", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
                         CollectorButton("전송 취소", onDismissSubmitConfirmation, emphasized = false, modifier = Modifier.weight(1f))
-                        CollectorButton("전송 확인", onConfirmSubmit, enabled = !busy, modifier = Modifier.weight(1f))
+                        CollectorButton("전송 확인", onConfirmSubmit, enabled = canSubmit, modifier = Modifier.weight(1f))
                     }
                 }
             }
@@ -992,16 +1007,16 @@ private fun overallStatusKind(state: DesktopUiState): CollectorStatusKind = when
 }
 
 private fun overallStatusLabel(state: DesktopUiState, kind: CollectorStatusKind): String = when (kind) {
-    CollectorStatusKind.COMPLETE -> "완료"
+    CollectorStatusKind.COMPLETE -> "모든 활성 대상 전송 완료"
     CollectorStatusKind.ERROR -> "오류"
     CollectorStatusKind.PROCESSING -> "처리 중"
-    CollectorStatusKind.REVIEW -> if (state.session?.verifiedCanonicalFingerprint == state.session?.canonicalFingerprint) "전송 가능" else "검토 필요"
+    CollectorStatusKind.REVIEW -> if (state.session != null && state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint) "검수 확정 · 전송 조건 확인" else "검수 필요"
     CollectorStatusKind.NEUTRAL -> "대기"
 }
 
 private fun suggestedRecovery(message: String): String = when {
     message.contains("required", ignoreCase = true) || message.contains("증거", ignoreCase = true) ->
-        "Evidence inspector에서 필요한 원본을 첨부하고 다시 검수하세요."
+        "원본 패널에서 필요한 원본을 첨부하고 다시 검수하세요."
     message.contains("revision", ignoreCase = true) ->
         "수정본 보관을 다시 시도한 뒤 검수하세요."
     message.contains("unsupported", ignoreCase = true) || message.contains("유효하지", ignoreCase = true) ->

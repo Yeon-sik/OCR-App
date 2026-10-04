@@ -132,6 +132,7 @@ import com.pricetrace.receiptscanner.ingestion.ProductCandidate
 import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionConsumption
 import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
+import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.LocalEvidence
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
@@ -957,6 +958,7 @@ private fun CanonicalJsonValidatorScreen(
     onReviewUndo: () -> Unit,
     onReviewRedo: () -> Unit,
 ) {
+    var technicalOpen by rememberSaveable { mutableStateOf(false) }
     var reviewTab by remember { mutableStateOf(ReviewTab.STRUCTURED) }
     val plan = state.plan
     val eligible = plan?.eligible.orEmpty().sortedBy(IngestionProjection::wireValue)
@@ -973,8 +975,8 @@ private fun CanonicalJsonValidatorScreen(
     ) {
         item {
             ScreenHeader(
-                "올인원 JSON 검증기",
-                "동일한 canonical Core로 파싱·수정·확정하고 필요한 projection만 제출합니다.",
+                if (bundleActive) "검수 자료" else "고급 · JSON 검증기",
+                "원본과 값을 확인하고 검수를 확정한 뒤, 보낼 곳을 선택하세요.",
                 onBack,
             )
         }
@@ -988,12 +990,12 @@ private fun CanonicalJsonValidatorScreen(
         item {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Verification basis", style = MaterialTheme.typography.titleMedium)
+                    Text("검수 기준", style = MaterialTheme.typography.titleMedium)
                     Text(
                         if (state.verificationBasis == VerificationBasis.MANUAL_CANONICAL_REVIEW) {
-                            "MANUAL_CANONICAL_REVIEW · 원본 이미지 없이도 domain validation과 명시적 확인 후 확정할 수 있습니다."
+                            "원본 없이 직접 확인합니다. 필수 검증을 통과하고 검수를 확정해야 합니다."
                         } else {
-                            "SOURCE_EVIDENCE · 원본 attachment 또는 지원되는 text source evidence gate를 통과해야 확정할 수 있습니다."
+                            "연결된 원본 자료로 확인합니다. 필요한 원본과 검증 조건을 충족해야 확정할 수 있습니다."
                         },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1003,13 +1005,13 @@ private fun CanonicalJsonValidatorScreen(
                                 onClick = { onBasisChanged(VerificationBasis.MANUAL_CANONICAL_REVIEW) },
                                 enabled = !state.busy,
                                 modifier = Modifier.weight(1f),
-                            ) { Text("수동 canonical") }
+                            ) { Text("원본 없이 확인") }
                         }
                         MaterialOutlinedButton(
                             onClick = { onBasisChanged(VerificationBasis.SOURCE_EVIDENCE) },
                             enabled = !state.busy,
                             modifier = Modifier.weight(1f),
-                        ) { Text("원본 evidence") }
+                        ) { Text("원본과 대조") }
                     }
                 }
             }
@@ -1019,13 +1021,15 @@ private fun CanonicalJsonValidatorScreen(
             item {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Bundle / Evidence archive", style = MaterialTheme.typography.titleMedium)
-                        Text("Bundle · ${state.bundleValidationStatus?.name ?: bundle!!.validationStatus.name}")
+                        Text("자료 보관", style = MaterialTheme.typography.titleMedium)
+                        Text(archiveDisplay(state.bundleValidationStatus?.name ?: bundle!!.validationStatus.name))
                         if (bundle != null) {
-                            Text("Evidence archive · ${bundle.archiveStatus.name}")
+                            if (!bundle.verificationEventRecorded && state.session != null && state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint)
+                                Text("검수 기록 저장 미완료 · 검수 확정을 다시 시도하세요.", color = MaterialTheme.colorScheme.error)
+                            Text("원본 · ${archiveDisplay(bundle.archiveStatus.name)}")
                             bundle.archiveError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                             if (state.reviewEdits.isNotEmpty() || bundle.pendingRevision != null) {
-                                Text("Canonical revision archive · ${bundle.revisionArchiveStatus.name}")
+                                Text("수정본 · ${archiveDisplay(bundle.revisionArchiveStatus.name)}")
                                 bundle.revisionArchiveError?.let {
                                     Text(it, color = MaterialTheme.colorScheme.error)
                                 }
@@ -1036,7 +1040,7 @@ private fun CanonicalJsonValidatorScreen(
                                 onClick = onArchiveRetry,
                                 enabled = !state.busy,
                                 modifier = Modifier.fillMaxWidth().testTag("canonical_bundle_archive_retry"),
-                            ) { Text("Archive / Retry") }
+                            ) { Text("원본 보관 다시 시도") }
                         }
                         if (bundle?.pendingRevision != null ||
                             bundle?.revisionArchiveStatus == AndroidCanonicalRevisionArchiveStatus.FAILED
@@ -1045,14 +1049,15 @@ private fun CanonicalJsonValidatorScreen(
                                 onClick = onRevisionRetry,
                                 enabled = !state.busy,
                                 modifier = Modifier.fillMaxWidth().testTag("canonical_revision_archive_retry"),
-                            ) { Text("Revision / Retry") }
+                            ) { Text("수정본 보관 다시 시도") }
                         }
                     }
                 }
             }
         }
-        item { ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it }) }
-        if (reviewTab == ReviewTab.STRUCTURED) {
+        item { TextButton(onClick = { technicalOpen = !technicalOpen }, modifier = Modifier.testTag("canonical_advanced_details")) { Text(if (technicalOpen) "고급 정보 닫기" else "고급 정보") } }
+        if (technicalOpen || !bundleActive) item { ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it }) }
+        if (reviewTab == ReviewTab.STRUCTURED || bundleActive && !technicalOpen) {
             item {
                 AppReviewTable(
                     envelope = state.envelope,
@@ -1089,7 +1094,7 @@ private fun CanonicalJsonValidatorScreen(
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MaterialOutlinedButton(
+                if (!bundleActive) MaterialOutlinedButton(
                     onClick = onParse,
                     enabled = !state.busy && !bundleActive && state.rawJson.isNotBlank(),
                     modifier = Modifier.weight(1f).testTag("canonical_json_parse_button"),
@@ -1110,7 +1115,7 @@ private fun CanonicalJsonValidatorScreen(
         state.notice?.let { notice ->
             item { Text(notice, color = MaterialTheme.colorScheme.primary, modifier = Modifier.testTag("canonical_json_notice")) }
         }
-        if (state.envelope != null) {
+        if (technicalOpen && state.envelope != null) {
             item {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -1128,9 +1133,9 @@ private fun CanonicalJsonValidatorScreen(
             item {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("제출할 projection 선택", style = MaterialTheme.typography.titleMedium)
+                        Text("보낼 곳 · 보낼 내용", style = MaterialTheme.typography.titleMedium)
                         if (eligible.isEmpty()) {
-                            Text("현재 eligible projection이 없습니다.", color = MaterialTheme.colorScheme.error)
+                            Text("현재 보낼 수 있는 대상이 없습니다.", color = MaterialTheme.colorScheme.error)
                         } else {
                             eligible.forEach { projection ->
                                 Row(
@@ -1138,7 +1143,7 @@ private fun CanonicalJsonValidatorScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                 ) {
-                                    Text(projection.wireValue)
+                                    Text(ReceiptDeliveryLabels.projection(projection), Modifier.weight(1f))
                                     Checkbox(
                                         checked = projection in state.selectedProjections,
                                         onCheckedChange = { checked -> onProjectionSelected(projection, checked) },
@@ -1149,8 +1154,8 @@ private fun CanonicalJsonValidatorScreen(
                         }
                         if (disabled.isNotEmpty()) {
                             Text(
-                                "disabled · ${disabled.joinToString { projection ->
-                                    projection.wireValue + plan.disabledReasons[projection]
+                                "이 작업의 전송 대상 아님 · ${disabled.joinToString { projection ->
+                                    ReceiptDeliveryLabels.projection(projection) + plan.disabledReasons[projection]
                                         ?.let { reason -> " ($reason)" }.orEmpty()
                                 }}",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1158,6 +1163,20 @@ private fun CanonicalJsonValidatorScreen(
                             )
                         }
                     }
+                }
+            }
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    state.selectedProjections.forEach { projection ->
+                        plan.dependencies[projection]?.takeIf { it.isNotEmpty() }?.let { dependencies ->
+                            Text("${ReceiptDeliveryLabels.projection(projection)} · 먼저 처리: ${dependencies.joinToString { ReceiptDeliveryLabels.projection(it) }}")
+                        }
+                    }
+                    state.session?.projections?.filterNot { it.status == ProjectionStatus.DISABLED }?.forEach { result ->
+                        Text("${ReceiptDeliveryLabels.projection(result.projection)} · ${ReceiptDeliveryLabels.projectionStatus(result.status)}")
+                        result.lastError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    }
+                    Text("이미 전송한 대상은 유지됩니다. 실패한 대상을 선택해 다시 보낼 수 있습니다.", style = MaterialTheme.typography.bodySmall)
                 }
             }
             item {
@@ -1170,7 +1189,7 @@ private fun CanonicalJsonValidatorScreen(
                             (state.bundle == null || state.bundle.verificationEventRecorded) &&
                             revisionReady,
                         modifier = Modifier.weight(1f).testTag("canonical_json_submit_button"),
-                    ) { Text("선택 제출") }
+                    ) { Text("선택한 곳에 보내기") }
                     MaterialOutlinedButton(
                         onClick = onRetry,
                         enabled = !state.busy && state.session != null && state.selectedProjections.isNotEmpty() &&
@@ -1178,11 +1197,11 @@ private fun CanonicalJsonValidatorScreen(
                             (state.bundle == null || state.bundle.verificationEventRecorded) &&
                             revisionReady,
                         modifier = Modifier.weight(1f).testTag("canonical_json_retry_button"),
-                    ) { Text("재시도") }
+                    ) { Text("선택한 실패 항목 다시 보내기") }
                 }
             }
         }
-        if (state.canonicalJson.isNotBlank()) {
+        if (technicalOpen && state.canonicalJson.isNotBlank()) {
             item {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1213,7 +1232,7 @@ private fun CanonicalBundleBatchCard(
         modifier = Modifier.fillMaxWidth().testTag("canonical_bundle_batch"),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Bundle 일괄 가져오기", style = MaterialTheme.typography.titleMedium)
+            Text("검수 자료 가져오기", style = MaterialTheme.typography.titleMedium)
             Text(
                 "전체 ${summary.total} · 대기 ${summary.queued} · 검수 필요 ${summary.reviewRequired} · " +
                     "완료 ${summary.completed} · 실패 ${summary.failed} · 중복 ${summary.duplicate}",
@@ -2722,7 +2741,7 @@ private fun ConsumptionReviewScreen(
         item {
             ScreenHeader(
                 "섭취 정보 검수",
-                "외부 JSON의 consumption은 항상 UNVERIFIED로 시작합니다. 원본과 대조해 수정한 뒤 명시적으로 확정하세요.",
+                "가져온 섭취 정보는 검수 전 상태입니다. 원본과 대조하고 수정한 뒤 확정하세요.",
                 onBack,
             )
         }
@@ -3128,6 +3147,7 @@ private fun NutritionReviewScreen(
             )
         }
         item {
+            if (!isCanonicalReview) Text("보낼 곳 · Fitness\n보낼 내용 · 상품명과 검수한 영양성분. 이 버튼은 검수를 확정한 뒤 바로 전송합니다.", modifier = Modifier.testTag("nutrition_delivery_summary"))
             Button(
                 onClick = if (isCanonicalReview) onConfirmCanonicalReview else onConfirmAndPublish,
                 enabled = validationErrors.isEmpty() && (isCanonicalReview || signedInEmail != null) &&
@@ -3138,9 +3158,9 @@ private fun NutritionReviewScreen(
                 Text(
                     when {
                         isCanonicalReview && draft.status.wireValue == "user_verified" -> "검수 완료 · Fitness 저장은 다음 단계"
-                        isCanonicalReview -> "원본 대조 확정 · Fitness 저장 준비"
-                        draft.status.wireValue == "user_verified" -> "확정본 다시 저장"
-                        else -> "원본 대조 확정 후 DB 저장"
+                        isCanonicalReview -> "검수 확정"
+                        draft.status.wireValue == "user_verified" -> "검수 확정하고 Fitness에 보내기"
+                        else -> "검수 확정하고 Fitness에 보내기"
                     },
                 )
             }
@@ -4259,6 +4279,7 @@ fun JsonPreviewScreen(
     onSelectCashOsLedgerEntry: (String) -> Unit = {},
     onSubmitCashOsReceipt: () -> Unit = {},
 ) {
+    var technicalOpen by rememberSaveable { mutableStateOf(false) }
     var reviewTab by remember { mutableStateOf(ReviewTab.STRUCTURED) }
     val verified = receipt?.document?.source?.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
     val canonicalNutritionVerified = canonicalNutritionCount > 0 &&
@@ -4274,7 +4295,7 @@ fun JsonPreviewScreen(
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        item { ScreenHeader("검증 결과", "저장하거나 공유하기 전에 포함 정보를 확인하세요.", onBack) }
+        item { ScreenHeader("보내기", "저장하거나 공유하기 전에 포함 정보를 확인하세요.", onBack) }
         item {
             Surface(
                 modifier = Modifier.testTag("json_status"),
@@ -4293,7 +4314,8 @@ fun JsonPreviewScreen(
                 )
             }
         }
-        item {
+        item { TextButton(onClick = { technicalOpen = !technicalOpen }, modifier = Modifier.testTag("delivery_advanced_details")) { Text(if (technicalOpen) "고급 공유 정보 닫기" else "고급 공유 정보") } }
+        if (technicalOpen) item {
             Row(
                 modifier = Modifier.fillMaxWidth().toggleable(includeRawText) {
                     onIncludeRawTextChanged(it)
@@ -4311,10 +4333,10 @@ fun JsonPreviewScreen(
                 Switch(checked = includeRawText, onCheckedChange = null)
             }
         }
-        item { ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it }) }
+        if (technicalOpen) item { ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it }) }
         item {
-            if (reviewTab == ReviewTab.STRUCTURED && receipt != null) AppReceiptReviewTable(receipt, verified)
-            else {
+            if ((!technicalOpen || reviewTab == ReviewTab.STRUCTURED) && receipt != null) AppReceiptReviewTable(receipt, verified)
+            else if (technicalOpen) {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     SelectionContainer {
                         Text(
@@ -4354,12 +4376,12 @@ fun JsonPreviewScreen(
                     modifier = Modifier.fillMaxWidth().testTag("pricetrace_canonical_submit_button"),
                 ) {
                     if (isSubmittingCanonicalPriceTrace) BusyIndicator()
-                    Text("PriceTrace에 receipt.v2 + price observation 저장")
+                    Text("PriceTrace에 영수증과 가격 보내기")
                 }
                 Text(
                     when {
                         priceTraceSignedInEmail == null -> "PriceTrace 연결 설정에서 별도 로그인 후 canonical 제출할 수 있습니다."
-                        canonicalPriceTraceReceiptId != null -> "PriceTrace canonical receipt 완료 · $canonicalPriceTraceReceiptId"
+                        canonicalPriceTraceReceiptId != null -> "PriceTrace 전송 완료 · $canonicalPriceTraceReceiptId"
                         canonicalPriceTraceLastError != null -> "PriceTrace 재시도 필요 · $canonicalPriceTraceLastError"
                         else -> "검수된 전체 receipt.v2를 source images/raw text/payment reference 없이 제출합니다."
                     },
@@ -4379,7 +4401,7 @@ fun JsonPreviewScreen(
                     modifier = Modifier.fillMaxWidth().testTag("canonical_submit_all_ready_button"),
                 ) {
                     if (isSubmittingCanonicalAllReady) BusyIndicator()
-                    Text("준비된 canonical projection 모두 제출")
+                    Text("준비된 대상에 보내기")
                 }
                 Text(
                     "PriceTrace identity 확정 후 price observation, CashOS, Fitness를 의존성 순서로 제출합니다. 성공한 대상은 재전송하지 않습니다.",
@@ -4412,7 +4434,7 @@ fun JsonPreviewScreen(
                 }
                 Text(
                     if (canonicalConsumptionVerified) {
-                        "consumption 검수가 완료되었습니다."
+                        "섭취 정보 검수가 완료되었습니다."
                     } else {
                         "consumption 검수 ${canonicalConsumptionVerifiedCount}/${canonicalConsumptionArtifacts.size}개 완료 후 Fitness Meal을 제출할 수 있습니다."
                     },
@@ -4428,7 +4450,7 @@ fun JsonPreviewScreen(
                     enabled = !isExporting && !isSubmittingCanonicalNutrition && !isSubmittingCanonicalAllReady,
                     modifier = Modifier.fillMaxWidth().testTag("fitness_canonical_review_button"),
                 ) {
-                    Text("관련 nutrition 원본 검수 열기")
+                    Text("영양 정보 검수 열기")
                 }
                 Text(
                     if (canonicalNutritionVerifiedCount < canonicalNutritionCount) {
@@ -4451,14 +4473,14 @@ fun JsonPreviewScreen(
                     modifier = Modifier.fillMaxWidth().testTag("fitness_canonical_submit_button"),
                 ) {
                     if (isSubmittingCanonicalNutrition) BusyIndicator()
-                    Text("검수된 nutrition을 Fitness에 저장")
+                    Text("Fitness에 영양 정보 보내기")
                 }
             }
         }
         if (isCanonicalIngestion) {
             item {
                 Text(
-                    "CashOS v3가 원장·계정·카테고리를 서버에서 resolve합니다. 신규 OCR 흐름에서는 원장을 사전 선택하지 않습니다.",
+                    "CashOS가 거래에 맞는 원장·계정·카테고리를 확인합니다.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -4488,10 +4510,10 @@ fun JsonPreviewScreen(
             Text(
                 when {
                     cashOsSignedInEmail == null -> "CashOS 연결 설정에서 별도 로그인 후 제출할 수 있습니다."
-                    cashOsReceiptId != null && cashOsReceiptReplayed == true -> "CashOS replay 확인: $cashOsReceiptId"
-                    cashOsReceiptId != null -> "CashOS 원자 기록 완료: $cashOsReceiptId"
+                    cashOsReceiptId != null && cashOsReceiptReplayed == true -> "CashOS 기존 기록 확인: $cashOsReceiptId"
+                    cashOsReceiptId != null -> "CashOS 전송 완료: $cashOsReceiptId"
                     cashOsReceiptLastError != null -> "CashOS 재시도 필요: $cashOsReceiptLastError"
-                    else -> "CashOS에는 user-verified financial projection만 전송합니다."
+                    else -> "CashOS에는 검수가 확정된 지출 정보만 보냅니다."
                 },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,

@@ -83,3 +83,9 @@ object DesktopUiLabels {
 
     fun fileAvailability(readable: Boolean): String = if (readable) "읽을 수 있음" else "파일 없음"
 }
+
+/** Counts are intentionally per projection; one success never means every destination succeeded. */
+internal fun deliveryProgressLabel(statuses: List<ProjectionStatus>): String {
+    val active = statuses.filterNot { it == ProjectionStatus.DISABLED }
+    return "전송 완료 ${active.count { it == ProjectionStatus.UPLOADED }}/${active.size} · 실패 ${active.count { it == ProjectionStatus.FAILED }} · 확인 필요 ${active.count { it == ProjectionStatus.BLOCKED }}"
+}

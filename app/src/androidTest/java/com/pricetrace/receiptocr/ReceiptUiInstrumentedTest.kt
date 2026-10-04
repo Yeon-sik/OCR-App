@@ -224,6 +224,8 @@ class ReceiptUiInstrumentedTest {
             assertEquals("수정 상품", productName)
             assertEquals(0, published)
         }
+        composeRule.onNodeWithTag("confirm_publish_nutrition").assertTextContains("검수 확정하고 Fitness에 보내기")
+        composeRule.onNodeWithTag("nutrition_delivery_summary").assertTextContains("Fitness", substring = true)
         composeRule.onNodeWithTag("confirm_publish_nutrition").assertIsEnabled().performClick()
         composeRule.runOnIdle { assertEquals(1, published) }
     }

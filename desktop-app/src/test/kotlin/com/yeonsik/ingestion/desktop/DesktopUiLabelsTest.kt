@@ -9,6 +9,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class DesktopUiLabelsTest {
+    @Test fun partialDeliveryNeverClaimsAllComplete() {
+        assertEquals("전송 완료 1/3 · 실패 1 · 확인 필요 0", deliveryProgressLabel(listOf(
+            ProjectionStatus.UPLOADED, ProjectionStatus.FAILED, ProjectionStatus.PENDING, ProjectionStatus.DISABLED)))
+        assertEquals("전송 완료 0/1 · 실패 0 · 확인 필요 0", deliveryProgressLabel(listOf(ProjectionStatus.PENDING)))
+    }
+
     @Test
     fun contractEnumsUseKoreanDisplayLabels() {
         assertEquals("원본 자료를 보고 확인", DesktopUiLabels.verificationBasis(VerificationBasis.SOURCE_EVIDENCE))
