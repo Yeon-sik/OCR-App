@@ -163,11 +163,12 @@ class ReceiptDatabaseMigrationTest {
         )
         applyMigration(database, 11, ReceiptDatabase.MIGRATION_10_11)
         applyMigration(database, 12, ReceiptDatabase.MIGRATION_11_12)
+        applyMigration(database, 13, ReceiptDatabase.MIGRATION_12_13)
         val migrated = database
 
         migrated.query("PRAGMA user_version").use { cursor ->
             assertTrue(cursor.moveToFirst())
-            assertEquals(12, cursor.getInt(0))
+            assertEquals(13, cursor.getInt(0))
         }
 
         migrated.query(
@@ -223,7 +224,7 @@ class ReceiptDatabaseMigrationTest {
         migrated.query(
             SimpleSQLiteQuery(
                 "SELECT status, idempotency_key, attempt_count, last_error, " +
-                    "projection_revision_seq, projection_payload_fingerprint " +
+                    "projection_revision_seq, projection_payload_fingerprint, completion_contract_version, accepted_receipt_facts_fingerprint " +
                     "FROM ingestion_projections WHERE ingestion_id = ? AND projection = ?",
                 arrayOf("ingestion-migrate", "cashos_receipt"),
             ),
@@ -235,6 +236,8 @@ class ReceiptDatabaseMigrationTest {
             assertEquals("timeout", cursor.getString(3))
             assertEquals(1L, cursor.getLong(4))
             assertNull(cursor.getString(5))
+            assertEquals(0, cursor.getInt(6))
+            assertNull(cursor.getString(7))
         }
 
         migrated.close()

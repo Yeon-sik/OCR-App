@@ -153,7 +153,18 @@ class AndroidCanonicalJsonValidator(
                     if (result.startResult is IngestionStartResult.Duplicate) {
                         materializer.abort()
                         val restored = restoreBundleState(result.session.ingestionId)
-                            ?: previous.takeIf { bundleStateStore == null && it.ingestionId == result.session.ingestionId && it.bundle != null }
+                            ?: previous.takeIf {
+                                bundleStateStore == null && it.ingestionId == result.session.ingestionId && it.bundle != null
+                            }?.let { existing ->
+                                val envelope = existing.envelope ?: useCase.strictDecode(
+                                    existing.canonicalJson,
+                                    requireNotNull(existing.localDocumentId),
+                                    preservePersistedVerification = true,
+                                )
+                                useCase.prepareExistingSession(result.session.ingestionId, envelope)?.let { session ->
+                                    existing.copy(envelope = envelope, session = session)
+                                }
+                            }
                         return restored?.copy(
                             duplicateOfIngestionId = result.session.ingestionId,
                             notice = "Duplicate bundle fingerprint: 기존 immutable session을 복구했습니다.",
@@ -611,12 +622,12 @@ class AndroidCanonicalJsonValidator(
             require(path.path.startsWith(root.path + File.separator)) { "recovery evidence path escapes bundle root" }
             LocalEvidence(item.sourceFileId, item.type, path.canRead())
         }
-        val session = useCase.session(recovery.ingestionId) ?: return null
         val envelope = useCase.strictDecode(
             recovery.canonicalJson,
             recovery.localDocumentId,
             preservePersistedVerification = true,
         )
+        val session = useCase.prepareExistingSession(recovery.ingestionId, envelope, restoredSnapshot = true) ?: return null
         val plan = useCase.plan(envelope)
         val recoveredBundle = when {
             recovery.bundle.archiveStatus == AndroidEvidenceArchiveStatus.ARCHIVING -> recovery.bundle.copy(

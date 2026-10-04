@@ -17,7 +17,9 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.intOrNull
 import java.time.OffsetDateTime
+import java.util.UUID
 
 enum class IdentityResolutionStatus { RESOLVED, AMBIGUOUS, NOT_FOUND }
 
@@ -46,6 +48,10 @@ data class ProjectionRequest(
     val canonicalFingerprint: String? = null,
     /** Durable metadata from already-uploaded dependencies, never source authority input. */
     val dependencyMetadataJson: Map<IngestionProjection, String> = emptyMap(),
+    /** Existing server responses used only for exact recovery selectors. */
+    val previousMetadataJson: String? = null,
+    /** Read an existing owner-owned canonical import and resume publication without re-importing. */
+    val recoverCanonicalImport: Boolean = false,
 )
 
 sealed interface ProjectionSubmission {
@@ -70,6 +76,11 @@ sealed interface ProjectionSubmission {
 
 interface IngestionProjectionSubmitter {
     suspend fun submit(request: ProjectionRequest): ProjectionSubmission
+}
+
+/** Owner-authenticated read of an accepted PT request; never recreates receipt/menu identity. */
+interface OcrProjectionResponseReader {
+    suspend fun readAcceptedProjection(request: ProjectionRequest): ProjectionSubmission
 }
 
 data class OcrMerchantIdentityResolutionRequest(
@@ -190,6 +201,8 @@ class IngestionOrchestrator(
                     updatedAt = nowValue,
                     projectionRevisionSeq = 1,
                     projectionPayloadFingerprint = projectionPayloadFingerprint(projection, envelope),
+                    completionContractVersion = currentCompletionContractVersion(projection, envelope),
+                    acceptedReceiptFactsFingerprint = acceptedReceiptFactsFingerprint(projection, envelope),
                 )
             } + disabledProjections(envelope).map { projection ->
                 ProjectionState(projection = projection, status = ProjectionStatus.DISABLED, updatedAt = nowValue)
@@ -200,12 +213,239 @@ class IngestionOrchestrator(
         else IngestionStartResult.Failure(evidenceResult.blockingIssues)
     }
 
+    /** Reconcile older import-only checkpoints using owner reads, never a new PT ingestion. */
+    suspend fun prepareExistingSession(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+        restoredSnapshot: Boolean = false,
+    ): IngestionSession? {
+        var session = store.get(ingestionId) ?: return null
+        val fitness = session.projections.singleOrNull { it.projection == IngestionProjection.FITNESS_NUTRITION }
+        val legacyDiningOut = diningOutItems(envelope).isNotEmpty() && fitness?.completionContractVersion == 0 &&
+            fitness.status != ProjectionStatus.DISABLED &&
+            (fitness.status == ProjectionStatus.UPLOADED || fitness.metadataJson != null || fitness.remoteId != null)
+        val acceptedProjections = session.projections.filter { state ->
+            state.projection in setOf(IngestionProjection.PRICETRACE_RECEIPT, IngestionProjection.PRICETRACE_PRICE_OBSERVATION) &&
+                state.status != ProjectionStatus.DISABLED && state.metadataJson != null &&
+                ((legacyDiningOut && state.completionContractVersion == 0) || PriceTraceIdentityJson.hasPendingOcrResolution(state.metadataJson) ||
+                    state.lastError?.startsWith(CHECKPOINT_READ_FAILED) == true)
+        }
+        for (state in acceptedProjections) {
+            // Receipt ingestion can also complete its price projection. Refresh that single
+            // saved response once, then retain the same response for its completed sibling.
+            if (state.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION && envelope.receipt != null) continue
+            val reader = submitters[state.projection] as? OcrProjectionResponseReader
+            // Existing custom/test adapters that do not support reads retain their current
+            // resolution path; a legacy completion always requires the owner reader.
+            if (reader == null && !legacyDiningOut) continue
+            val result = if (reader == null) {
+                ProjectionSubmission.Failure("pricetrace_checkpoint_reader_not_configured", retryable = false)
+            } else {
+                reader.readAcceptedProjection(ProjectionRequest(
+                    ingestionId = ingestionId,
+                    projection = state.projection,
+                    canonicalPayload = YeonsikOcrEnvelopeCodec.encode(envelope),
+                    idempotencyKey = state.idempotencyKey.orEmpty(),
+                    envelope = envelope,
+                    localDocumentId = session.localDocumentId,
+                    revisionSeq = state.projectionRevisionSeq,
+                    canonicalFingerprint = session.canonicalFingerprint,
+                    previousMetadataJson = state.metadataJson,
+                ))
+            }
+            session = requireNotNull(store.get(ingestionId))
+            val refreshed = when (result) {
+                is ProjectionSubmission.Success -> state.copy(
+                    // A saved owner binding proves source acceptance even when the prior
+                    // transport failed after PT committed a resolution. Identity review
+                    // remains a separate gate; never re-ingest that accepted request.
+                    status = ProjectionStatus.UPLOADED,
+                    remoteId = state.remoteId ?: result.remoteId,
+                    metadataJson = result.metadataJson ?: state.metadataJson,
+                    lastError = null,
+                    completionContractVersion = DINING_OUT_COMPLETION_CONTRACT_VERSION,
+                    updatedAt = now(),
+                )
+                is ProjectionSubmission.Failure -> state.copy(
+                    lastError = "$CHECKPOINT_READ_FAILED${result.message}",
+                    updatedAt = now(),
+                )
+            }
+            val reviewRequired = result is ProjectionSubmission.Failure ||
+                (result as? ProjectionSubmission.Success)?.requiresReview == true ||
+                PriceTraceIdentityJson.hasPendingOcrResolution(refreshed.metadataJson) ||
+                (diningOutItems(envelope).isNotEmpty() && !diningOutIdentityComplete(
+                    session.copy(projections = session.projections.replace(refreshed)), envelope,
+                ))
+            session = session.copy(
+                reviewStatus = if (reviewRequired) IngestionReviewStatus.NEEDS_REVIEW else session.reviewStatus,
+                updatedAt = now(),
+                projections = session.projections.map { current ->
+                    when {
+                        current.projection == state.projection -> refreshed
+                        state.projection == IngestionProjection.PRICETRACE_RECEIPT &&
+                            current.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
+                            current.status != ProjectionStatus.DISABLED && envelope.receipt != null &&
+                            (current.status == ProjectionStatus.UPLOADED ||
+                                (result is ProjectionSubmission.Success && current.projection in result.alsoUploaded)) -> current.copy(
+                                status = if (result is ProjectionSubmission.Success && current.projection in result.alsoUploaded) {
+                                    ProjectionStatus.UPLOADED
+                                } else current.status,
+                                remoteId = current.remoteId ?: (result as? ProjectionSubmission.Success)?.remoteId,
+                                metadataJson = refreshed.metadataJson,
+                                lastError = refreshed.lastError,
+                                completionContractVersion = refreshed.completionContractVersion,
+                                updatedAt = refreshed.updatedAt,
+                            )
+                        else -> current
+                    }
+                },
+            )
+            store.save(session)
+        }
+        val currentFitness = session.projections.singleOrNull { it.projection == IngestionProjection.FITNESS_NUTRITION }
+        if (legacyDiningOut && currentFitness != null) {
+            val publicationComplete = diningOutPublicationComplete(session, envelope, currentFitness.metadataJson)
+            val requiresNewApproval = currentFitness.status == ProjectionStatus.UPLOADED && !publicationComplete
+            val normalized = currentFitness.copy(
+                status = if (requiresNewApproval) ProjectionStatus.PENDING else currentFitness.status,
+                lastError = if (requiresNewApproval) LEGACY_PUBLICATION_PENDING else currentFitness.lastError,
+                projectionPayloadFingerprint = if (restoredSnapshot || session.canonicalFingerprint == fingerprint(envelope)) {
+                    projectionPayloadFingerprint(currentFitness.copy(
+                        completionContractVersion = if (publicationComplete) DINING_OUT_COMPLETION_CONTRACT_VERSION else 0,
+                    ), envelope)
+                } else currentFitness.projectionPayloadFingerprint,
+                completionContractVersion = if (publicationComplete) DINING_OUT_COMPLETION_CONTRACT_VERSION else 0,
+                updatedAt = now(),
+            )
+            val nutritionKeys = envelope.nutrition.map { IngestionArtifactKeys.nutrition(it.clientKey) }.toSet()
+            session = session.copy(
+                reviewStatus = if (requiresNewApproval) IngestionReviewStatus.NEEDS_REVIEW else session.reviewStatus,
+                verifiedCanonicalFingerprint = if (requiresNewApproval) null else session.verifiedCanonicalFingerprint,
+                verifiedAt = if (requiresNewApproval) null else session.verifiedAt,
+                verifiedArtifactFingerprints = if (requiresNewApproval) {
+                    session.verifiedArtifactFingerprints - nutritionKeys
+                } else session.verifiedArtifactFingerprints,
+                projections = session.projections.replace(normalized),
+                updatedAt = now(),
+            )
+            store.save(session)
+        }
+        if (restoredSnapshot || (envelope.receipt == null && session.canonicalFingerprint == fingerprint(envelope))) {
+            // A durable snapshot (or a matching standalone canonical fingerprint) proves
+            // this baseline belongs to the saved source. Only durable restores normalize
+            // codec differences in accepted PT/CashOS request payload fingerprints.
+            session = session.copy(projections = session.projections.map { state ->
+                val normalized = if (restoredSnapshot && legacyDiningOut && state.status == ProjectionStatus.UPLOADED && state.projection in setOf(
+                        IngestionProjection.PRICETRACE_RECEIPT,
+                        IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+                        IngestionProjection.CASHOS_RECEIPT,
+                    )
+                ) {
+                    state.copy(projectionPayloadFingerprint = projectionPayloadFingerprint(state.projection, envelope))
+                } else state
+                if (normalized.status == ProjectionStatus.UPLOADED && normalized.acceptedReceiptFactsFingerprint == null) {
+                    normalized.copy(acceptedReceiptFactsFingerprint = acceptedReceiptFactsFingerprint(normalized.projection, envelope))
+                } else normalized
+            })
+            store.save(session)
+        }
+        return session
+    }
+
+    private fun diningOutItems(envelope: YeonsikOcrEnvelope): List<IngestionNutrition> = envelope.nutrition.filter {
+        it is IngestionNutrition.RestaurantEstimate || it is IngestionNutrition.RestaurantMenuEstimate
+    }
+
+    private fun diningOutIdentities(
+        session: IngestionSession,
+        envelope: YeonsikOcrEnvelope,
+    ): List<PriceTraceRestaurantMenuIdentity?> {
+        val receiptMetadata = session.projections.singleOrNull {
+            it.projection == IngestionProjection.PRICETRACE_RECEIPT
+        }?.metadataJson
+        val receiptIdentity = PriceTraceIdentityJson.tryDecode(receiptMetadata)
+        val standalone = session.projections.singleOrNull {
+            it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION
+        }?.metadataJson?.let { runCatching { Json.parseToJsonElement(it) as? JsonObject }.getOrNull() }
+        return diningOutItems(envelope).map { item ->
+            when (item) {
+                is IngestionNutrition.RestaurantEstimate -> item.lineId?.let { sourceLineId ->
+                    receiptIdentity?.let { PriceTraceIdentityJson.exactRestaurantMenuForSourceLine(it, sourceLineId) }
+                }
+                is IngestionNutrition.RestaurantMenuEstimate -> if (envelope.receipt != null) {
+                    item.lineId?.let { sourceLineId ->
+                        receiptIdentity?.let { PriceTraceIdentityJson.exactRestaurantMenuForSourceLine(it, sourceLineId) }
+                    }
+                } else {
+                    val row = (standalone?.get("observations") as? JsonArray)?.mapNotNull { it as? JsonObject }
+                        ?.filter { it.stringValue("priceObservationClientKey", "price_observation_client_key") == item.priceObservationClientKey }
+                        ?.singleOrNull()
+                    (row?.get("response") as? JsonObject)?.let(PriceTraceIdentityJson::exactRestaurantMenuFromStandaloneResponse)
+                }
+                else -> null
+            }
+        }
+    }
+
+    private fun diningOutIdentityComplete(session: IngestionSession, envelope: YeonsikOcrEnvelope): Boolean =
+        diningOutIdentities(session, envelope).all { it != null }
+
+    private fun diningOutPublicationComplete(
+        session: IngestionSession,
+        envelope: YeonsikOcrEnvelope,
+        metadataJson: String?,
+    ): Boolean {
+        val identities = diningOutIdentities(session, envelope)
+        if (identities.isEmpty() || identities.any { it == null }) return false
+        fun flatten(element: kotlinx.serialization.json.JsonElement): List<JsonObject> = when (element) {
+            is JsonArray -> element.flatMap(::flatten)
+            is JsonObject -> listOf(element)
+            else -> emptyList()
+        }
+        val rows = metadataJson?.let { runCatching { flatten(Json.parseToJsonElement(it)) }.getOrNull() }.orEmpty()
+        fun identityKey(identity: PriceTraceRestaurantMenuIdentity): List<String> = listOf(
+            identity.restaurantId, identity.restaurantLocationId, identity.restaurantMenuId, identity.catalogProductId,
+        )
+        val publications = rows.filter { row ->
+            row.stringValue("visibility") == "public" &&
+                (row["publication_revision"] as? JsonPrimitive)?.intOrNull?.let { it > 0 } == true &&
+                (row["nutrition_link_revision"] as? JsonPrimitive)?.intOrNull?.let { it > 0 } == true &&
+                (row["food_revision"] as? JsonPrimitive)?.intOrNull?.let { it > 0 } == true &&
+                row.stringValue("published_at")?.let { runCatching { OffsetDateTime.parse(it) }.isSuccess } == true &&
+                row.stringValue("nutrition_food_id")?.isNotBlank() == true &&
+                listOf("canonical_import_id", "nutrition_link_id", "restaurant_id", "restaurant_location_id", "restaurant_menu_id", "catalog_product_id")
+                    .all { key -> row.stringValue(key)?.let { runCatching { UUID.fromString(it) }.isSuccess } == true }
+        }.distinctBy { it.stringValue("nutrition_food_id") }
+        val expected = identities.filterNotNull().map(::identityKey).groupingBy { it }.eachCount()
+        val actual = publications.map { row ->
+            listOf("restaurant_id", "restaurant_location_id", "restaurant_menu_id", "catalog_product_id").map { requireNotNull(row.stringValue(it)) }
+        }.groupingBy { it }.eachCount()
+        return expected.all { (identity, count) -> (actual[identity] ?: 0) >= count }
+    }
+
+    private fun currentCompletionContractVersion(projection: IngestionProjection, envelope: YeonsikOcrEnvelope): Int =
+        if (projection == IngestionProjection.FITNESS_NUTRITION && diningOutItems(envelope).isNotEmpty()) {
+            DINING_OUT_COMPLETION_CONTRACT_VERSION
+        } else 0
+
+    private companion object {
+        const val DINING_OUT_COMPLETION_CONTRACT_VERSION = 1
+        const val LEGACY_PUBLICATION_PENDING = "fitness_legacy_publication_requires_review"
+        const val CHECKPOINT_READ_FAILED = "pricetrace_checkpoint_read_failed:"
+        const val ACCEPTED_RECEIPT_SOURCE_REVISION_CONFLICT = "accepted_receipt_source_revision_conflict"
+        const val ACCEPTED_STANDALONE_SOURCE_REVISION_CONFLICT = "accepted_standalone_price_source_revision_conflict"
+    }
+
     /** Regenerates the persisted canonical revision and invalidates only affected artifact projections. */
     suspend fun reviseCanonicalDraft(
         ingestionId: String,
         envelope: YeonsikOcrEnvelope,
     ): IngestionStartResult {
         val current = store.get(ingestionId) ?: return IngestionStartResult.Failure(listOf("ingestion_not_found"))
+        acceptedSourceRevisionConflict(current, envelope)?.let { conflict ->
+            return IngestionStartResult.Failure(listOf(conflict))
+        }
         val nextFingerprint = fingerprint(envelope)
         if (current.canonicalFingerprint == nextFingerprint) return IngestionStartResult.Success(current)
         val nowValue = now()
@@ -248,7 +488,7 @@ class IngestionOrchestrator(
                             updatedAt = nowValue,
                         )
                     else -> {
-                        val nextProjectionFingerprint = projectionPayloadFingerprint(state.projection, envelope)
+                        val nextProjectionFingerprint = projectionPayloadFingerprint(state, envelope)
                         val payloadChanged = state.projectionPayloadFingerprint?.let {
                             it != nextProjectionFingerprint
                         } ?: (state.idempotencyKey != null &&
@@ -518,12 +758,18 @@ class IngestionOrchestrator(
         projection: IngestionProjection,
         envelope: YeonsikOcrEnvelope,
     ): ProjectionState {
-        var session = requireNotNull(store.get(ingestionId)) { "ingestion_not_found" }
+        var session = requireNotNull(prepareExistingSession(ingestionId, envelope)) { "ingestion_not_found" }
         val current = requireNotNull(session.projections.firstOrNull { it.projection == projection }) { "projection_not_configured" }
-        if (current.status == ProjectionStatus.DISABLED || current.status == ProjectionStatus.UPLOADED) return current
+        if (current.status == ProjectionStatus.DISABLED) return current
         if (fingerprint(envelope) != session.canonicalFingerprint) {
             val invalidated = invalidateVerification(session, envelope, "canonical_fingerprint_mismatch")
             return invalidated.projections.first { it.projection == projection }
+        }
+        if (current.status == ProjectionStatus.UPLOADED) return current
+        if (projection == IngestionProjection.FITNESS_NUTRITION &&
+            session.projections.any { it.lastError?.startsWith(CHECKPOINT_READ_FAILED) == true }
+        ) {
+            return persistBlocked(session, projection, current, "pricetrace_checkpoint_refresh_required")
         }
         if (projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
             envelope.priceObservations.isNotEmpty() &&
@@ -576,7 +822,7 @@ class IngestionOrchestrator(
         }
         val submitter = submitters[projection]
             ?: return persistBlocked(session, projection, current, "projection_not_configured")
-        val payloadFingerprint = projectionPayloadFingerprint(projection, envelope)
+        val payloadFingerprint = projectionPayloadFingerprint(current, envelope)
         if (current.projectionPayloadFingerprint != null &&
             current.projectionPayloadFingerprint != payloadFingerprint
         ) {
@@ -615,6 +861,10 @@ class IngestionOrchestrator(
             dependencyMetadataJson = session.projections
                 .filter { it.status == ProjectionStatus.UPLOADED && it.metadataJson != null }
                 .associate { it.projection to it.metadataJson!! },
+            previousMetadataJson = current.metadataJson,
+            recoverCanonicalImport = projection == IngestionProjection.FITNESS_NUTRITION &&
+                diningOutItems(envelope).isNotEmpty() && current.completionContractVersion == 0 &&
+                (current.metadataJson != null || current.remoteId != null),
         )
         return when (val result = submitter.submit(request)) {
             is ProjectionSubmission.Success -> persistSuccess(session, projection, attempted, key, result, envelope)
@@ -639,9 +889,15 @@ class IngestionOrchestrator(
         ingestionId: String,
         envelope: YeonsikOcrEnvelope,
     ): ProjectionSubmission? {
-        var session = store.get(ingestionId) ?: return ProjectionSubmission.Failure(
+        var session = prepareExistingSession(ingestionId, envelope) ?: return ProjectionSubmission.Failure(
             "ingestion_not_found", retryable = false,
         )
+        if (session.projections.any { it.lastError?.startsWith(CHECKPOINT_READ_FAILED) == true }) {
+            return ProjectionSubmission.Failure("pricetrace_checkpoint_refresh_required", retryable = true)
+        }
+        acceptedSourceRevisionConflict(session, envelope)?.let { conflict ->
+            return ProjectionSubmission.Failure(conflict, retryable = false, requiresReview = true)
+        }
         var lastSuccess: ProjectionSubmission.Success? = null
 
         val receiptState = session.projections.singleOrNull { it.projection == IngestionProjection.PRICETRACE_RECEIPT }
@@ -950,7 +1206,7 @@ class IngestionOrchestrator(
         ingestionId: String,
         envelope: YeonsikOcrEnvelope,
     ): List<ProjectionState> {
-        val initial = requireNotNull(store.get(ingestionId)) { "ingestion_not_found" }
+        val initial = requireNotNull(prepareExistingSession(ingestionId, envelope)) { "ingestion_not_found" }
         val ordered = initial.projections
             .map(ProjectionState::projection)
             .sortedWith(compareBy({ projectionDependencyRank(it) }, { it.wireValue }))
@@ -971,6 +1227,7 @@ class IngestionOrchestrator(
         envelope: YeonsikOcrEnvelope,
         selectedProjections: Set<IngestionProjection>,
     ): List<ProjectionState> {
+        prepareExistingSession(ingestionId, envelope)
         val plan = CanonicalProjectionPlanner.plan(envelope)
         val selected = selectedProjections.intersect(plan.eligible)
         val closure = buildSet {
@@ -1059,6 +1316,69 @@ class IngestionOrchestrator(
     private fun fingerprint(envelope: YeonsikOcrEnvelope): String =
         StableIds.sha256("ingestion|${YeonsikOcrEnvelopeCodec.canonicalize(envelope)}")
 
+    /** Identity resolution RPCs can revise merchant/menu facts, not accepted receipt/standalone prices. */
+    private fun acceptedReceiptFactsFingerprint(
+        projection: IngestionProjection,
+        envelope: YeonsikOcrEnvelope,
+    ): String? {
+        if (projection !in setOf(IngestionProjection.PRICETRACE_RECEIPT, IngestionProjection.PRICETRACE_PRICE_OBSERVATION)) return null
+        if (projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION && envelope.receipt == null &&
+            envelope.priceObservations.isNotEmpty()
+        ) {
+            // The existing nullable runtime guard also covers accepted standalone requests.
+            // PT's identity RPC can correct merchant/menu names, not accepted price/source facts.
+            val root = Json.parseToJsonElement(YeonsikOcrEnvelopeCodec.encode(envelope, canonicalIds = true)).jsonObject
+            val rows = root.getValue("price_observations").jsonArray.map { element ->
+                val observation = element.jsonObject
+                if (observation["kind"]?.jsonPrimitive?.contentOrNull == StandalonePriceObservationKind.RESTAURANT_PURCHASE.wireValue) {
+                    JsonObject(observation.filterKeys { it != "item_name" })
+                } else observation
+            }.sortedBy { it["client_key"]?.jsonPrimitive?.contentOrNull }
+            return StableIds.sha256("accepted-standalone-price-facts|${JsonArray(rows)}")
+        }
+        val receipt = envelope.receipt ?: return null
+        val root = Json.parseToJsonElement(ReceiptV2Json.encodeCanonical(receipt)).jsonObject
+        val document = root.getValue("document").jsonObject
+        val source = document.getValue("source").jsonObject
+        val facts = JsonObject(root.toMutableMap().apply {
+            remove("merchant")
+            put("document", JsonObject(document.toMutableMap().apply {
+                put("source", JsonObject(source.filterKeys { it != "transcription_status" }))
+            }))
+            put("line_items", JsonArray(root.getValue("line_items").jsonArray.map { element ->
+                val line = element.jsonObject
+                JsonObject(line.toMutableMap().apply {
+                    remove("description")
+                    remove("confidence")
+                    // Only the source menu code is accepted by the PT menu resolution RPC.
+                    // Other identifiers (e.g. barcodes), line IDs and source refs remain immutable.
+                    put("identifiers", JsonArray(line.getValue("identifiers").jsonArray.filter { identifier ->
+                        identifier.jsonObject["scheme"]?.jsonPrimitive?.contentOrNull != "merchant_sku"
+                    }))
+                })
+            }))
+        })
+        return StableIds.sha256("accepted-receipt-facts|$facts")
+    }
+
+    private fun acceptedSourceRevisionConflict(
+        session: IngestionSession,
+        envelope: YeonsikOcrEnvelope,
+    ): String? {
+        val conflicting = session.projections.firstOrNull { state ->
+            state.status != ProjectionStatus.DISABLED &&
+                (state.projection == IngestionProjection.PRICETRACE_RECEIPT ||
+                    (state.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
+                        (envelope.receipt != null || envelope.priceObservations.isNotEmpty() || state.acceptedReceiptFactsFingerprint != null))) &&
+                PriceTraceIdentityJson.hasPendingOcrResolution(state.metadataJson) &&
+                (state.acceptedReceiptFactsFingerprint == null ||
+                    state.acceptedReceiptFactsFingerprint != acceptedReceiptFactsFingerprint(state.projection, envelope))
+        } ?: return null
+        return if (conflicting.projection == IngestionProjection.PRICETRACE_RECEIPT || envelope.receipt != null) {
+            ACCEPTED_RECEIPT_SOURCE_REVISION_CONFLICT
+        } else ACCEPTED_STANDALONE_SOURCE_REVISION_CONFLICT
+    }
+
     private fun artifactFingerprints(envelope: YeonsikOcrEnvelope): Map<String, String> = buildMap {
         envelope.receipt?.let { receipt ->
             put(
@@ -1131,6 +1451,7 @@ class IngestionOrchestrator(
     private fun nutritionPayloadDependency(
         envelope: YeonsikOcrEnvelope,
         item: IngestionNutrition,
+        includeRestaurantSourceName: Boolean = true,
     ): String = when (item) {
         is IngestionNutrition.ProductLabel -> {
             val product = item.productClientKey?.let { productClientKey ->
@@ -1158,7 +1479,7 @@ class IngestionOrchestrator(
                 schemaVersion = envelope.schemaVersion,
             )
             "restaurant_estimate|client_key=" + item.clientKey +
-                "|restaurant_name=" + (fitnessRestaurantName(envelope) ?: "<null>") +
+                "|restaurant_name=" + ((if (includeRestaurantSourceName) fitnessRestaurantName(envelope) else null) ?: "<null>") +
                 "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
         }
 
@@ -1176,7 +1497,7 @@ class IngestionOrchestrator(
                         it.clientKey == item.priceObservationClientKey
                     }?.let(::standalonePriceObservationDependency) ?: "<missing>"
                 ) +
-                "|restaurant_name=" + (fitnessRestaurantName(envelope) ?: "<null>") +
+                "|restaurant_name=" + ((if (includeRestaurantSourceName) fitnessRestaurantName(envelope) else null) ?: "<null>") +
                 "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
         }
         is IngestionNutrition.MealComponentEstimate -> {
@@ -1202,6 +1523,21 @@ class IngestionOrchestrator(
 
     private fun fitnessRestaurantName(envelope: YeonsikOcrEnvelope): String? =
         envelope.receipt?.merchant?.name ?: envelope.merchantCandidate?.name
+
+    /**
+     * A legacy private import is immutable. Merchant identity corrections belong to the
+     * publication step, while menu, Nutrition and evidence edits require a new import.
+     * The owner audit read still verifies the original import facts before publication.
+     */
+    private fun projectionPayloadFingerprint(state: ProjectionState, envelope: YeonsikOcrEnvelope): String {
+        val legacyDiningOutRecovery = state.projection == IngestionProjection.FITNESS_NUTRITION &&
+            state.completionContractVersion == 0 && diningOutItems(envelope).isNotEmpty() &&
+            (state.metadataJson != null || state.remoteId != null)
+        if (!legacyDiningOutRecovery) return projectionPayloadFingerprint(state.projection, envelope)
+        return StableIds.sha256("fitness-legacy-publication-source|" + envelope.nutrition.joinToString("|") { item ->
+            nutritionPayloadDependency(envelope, item, includeRestaurantSourceName = false)
+        })
+    }
 
     private fun projectionPayloadFingerprint(
         projection: IngestionProjection,
@@ -1547,6 +1883,8 @@ class IngestionOrchestrator(
         attemptCount = 0,
         lastError = null,
         metadataJson = null,
+        acceptedReceiptFactsFingerprint = null,
+        completionContractVersion = DINING_OUT_COMPLETION_CONTRACT_VERSION,
         updatedAt = updatedAt,
     )
 
@@ -1578,7 +1916,7 @@ class IngestionOrchestrator(
                 when {
                     state.status == ProjectionStatus.DISABLED -> state
                     else -> {
-                        val nextProjectionFingerprint = projectionPayloadFingerprint(state.projection, envelope)
+                        val nextProjectionFingerprint = projectionPayloadFingerprint(state, envelope)
                         val payloadChanged = state.projectionPayloadFingerprint?.let {
                             it != nextProjectionFingerprint
                         } ?: (state.idempotencyKey != null &&
@@ -1626,7 +1964,13 @@ class IngestionOrchestrator(
                 )
                 state.projection == projection || state.projection in result.alsoUploaded -> {
                     val targetPayloadFingerprint = if (state.projection == projection) {
-                        previous.projectionPayloadFingerprint
+                        if (projection == IngestionProjection.FITNESS_NUTRITION &&
+                            previous.completionContractVersion == 0 && diningOutItems(envelope).isNotEmpty()
+                        ) {
+                            // Completion switches out of the legacy recovery fingerprint.
+                            // Keep the accepted key, but store the current contract's payload hash.
+                            projectionPayloadFingerprint(projection, envelope)
+                        } else previous.projectionPayloadFingerprint
                     } else {
                         projectionPayloadFingerprint(state.projection, envelope)
                     }
@@ -1642,6 +1986,9 @@ class IngestionOrchestrator(
                         projectionRevisionSeq = targetRevisionSeq,
                         projectionPayloadFingerprint = targetPayloadFingerprint,
                         metadataJson = result.metadataJson,
+                        acceptedReceiptFactsFingerprint = state.acceptedReceiptFactsFingerprint
+                            ?: acceptedReceiptFactsFingerprint(state.projection, envelope),
+                        completionContractVersion = currentCompletionContractVersion(state.projection, envelope),
                         lastError = null,
                         updatedAt = nowValue,
                     )

@@ -139,6 +139,13 @@ class CanonicalIngestionUseCase(
 
     suspend fun session(ingestionId: String): IngestionSession? = store.get(ingestionId)
 
+    /** Shared restore hook: refresh authority responses and reopen legacy import-only completion. */
+    suspend fun prepareExistingSession(
+        ingestionId: String,
+        envelope: YeonsikOcrEnvelope,
+        restoredSnapshot: Boolean = false,
+    ): IngestionSession? = orchestrator.prepareExistingSession(ingestionId, envelope, restoredSnapshot)
+
     /** Promotes only after explicit review; producer review/user_verified fields never reach here. */
     suspend fun confirm(
         ingestionId: String,
@@ -149,6 +156,7 @@ class CanonicalIngestionUseCase(
         requireArchivedEvidence: Boolean = false,
         evidenceArchiveComplete: Boolean = false,
     ): CanonicalConfirmationResult {
+        prepareExistingSession(ingestionId, envelope)
         if (requireArchivedEvidence && verificationBasis == VerificationBasis.SOURCE_EVIDENCE && !evidenceArchiveComplete) {
             return CanonicalConfirmationResult(
                 IngestionStartResult.Failure(listOf("evidence_archive_required")),
@@ -276,12 +284,20 @@ class CanonicalIngestionUseCase(
         envelope: YeonsikOcrEnvelope,
         selectedProjections: Set<IngestionProjection>,
     ): List<ProjectionState> {
-        when (val resolution = resolvePendingMerchantIdentityAndResume(ingestionId, envelope)) {
-            is ProjectionSubmission.Failure -> return store.get(ingestionId)?.projections.orEmpty()
-            is ProjectionSubmission.Success -> if (resolution.requiresReview) {
-                return store.get(ingestionId)?.projections.orEmpty()
+        val needsDiningOutResolution = selectedProjections.any { it in setOf(
+            IngestionProjection.PRICETRACE_RECEIPT,
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+            IngestionProjection.FITNESS_NUTRITION,
+            IngestionProjection.FITNESS_MEAL,
+        ) }
+        if (needsDiningOutResolution) {
+            when (val resolution = resolvePendingMerchantIdentityAndResume(ingestionId, envelope)) {
+                is ProjectionSubmission.Failure -> return store.get(ingestionId)?.projections.orEmpty()
+                is ProjectionSubmission.Success -> if (resolution.requiresReview) {
+                    return store.get(ingestionId)?.projections.orEmpty()
+                }
+                null -> Unit
             }
-            null -> Unit
         }
         return orchestrator.submitSelectedProjections(ingestionId, envelope, selectedProjections)
     }

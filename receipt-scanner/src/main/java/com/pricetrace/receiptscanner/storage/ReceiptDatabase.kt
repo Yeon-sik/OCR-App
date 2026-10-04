@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [ScanSessionEntity::class, ReceiptPageEntity::class, ReviewEditEntity::class, PriceObservationQueueEntity::class, IngestionSessionEntity::class, IngestionProjectionEntity::class, IngestionAttachmentEntity::class],
-    version = 12,
+    version = 13,
     exportSchema = false,
 )
 internal abstract class ReceiptDatabase : RoomDatabase() {
@@ -142,6 +142,13 @@ internal abstract class ReceiptDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_ingestion_sessions_bundle_fingerprint` ON `ingestion_sessions` (`bundle_fingerprint`)")
             }
         }
+        /** Existing projection successes require Core reconciliation before using the current completion contract. */
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE ingestion_projections ADD COLUMN completion_contract_version INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE ingestion_projections ADD COLUMN accepted_receipt_facts_fingerprint TEXT")
+            }
+        }
         val MIGRATION_7_8 = object : Migration(7, 8) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("UPDATE ingestion_projections SET status = 'pending' WHERE status IN ('ready', 'user_verified')")
@@ -153,7 +160,7 @@ internal abstract class ReceiptDatabase : RoomDatabase() {
                 context.applicationContext,
                 ReceiptDatabase::class.java,
                 "receipt-scanner.db",
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
                 .build().also { database -> instance = database }
         }
     }

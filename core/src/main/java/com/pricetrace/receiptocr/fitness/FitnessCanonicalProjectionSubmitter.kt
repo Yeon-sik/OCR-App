@@ -14,7 +14,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -52,9 +54,14 @@ class FitnessCanonicalProjectionSubmitter(
                     item.draft.sourceType == NutritionContract.EXTERNAL_REFERENCE_SOURCE_TYPE
             }
 
-        val responses = mutableListOf<String>()
+        val responses = mutableListOf<String>().apply {
+            // Legacy-key recovery still needs the previous server-issued import selector
+            // when an owner audit lookup or a later publication fails temporarily.
+            if (request.recoverCanonicalImport) request.previousMetadataJson?.let(::add)
+        }
         var lastFoodId: String? = null
         var reviewReason: String? = null
+        val recoveryCache = RecoveryAuditCache()
         return try {
             for (item in envelope.nutrition) {
                 val itemKey = StableIds.sha256("${request.idempotencyKey}|nutrition|${item.clientKey}")
@@ -144,6 +151,33 @@ class FitnessCanonicalProjectionSubmitter(
                         )
                     }
                 }
+                var publicationKeySeed = itemKey
+                val recoveredImport = if (request.recoverCanonicalImport && identityRequiredForPublication) {
+                    if (publicationIdentity == null) {
+                        reviewReason = reviewReason ?: "restaurant_menu_identity_requires_ocr_review:${item.clientKey}"
+                        continue
+                    }
+                    when (val recovered = recoverImportedNutrition(request, item.clientKey, payload, recoveryCache, responses)) {
+                        is ImportRecovery.Failure -> return recovered.result
+                        is ImportRecovery.Success -> {
+                            publicationKeySeed = recovered.audit.idempotencyKey
+                            NutritionCanonicalImportOutcome.Success(
+                                CanonicalNutritionImportResponse(
+                                    canonicalImportId = recovered.audit.canonicalImportId,
+                                    idempotentReplay = true,
+                                    nutritionFoodId = recovered.audit.nutritionFoodId,
+                                    inputContract = recovered.audit.inputContract,
+                                    projectionSourceType = recovered.audit.projectionSourceType,
+                                    projectionImportId = null,
+                                    catalogProductId = null,
+                                    estimationEvidenceId = null,
+                                    visibility = "private",
+                                ),
+                                rawResponse = recovered.rawResponse,
+                            )
+                        }
+                    }
+                } else null
                 when (item) {
                     is IngestionNutrition.MealComponentEstimate -> when (val result = gateway.importMealComponentEstimate(payload)) {
                         is NutritionMealComponentImportOutcome.Success -> {
@@ -154,19 +188,19 @@ class FitnessCanonicalProjectionSubmitter(
                             return failure(result.message ?: result.reason.name, result.reason.isRetryable(), responses)
                         }
                     }
-                    else -> when (val result = if (useV3Contract) {
+                    else -> when (val result = recoveredImport ?: if (useV3Contract) {
                         gateway.importCanonicalV3(payload)
                     } else {
                         gateway.importCanonical(payload)
                     }) {
                         is NutritionCanonicalImportOutcome.Success -> {
-                            responses += result.rawResponse
+                            if (recoveredImport == null) responses += result.rawResponse
                             lastFoodId = result.response.nutritionFoodId
                             if (identityRequiredForPublication && publicationIdentity == null) {
                                 reviewReason = reviewReason ?: "restaurant_menu_identity_requires_ocr_review:${item.clientKey}"
                             } else if (publicationIdentity != null) {
                                 val publication = NutritionDiningOutPublicationPayload(
-                                    idempotencyKey = StableIds.sha256("$itemKey|publication"),
+                                    idempotencyKey = StableIds.sha256("$publicationKeySeed|publication"),
                                     canonicalImportId = result.response.canonicalImportId,
                                     nutritionFoodId = result.response.nutritionFoodId,
                                     restaurantId = publicationIdentity.restaurantId,
@@ -214,6 +248,140 @@ class FitnessCanonicalProjectionSubmitter(
         }
     }
 
+    private class RecoveryAuditCache(var rows: List<NutritionCanonicalImportAudit>? = null)
+
+    private sealed interface ImportRecovery {
+        data class Success(val audit: NutritionCanonicalImportAudit, val rawResponse: String) : ImportRecovery
+        data class Failure(val result: ProjectionSubmission.Failure) : ImportRecovery
+    }
+
+    private suspend fun recoverImportedNutrition(
+        request: ProjectionRequest,
+        clientKey: String,
+        expected: CanonicalNutritionImportPayload,
+        cache: RecoveryAuditCache,
+        responses: MutableList<String>,
+    ): ImportRecovery {
+        val direct = gateway.findCanonicalImports(expected.idempotencyKey)
+        if (direct is NutritionCanonicalAuditOutcome.Failure) return ImportRecovery.Failure(auditFailure(direct, responses))
+        direct as NutritionCanonicalAuditOutcome.Success
+        responses += direct.rawResponse
+        val candidates = if (direct.rows.isNotEmpty()) {
+            if (direct.rows.size != 1 || direct.rows.single().idempotencyKey != expected.idempotencyKey) {
+                return ImportRecovery.Failure(recoveryReviewFailure("canonical_import_recovery_key_ambiguous:$clientKey", responses))
+            }
+            direct.rows
+        } else {
+            if (cache.rows == null) {
+                val ids = cachedCanonicalImportIds(request.previousMetadataJson)
+                if (ids.isEmpty()) return ImportRecovery.Failure(recoveryReviewFailure(
+                    "canonical_import_recovery_missing:$clientKey; 기존 import 확인이 필요합니다.", responses,
+                ))
+                when (val lookup = gateway.readCanonicalImportsByIds(ids)) {
+                    is NutritionCanonicalAuditOutcome.Failure -> return ImportRecovery.Failure(auditFailure(lookup, responses))
+                    is NutritionCanonicalAuditOutcome.Success -> {
+                        if (lookup.rows.any { it.canonicalImportId !in ids }) {
+                            return ImportRecovery.Failure(recoveryReviewFailure("canonical_import_recovery_unrequested_id", responses))
+                        }
+                        cache.rows = lookup.rows
+                        responses += lookup.rawResponse
+                    }
+                }
+            }
+            requireNotNull(cache.rows).filter {
+                auditSourceMatches(it.sourceDocumentRef, requireNotNull(request.localDocumentId), clientKey)
+            }
+        }
+        if (candidates.size != 1) return ImportRecovery.Failure(recoveryReviewFailure(
+            "canonical_import_recovery_missing_or_ambiguous:$clientKey; 기존 import 확인이 필요합니다.", responses,
+        ))
+        val audit = candidates.single()
+        if (!auditSourceMatches(audit.sourceDocumentRef, requireNotNull(request.localDocumentId), clientKey)) {
+            return ImportRecovery.Failure(recoveryReviewFailure("canonical_import_recovery_source_mismatch:$clientKey", responses))
+        }
+        if (!audit.matchesCurrentDiningOutFacts(expected)) return ImportRecovery.Failure(recoveryReviewFailure(
+            "canonical_import_recovery_facts_changed:$clientKey; 기존 영양값과 수정본이 달라 자동 공개할 수 없습니다.", responses,
+        ))
+        return ImportRecovery.Success(audit, Json.encodeToString(JsonObject.serializer(), audit.serverRow))
+    }
+
+    private fun cachedCanonicalImportIds(raw: String?): Set<String> {
+        val root = raw?.let { runCatching { json.parseToJsonElement(it) }.getOrNull() } ?: return emptySet()
+        val ids = mutableSetOf<String>()
+        fun visit(value: JsonElement) {
+            when (value) {
+                is JsonArray -> value.forEach(::visit)
+                is JsonObject -> {
+                    (value["canonical_import_id"] as? JsonPrimitive)?.contentOrNull
+                        ?.takeIf(NutritionCanonicalAuditJson::isUuid)?.let(ids::add)
+                    if (value.keys.containsAll(setOf("input_contract", "source_document_ref", "nutrition_food_id", "idempotency_key"))) {
+                        (value["id"] as? JsonPrimitive)?.contentOrNull?.takeIf(NutritionCanonicalAuditJson::isUuid)?.let(ids::add)
+                    }
+                    value.values.forEach(::visit)
+                }
+                else -> Unit
+            }
+        }
+        visit(root)
+        return ids.takeIf { it.size <= 100 }.orEmpty()
+    }
+
+    private fun auditSourceMatches(sourceRef: String, localDocumentId: String, clientKey: String): Boolean {
+        // The legacy sourceRef factory replaces unsupported characters and truncates segments.
+        // Its output cannot prove the original doc/client key when that transformation is lossy.
+        val lossless = Regex("[A-Za-z0-9_.-]{1,120}")
+        if (!lossless.matches(localDocumentId) || !lossless.matches(clientKey)) return false
+        val match = Regex("^ocr-app://ingestion/([^/]+)/revision/([1-9][0-9]*)/nutrition/([^/]+)$")
+            .matchEntire(sourceRef) ?: return false
+        return match.groupValues[1] == localDocumentId && match.groupValues[3] == clientKey &&
+            match.groupValues[2].toLongOrNull()?.let { it > 0 } == true
+    }
+
+    private fun NutritionCanonicalImportAudit.matchesCurrentDiningOutFacts(expected: CanonicalNutritionImportPayload): Boolean {
+        if (inputContract != FOOD_ESTIMATE_V1 || !userVerified || projectionSourceType != "food_image_estimate") return false
+        val expectedRpc = json.parseToJsonElement(expected.toRpcJson()).jsonObject
+        fun equal(key: String): Boolean = NutritionCanonicalAuditJson.sameFacts(requestPayload[key], expectedRpc["p_$key"])
+        if (!NutritionCanonicalAuditJson.sameFacts(requestPayload["idempotency_key"], JsonPrimitive(idempotencyKey)) ||
+            !equal("input_contract") || !equal("user_verified")) return false
+        if ((requestPayload["source_document_ref"] as? JsonPrimitive)?.contentOrNull != sourceDocumentRef) return false
+        val facts = listOf("food_name", "category", "basis_amount", "basis_unit", "required_nutrients", "optional_nutrients", "estimation_evidence")
+        if (facts.any { !equal(it) }) return false
+        if (!NutritionCanonicalAuditJson.sameFacts(requiredNutrients, requestPayload["required_nutrients"]) ||
+            !NutritionCanonicalAuditJson.sameFacts(optionalNutrients, requestPayload["optional_nutrients"]) ||
+            !NutritionCanonicalAuditJson.sameFacts(nutrientProvenance, requestPayload["nutrient_provenance"]) ||
+            !NutritionCanonicalAuditJson.sameFacts(provenance, requestPayload["provenance"])) return false
+        val currentProvenance = expectedRpc["p_nutrient_provenance"] as? JsonObject ?: return false
+        val normalizedExpected = JsonObject(currentProvenance.mapValues { (_, element) ->
+            val nutrient = element as? JsonObject ?: return false
+            JsonObject(nutrient.toMutableMap().apply {
+                val refs = nutrient["evidence_refs"] as? JsonArray ?: return false
+                put("evidence_refs", JsonArray(refs.map { ref ->
+                    if ((ref as? JsonPrimitive)?.contentOrNull == "${expected.sourceDocumentRef}/photo") {
+                        JsonPrimitive("$sourceDocumentRef/photo")
+                    } else ref
+                }))
+            })
+        })
+        if (!NutritionCanonicalAuditJson.sameFacts(nutrientProvenance, normalizedExpected)) return false
+        val identitySourceKeys = setOf("restaurant_name", "branch_name")
+        return NutritionCanonicalAuditJson.sameFacts(
+            JsonObject(provenance.filterKeys { it !in identitySourceKeys }),
+            JsonObject(expected.provenance.filterKeys { it !in identitySourceKeys }),
+        )
+    }
+
+    private fun recoveryReviewFailure(message: String, responses: List<String>) = ProjectionSubmission.Failure(
+        message, retryable = false, requiresReview = true, metadataJson = responseMetadata(responses),
+    )
+
+    private fun auditFailure(result: NutritionCanonicalAuditOutcome.Failure, responses: List<String>): ProjectionSubmission.Failure =
+        ProjectionSubmission.Failure(
+            message = "canonical_import_recovery_read_failed:${result.message ?: result.reason.name}",
+            retryable = result.reason.isRetryable(),
+            requiresReview = !result.reason.isRetryable(),
+            metadataJson = responseMetadata(responses),
+        )
+
     /** Resolve the exact per-observation server response by its local request correlation key. */
     private fun standaloneIdentityFor(
         request: ProjectionRequest,
@@ -240,10 +408,23 @@ class FitnessCanonicalProjectionSubmitter(
             metadataJson = responseMetadata(responses),
         )
 
-    private fun responseMetadata(responses: List<String>): String? = responses.takeIf { it.isNotEmpty() }?.let { rawResponses ->
-        json.encodeToString(JsonArray.serializer(), buildJsonArray {
-            rawResponses.forEach { add(Json.parseToJsonElement(it)) }
-        })
+    private fun responseMetadata(responses: List<String>): String? {
+        val serverResponses = linkedSetOf<JsonObject>()
+        fun collect(element: JsonElement) {
+            when (element) {
+                is JsonArray -> element.forEach(::collect)
+                is JsonObject -> serverResponses += element
+                else -> Unit
+            }
+        }
+        responses.forEach { raw ->
+            runCatching { Json.parseToJsonElement(raw) }.getOrNull()?.let(::collect)
+        }
+        // Flatten replayed arrays and deduplicate identical immutable responses so repeated
+        // failures preserve selectors without nesting/growing the checkpoint on every retry.
+        return serverResponses.takeIf { it.isNotEmpty() }?.let {
+            json.encodeToString(JsonArray.serializer(), JsonArray(it.toList()))
+        }
     }
 
     private fun NutritionGatewayFailure.isRetryable(): Boolean = when (this) {

@@ -660,6 +660,15 @@ class DesktopIngestionController(
         try {
             val currentState = _state.value
             val currentSession = currentState.session ?: error("검수하려면 JSON을 먼저 가져오세요.")
+            if (currentSession.projections.any {
+                com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson.hasPendingOcrResolution(it.metadataJson)
+            }) {
+                val authenticationErrors = bundle.ensureAuthenticated(
+                    setOf(IngestionProjection.PRICETRACE_RECEIPT, IngestionProjection.FITNESS_NUTRITION),
+                    currentEnvelope(),
+                )
+                require(authenticationErrors.isEmpty()) { authenticationErrors.joinToString(" ") }
+            }
             currentState.bundleMetadata?.let { metadata ->
                 require(metadata.pendingRevision == null &&
                     (currentState.reviewEdits.isEmpty() ||
@@ -834,14 +843,16 @@ class DesktopIngestionController(
         val envelope = result.envelope
         val evidence = currentState.evidence
 
-        if (result.startResult is IngestionStartResult.Duplicate && currentState.session == null) {
+        if (result.startResult is IngestionStartResult.Duplicate) {
             val existing = store.loadRecord(result.session.ingestionId)
             if (existing != null && existing.canonicalJson.isNotBlank()) {
                 loadRecord(existing, "중복 지문을 확인해 기존 로컬 세션을 불러왔습니다.")
             } else {
                 val canonicalJson = YeonsikOcrEnvelopeCodec.encode(envelope)
-                persistRecord(result.session, rawJson, canonicalJson, evidence)
-                publish(result.session, envelope, rawJson, canonicalJson, evidence, "중복 지문을 확인했습니다.", null)
+                val session = useCase.prepareExistingSession(result.session.ingestionId, envelope)
+                    ?: error("중복 수집 세션을 복구하지 못했습니다.")
+                persistRecord(session, rawJson, canonicalJson, evidence)
+                publish(session, envelope, rawJson, canonicalJson, evidence, "중복 지문을 확인했습니다.", null)
             }
             return
         }
@@ -870,15 +881,32 @@ class DesktopIngestionController(
         }
     } ?: error("파싱된 정본 자료가 없습니다.")
 
-    private fun loadRecord(record: DesktopSessionRecord, notice: String) {
+    private suspend fun loadRecord(record: DesktopSessionRecord, notice: String) {
         require(record.canonicalJson.isNotBlank()) { "저장된 세션에 정본 JSON이 없습니다." }
         val envelope = YeonsikOcrEnvelopeCodec.decode(
             value = record.canonicalJson,
             localDocumentId = record.session.localDocumentId,
             preservePersistedVerification = true,
         )
+        val recoveryNeeded = record.session.projections.any {
+            (it.projection == IngestionProjection.FITNESS_NUTRITION && it.completionContractVersion == 0 &&
+                it.metadataJson != null && envelope.nutrition.any { item ->
+                    item is com.pricetrace.receiptscanner.ingestion.IngestionNutrition.RestaurantEstimate ||
+                        item is com.pricetrace.receiptscanner.ingestion.IngestionNutrition.RestaurantMenuEstimate
+                }) || com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson.hasPendingOcrResolution(it.metadataJson)
+        }
+        if (recoveryNeeded) {
+            bundle.ensureAuthenticated(setOf(if (envelope.receipt != null) {
+                IngestionProjection.PRICETRACE_RECEIPT
+            } else IngestionProjection.PRICETRACE_PRICE_OBSERVATION), envelope)
+        }
+        val session = useCase.prepareExistingSession(record.session.ingestionId, envelope, restoredSnapshot = true)
+            ?: error("저장된 수집 세션을 복구하지 못했습니다.")
+        if (session != record.session) {
+            store.saveRecord(record.copy(session = session))
+        }
         publish(
-            session = record.session,
+            session = session,
             envelope = envelope,
             rawJson = record.rawJson.ifBlank { record.canonicalJson },
             canonicalJson = record.canonicalJson,
