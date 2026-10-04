@@ -1,10 +1,5 @@
 package com.pricetrace.receiptocr
 
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,7 +18,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -41,16 +35,6 @@ internal fun MonochromeHologramHero(
     footer: String,
     modifier: Modifier = Modifier,
 ) {
-    val inspectionMode = LocalInspectionMode.current
-    val transition = rememberInfiniteTransition(label = "monochrome_hologram")
-    val animatedPhase = transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 3_400, easing = LinearEasing),
-        ),
-        label = "monochrome_hologram_phase",
-    )
     val shape = RoundedCornerShape(24.dp)
     val radius = 24.dp
     val stroke = 2.dp
@@ -73,7 +57,7 @@ internal fun MonochromeHologramHero(
                 )
                 .drawWithContent {
                     drawContent()
-                    val phase = if (inspectionMode) 0.52f else animatedPhase.value
+                    val phase = 0.52f
                     val radiusPx = radius.toPx()
                     val travel = (-1f + phase * 3f) * size.width
                     val border = Brush.linearGradient(

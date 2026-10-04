@@ -11,15 +11,15 @@ import org.junit.Test
 class DesktopUiLabelsTest {
     @Test
     fun contractEnumsUseKoreanDisplayLabels() {
-        assertEquals("원본 증거 기반", DesktopUiLabels.verificationBasis(VerificationBasis.SOURCE_EVIDENCE))
-        assertEquals("수동 검수", DesktopUiLabels.verificationBasis(VerificationBasis.MANUAL_CANONICAL_REVIEW))
+        assertEquals("원본 자료를 보고 확인", DesktopUiLabels.verificationBasis(VerificationBasis.SOURCE_EVIDENCE))
+        assertEquals("원본 없이 직접 확인", DesktopUiLabels.verificationBasis(VerificationBasis.MANUAL_CANONICAL_REVIEW))
         assertEquals("영수증", DesktopUiLabels.sourceAttachmentType(SourceAttachmentType.RECEIPT))
         assertEquals("검수 가능", DesktopUiLabels.ingestionReviewStatus(IngestionReviewStatus.READY))
         assertEquals("검수 완료", DesktopUiLabels.artifactStatus(verified = true, evidenceReady = false, issues = emptyList()))
-        assertEquals("대기", DesktopUiLabels.projectionStatus(ProjectionStatus.PENDING))
-        assertEquals("차단됨", DesktopUiLabels.projectionStatus(ProjectionStatus.BLOCKED))
+        assertEquals("아직 보내지 않음", DesktopUiLabels.projectionStatus(ProjectionStatus.PENDING))
+        assertEquals("보내기 전 확인 필요", DesktopUiLabels.projectionStatus(ProjectionStatus.BLOCKED))
         assertEquals("전송 완료", DesktopUiLabels.projectionStatus(ProjectionStatus.UPLOADED))
-        assertEquals("상품-영양 연결", DesktopUiLabels.projection(IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK))
+        assertEquals("Fitness · 상품과 영양 정보 연결", DesktopUiLabels.projection(IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK))
     }
 
     @Test

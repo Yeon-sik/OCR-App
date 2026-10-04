@@ -13,7 +13,7 @@ object DesktopUiLabels {
         DesktopBatchItemStatus.IMPORTING -> "가져오는 중"
         DesktopBatchItemStatus.ARCHIVING -> "보관 중"
         DesktopBatchItemStatus.REVIEW_REQUIRED -> "검수 필요"
-        DesktopBatchItemStatus.READY_TO_SUBMIT -> "전송 가능"
+        DesktopBatchItemStatus.READY_TO_SUBMIT -> "검수 확정 · 전송 전 확인"
         DesktopBatchItemStatus.SUBMITTING -> "전송 중"
         DesktopBatchItemStatus.COMPLETED -> "완료"
         DesktopBatchItemStatus.FAILED -> "실패"
@@ -31,8 +31,8 @@ object DesktopUiLabels {
     }
 
     fun verificationBasis(value: VerificationBasis): String = when (value) {
-        VerificationBasis.SOURCE_EVIDENCE -> "원본 증거 기반"
-        VerificationBasis.MANUAL_CANONICAL_REVIEW -> "수동 검수"
+        VerificationBasis.SOURCE_EVIDENCE -> "원본 자료를 보고 확인"
+        VerificationBasis.MANUAL_CANONICAL_REVIEW -> "원본 없이 직접 확인"
     }
 
     fun ingestionReviewStatus(value: IngestionReviewStatus): String = when (value) {
@@ -43,23 +43,23 @@ object DesktopUiLabels {
     }
 
     fun projection(value: IngestionProjection): String = when (value) {
-        IngestionProjection.PRICETRACE_RECEIPT -> "영수증(PriceTrace)"
-        IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> "가격 관측(PriceTrace)"
-        IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> "상점 후보(PriceTrace)"
-        IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE -> "상품 후보(PriceTrace)"
-        IngestionProjection.FITNESS_NUTRITION -> "영양 정보(Fitness)"
-        IngestionProjection.FITNESS_MEAL -> "식사 기록(Fitness)"
-        IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK -> "상품-영양 연결"
-        IngestionProjection.CASHOS_RECEIPT -> "영수증(CashOS)"
-        IngestionProjection.CASHOS_TRANSACTION -> "거래(CashOS)"
+        IngestionProjection.PRICETRACE_RECEIPT -> "PriceTrace · 영수증 기록"
+        IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> "PriceTrace · 가격 기록"
+        IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE -> "PriceTrace · 가게 등록 요청"
+        IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE -> "PriceTrace · 상품 등록 요청"
+        IngestionProjection.FITNESS_NUTRITION -> "Fitness · 영양 정보"
+        IngestionProjection.FITNESS_MEAL -> "Fitness · 식사 기록"
+        IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK -> "Fitness · 상품과 영양 정보 연결"
+        IngestionProjection.CASHOS_RECEIPT -> "CashOS · 영수증 기록"
+        IngestionProjection.CASHOS_TRANSACTION -> "CashOS · 거래 기록"
     }
 
     fun projectionStatus(value: ProjectionStatus): String = when (value) {
-        ProjectionStatus.PENDING -> "대기"
-        ProjectionStatus.BLOCKED -> "차단됨"
+        ProjectionStatus.PENDING -> "아직 보내지 않음"
+        ProjectionStatus.BLOCKED -> "보내기 전 확인 필요"
         ProjectionStatus.UPLOADED -> "전송 완료"
         ProjectionStatus.FAILED -> "실패"
-        ProjectionStatus.DISABLED -> "비활성"
+        ProjectionStatus.DISABLED -> "이 작업의 전송 대상 아님"
     }
 
     fun bundleValidationStatus(value: DesktopBundleValidationStatus): String = when (value) {
