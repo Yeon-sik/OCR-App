@@ -11,11 +11,13 @@ import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelValidator
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -24,6 +26,79 @@ import kotlinx.serialization.json.jsonPrimitive
 const val NUTRITION_LABEL_V1 = "nutrition-label.v1"
 const val EXTERNAL_REFERENCE_V1 = "external-reference.v1"
 const val FOOD_ESTIMATE_V1 = "food-estimate.v1"
+
+/** Recovery authority comes from authenticated owner-RLS reads, never cached response IDs. */
+data class NutritionCanonicalImportAudit(
+    val canonicalImportId: String,
+    val ownerId: String,
+    val idempotencyKey: String,
+    val sourceDocumentRef: String,
+    val nutritionFoodId: String,
+    val inputContract: String,
+    val userVerified: Boolean,
+    val projectionSourceType: String,
+    val requiredNutrients: JsonObject,
+    val optionalNutrients: JsonObject,
+    val nutrientProvenance: JsonObject,
+    val provenance: JsonObject,
+    val requestPayload: JsonObject,
+    val serverRow: JsonObject,
+)
+
+sealed interface NutritionCanonicalAuditOutcome {
+    data class Success(val rows: List<NutritionCanonicalImportAudit>, val rawResponse: String) : NutritionCanonicalAuditOutcome
+    data class Failure(val reason: NutritionGatewayFailure, val message: String? = null) : NutritionCanonicalAuditOutcome
+}
+
+object NutritionCanonicalAuditJson {
+    private val uuid = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+    fun isUuid(value: String): Boolean = uuid.matches(value)
+
+    fun decodeRows(value: String, ownerId: String): List<NutritionCanonicalImportAudit> {
+        val root = Json.parseToJsonElement(value) as? JsonArray ?: error("canonical_audit_response_must_be_array")
+        return root.map { element ->
+            val row = element as? JsonObject ?: error("canonical_audit_row_invalid")
+            fun text(key: String): String = (row[key] as? JsonPrimitive)?.takeIf { it.isString }
+                ?.contentOrNull?.takeIf(String::isNotBlank) ?: error("canonical_audit_field_missing:$key")
+            fun obj(key: String): JsonObject = row[key] as? JsonObject ?: error("canonical_audit_field_invalid:$key")
+            val id = text("id")
+            require(isUuid(id)) { "canonical_audit_id_invalid" }
+            require(text("idempotency_key").length <= 200) { "canonical_audit_key_invalid" }
+            require(text("owner_id") == ownerId) { "canonical_audit_owner_mismatch" }
+            val verified = (row["user_verified"] as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull
+                ?: error("canonical_audit_verification_invalid")
+            NutritionCanonicalImportAudit(
+                canonicalImportId = id,
+                ownerId = ownerId,
+                idempotencyKey = text("idempotency_key"),
+                sourceDocumentRef = text("source_document_ref"),
+                nutritionFoodId = text("nutrition_food_id"),
+                inputContract = text("input_contract"),
+                userVerified = verified,
+                projectionSourceType = text("projection_source_type"),
+                requiredNutrients = obj("required_nutrients"),
+                optionalNutrients = obj("optional_nutrients"),
+                nutrientProvenance = obj("nutrient_provenance"),
+                provenance = obj("provenance"),
+                requestPayload = obj("request_payload"),
+                serverRow = row,
+            )
+        }
+    }
+
+    /** PostgreSQL JSON numbers may have different scale; strings never count as numeric facts. */
+    fun sameFacts(left: JsonElement?, right: JsonElement?): Boolean = when {
+        left is JsonObject && right is JsonObject -> left.keys == right.keys &&
+            left.all { (key, value) -> sameFacts(value, right[key]) }
+        left is JsonArray && right is JsonArray -> left.size == right.size &&
+            left.indices.all { sameFacts(left[it], right[it]) }
+        left is JsonPrimitive && right is JsonPrimitive && !left.isString && !right.isString &&
+            left.doubleOrNull != null && right.doubleOrNull != null ->
+            runCatching { left.content.toBigDecimal().compareTo(right.content.toBigDecimal()) == 0 }.getOrDefault(false)
+        else -> left == right
+    }
+}
 
 sealed interface NutritionCanonicalImportOutcome {
     data class Success(

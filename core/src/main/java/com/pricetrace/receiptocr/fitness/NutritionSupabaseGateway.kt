@@ -7,6 +7,8 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import java.io.IOException
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 
 enum class NutritionGatewayFailure {
     NOT_CONFIGURED,
@@ -27,6 +29,57 @@ class NutritionSupabaseGateway(
     private val store: NutritionSupabaseStore,
     private val transport: NutritionHttpTransport = HttpsNutritionHttpTransport(),
 ) {
+    suspend fun findCanonicalImports(idempotencyKey: String): NutritionCanonicalAuditOutcome =
+        readCanonicalImports("idempotency_key=eq.${queryValue(idempotencyKey)}")
+
+    suspend fun readCanonicalImportsByIds(ids: Set<String>): NutritionCanonicalAuditOutcome {
+        if (ids.isEmpty() || ids.size > 100 || ids.any { !NutritionCanonicalAuditJson.isUuid(it) }) {
+            return NutritionCanonicalAuditOutcome.Failure(NutritionGatewayFailure.CONTRACT, "canonical_audit_ids_invalid")
+        }
+        return readCanonicalImports("id=in.(${ids.sorted().joinToString(",")})")
+    }
+
+    private suspend fun readCanonicalImports(filter: String): NutritionCanonicalAuditOutcome {
+        val initial = store.read()
+        if (!initial.isSignedIn) return NutritionCanonicalAuditOutcome.Failure(NutritionGatewayFailure.NOT_CONFIGURED)
+        val first = readCanonicalImportsOnce(filter, initial)
+        if (first !is NutritionCanonicalAuditOutcome.Failure || first.reason != NutritionGatewayFailure.AUTHENTICATION) {
+            return first
+        }
+        val refreshed = refresh(initial) ?: return first
+        return readCanonicalImportsOnce(filter, refreshed)
+    }
+
+    private suspend fun readCanonicalImportsOnce(
+        filter: String,
+        config: NutritionSupabaseConfig,
+    ): NutritionCanonicalAuditOutcome = try {
+        val response = transport.execute(request(
+            config = config,
+            method = "GET",
+            path = "/rest/v1/nutrition_canonical_imports?select=id,owner_id,idempotency_key,source_document_ref," +
+                "nutrition_food_id,input_contract,user_verified,projection_source_type,required_nutrients," +
+                "optional_nutrients,nutrient_provenance,provenance,request_payload&owner_id=eq.${queryValue(config.userId)}&$filter&limit=101",
+        ))
+        when (response.statusCode) {
+            401, 403 -> NutritionCanonicalAuditOutcome.Failure(NutritionGatewayFailure.AUTHENTICATION)
+            429 -> NutritionCanonicalAuditOutcome.Failure(NutritionGatewayFailure.RATE_LIMITED, response.body)
+            in 500..599 -> NutritionCanonicalAuditOutcome.Failure(NutritionGatewayFailure.SERVER, response.body)
+            in 200..299 -> NutritionCanonicalAuditOutcome.Success(
+                NutritionCanonicalAuditJson.decodeRows(response.body, config.userId), response.body,
+            )
+            else -> NutritionCanonicalAuditOutcome.Failure(NutritionGatewayFailure.CONTRACT, response.body)
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: IOException) {
+        NutritionCanonicalAuditOutcome.Failure(NutritionGatewayFailure.NETWORK)
+    } catch (error: Exception) {
+        NutritionCanonicalAuditOutcome.Failure(NutritionGatewayFailure.CONTRACT, error.message)
+    }
+
+    private fun queryValue(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
+
     suspend fun signIn(email: String, password: String): NutritionAuthOutcome {
         val config = store.read()
         if (!config.isConnectionConfigured || email.isBlank() || password.isBlank()) {

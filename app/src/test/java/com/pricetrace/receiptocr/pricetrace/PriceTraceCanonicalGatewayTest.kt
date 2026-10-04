@@ -43,6 +43,58 @@ import org.junit.Test
 
 class PriceTraceCanonicalGatewayTest {
     @Test
+    fun acceptedReceiptReadRestoresResolutionTokenWithoutIngestionPost() = runTest {
+        val receiptId = "11111111-1111-4111-8111-111111111111"
+        val response = """{"receiptId":"$receiptId","merchantResolutionStatus":"needs_ocr_resolution","ocrResolution":{"status":"needs_ocr_resolution","resolutionId":"pt-resolution","reasonCode":"legacy_source_identity_unresolved","requiredSourceFacts":["business_registration_number"]}}"""
+        val transport = QueueTransport(PriceObservationHttpResponse(200, response))
+        val submitter = PriceTraceCanonicalProjectionSubmitter(PriceTraceCanonicalGateway(FakeStore(signedIn()), transport))
+        val result = submitter.readAcceptedProjection(ProjectionRequest(
+            "ingestion", IngestionProjection.PRICETRACE_RECEIPT, "{}", "original-key",
+            previousMetadataJson = """{"receiptId":"$receiptId","merchantResolutionStatus":"needs_user_selection"}""",
+        )) as ProjectionSubmission.Success
+        assertTrue(result.requiresReview)
+        assertTrue(result.metadataJson!!.contains("pt-resolution"))
+        assertEquals(1, transport.requests.size)
+        assertTrue(transport.requests.single().url.endsWith("/rpc/get_verified_receipt_ingestion_response_v1"))
+        assertEquals(setOf("p_receipt_id"), Json.parseToJsonElement(transport.requests.single().body!!).jsonObject.keys)
+    }
+
+    @Test
+    fun acceptedReceiptReadRejectsAnotherServerReceipt() = runTest {
+        val transport = QueueTransport(PriceObservationHttpResponse(200,
+            """{"receiptId":"22222222-2222-4222-8222-222222222222"}"""))
+        val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .readAcceptedReceiptResponse("11111111-1111-4111-8111-111111111111")
+        assertTrue(result is PriceTraceCanonicalOutcome.Failure)
+        assertEquals(1, transport.requests.size)
+    }
+
+    @Test
+    fun standaloneRecoveryReadsExactHashedKeyAndPreservesClientCorrelation() = runTest {
+        val expectedKey = com.pricetrace.receiptscanner.domain.StableIds.sha256("old-key|observation=price-client")
+        val transport = QueueTransport(PriceObservationHttpResponse(200,
+            """[{"idempotency_key":"$expectedKey","response":{"observationId":"observation-1","merchantResolutionStatus":"exact"}}]"""))
+        val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .readAcceptedStandaloneResponses("old-key", listOf("price-client")) as PriceTraceCanonicalOutcome.Success
+        assertEquals("GET", transport.requests.single().method)
+        assertTrue(transport.requests.single().url.contains("idempotency_key=eq.$expectedKey"))
+        val row = result.response["observations"]!!.jsonArray.single().jsonObject
+        assertEquals("price-client", row["priceObservationClientKey"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun standaloneRecoveryFailsClosedOnMissingOrDuplicateOwnerRows() = runTest {
+        for (body in listOf("[]", "[{},{}]")) {
+            val transport = QueueTransport(PriceObservationHttpResponse(200, body))
+            val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+                .readAcceptedStandaloneResponses("old-key", listOf("price-client"))
+            assertTrue(result is PriceTraceCanonicalOutcome.Failure)
+            assertEquals("GET", transport.requests.single().method)
+            assertEquals(1, transport.requests.size)
+        }
+    }
+
+    @Test
     fun verifiedReceiptRpcSanitizesPrivateEvidenceAndKeepsNullSourceId() = runTest {
         val transport = QueueTransport(
             PriceObservationHttpResponse(200, """{"receiptId":"receipt-1"}"""),

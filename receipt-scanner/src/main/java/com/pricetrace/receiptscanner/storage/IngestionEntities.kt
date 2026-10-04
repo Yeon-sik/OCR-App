@@ -46,6 +46,8 @@ internal data class IngestionProjectionEntity(
     @ColumnInfo(name = "metadata_json") val metadataJson: String?,
     @ColumnInfo(name = "projection_revision_seq") val projectionRevisionSeq: Long = 1,
     @ColumnInfo(name = "projection_payload_fingerprint") val projectionPayloadFingerprint: String? = null,
+    @ColumnInfo(name = "completion_contract_version", defaultValue = "0") val completionContractVersion: Int = 0,
+    @ColumnInfo(name = "accepted_receipt_facts_fingerprint") val acceptedReceiptFactsFingerprint: String? = null,
 )
 
 @Entity(tableName = "ingestion_attachments", primaryKeys = ["ingestion_id", "attachment_id"], indices = [Index("ingestion_id"), Index("page_id")])
@@ -89,6 +91,8 @@ internal fun IngestionProjectionEntity.toDomain() = ProjectionState(
     metadataJson = metadataJson,
     projectionRevisionSeq = projectionRevisionSeq.coerceAtLeast(1),
     projectionPayloadFingerprint = projectionPayloadFingerprint,
+    completionContractVersion = completionContractVersion,
+    acceptedReceiptFactsFingerprint = acceptedReceiptFactsFingerprint,
 )
 
 internal fun ProjectionState.toEntity(ingestionId: String) = IngestionProjectionEntity(
@@ -103,6 +107,8 @@ internal fun ProjectionState.toEntity(ingestionId: String) = IngestionProjection
     metadataJson = metadataJson,
     projectionRevisionSeq = projectionRevisionSeq.coerceAtLeast(1),
     projectionPayloadFingerprint = projectionPayloadFingerprint,
+    completionContractVersion = completionContractVersion,
+    acceptedReceiptFactsFingerprint = acceptedReceiptFactsFingerprint,
 )
 
 internal fun LocalEvidence.toEntity(ingestionId: String) = IngestionAttachmentEntity(ingestionId, attachmentId, type.wireValue, pageId, fileReadable)

@@ -1222,6 +1222,10 @@ data class ProjectionState(
     val projectionRevisionSeq: Long = 1,
     /** Payload identity associated with the projection idempotency key/revision. */
     val projectionPayloadFingerprint: String? = null,
+    /** Runtime completion semantics; absent persisted values use legacy import-only completion. */
+    val completionContractVersion: Int = 0,
+    /** Accepted receipt/standalone price facts that an OCR identity resolution cannot revise. */
+    val acceptedReceiptFactsFingerprint: String? = null,
 )
 
 data class IngestionSession(

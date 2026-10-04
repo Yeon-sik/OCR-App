@@ -404,6 +404,8 @@ class DesktopSessionStore(
         metadataJson = root.nullableString("metadata_json"),
         projectionRevisionSeq = root.long("projection_revision_seq"),
         projectionPayloadFingerprint = root.nullableString("projection_payload_fingerprint"),
+        completionContractVersion = root.nullableString("completion_contract_version")?.toInt() ?: 0,
+        acceptedReceiptFactsFingerprint = root.nullableString("accepted_receipt_facts_fingerprint"),
     )
 
     private fun decodeLocalEvidence(root: JsonObject): LocalEvidence = LocalEvidence(
@@ -432,6 +434,8 @@ class DesktopSessionStore(
             putNullable("metadata_json", state.metadataJson)
             put("projection_revision_seq", JsonPrimitive(state.projectionRevisionSeq))
             putNullable("projection_payload_fingerprint", state.projectionPayloadFingerprint)
+            put("completion_contract_version", JsonPrimitive(state.completionContractVersion))
+            putNullable("accepted_receipt_facts_fingerprint", state.acceptedReceiptFactsFingerprint)
         }
     })
 

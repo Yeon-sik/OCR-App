@@ -33,16 +33,19 @@ class DesktopRuntimeConfig(
         ): DesktopRuntimeConfig {
             val fileValues = readEnvFile(envFile)
             fun value(name: String): String = environment[name] ?: fileValues[name].orEmpty()
+            val evidenceEmail = value("EVIDENCE_EMAIL")
+            val evidencePassword = value("EVIDENCE_PASSWORD")
+            val evidencePasswordBootstrap = evidenceEmail.isNotBlank() && evidencePassword.isNotBlank()
 
             return DesktopRuntimeConfig(
                 evidence = DesktopServiceConfig(
                     url = value("EVIDENCE_SUPABASE_URL"),
                     publishableKey = value("EVIDENCE_SUPABASE_PUBLISHABLE_KEY"),
-                    email = value("EVIDENCE_EMAIL"),
-                    password = value("EVIDENCE_PASSWORD"),
-                    userId = value("EVIDENCE_USER_ID"),
-                    accessToken = value("EVIDENCE_ACCESS_TOKEN"),
-                    refreshToken = value("EVIDENCE_REFRESH_TOKEN"),
+                    email = evidenceEmail,
+                    password = evidencePassword,
+                    userId = if (evidencePasswordBootstrap) "" else value("EVIDENCE_USER_ID"),
+                    accessToken = if (evidencePasswordBootstrap) "" else value("EVIDENCE_ACCESS_TOKEN"),
+                    refreshToken = if (evidencePasswordBootstrap) "" else value("EVIDENCE_REFRESH_TOKEN"),
                 ),
                 priceTrace = DesktopServiceConfig(
                     url = value("PRICETRACE_SUPABASE_URL"),
