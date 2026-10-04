@@ -350,7 +350,30 @@ class IngestionOrchestrator(
             })
             store.save(session)
         }
+        val recoveredReviewStatus = reviewStatusAfterExactIdentityRecovery(session, envelope)
+        if (recoveredReviewStatus != session.reviewStatus) {
+            session = session.copy(reviewStatus = recoveredReviewStatus, updatedAt = now())
+            store.save(session)
+        }
         return session
+    }
+
+    /** Preserve explicit approval when only the pending PT identity review has completed. */
+    private fun reviewStatusAfterExactIdentityRecovery(
+        session: IngestionSession,
+        envelope: YeonsikOcrEnvelope,
+    ): IngestionReviewStatus {
+        if (session.reviewStatus != IngestionReviewStatus.NEEDS_REVIEW ||
+            diningOutItems(envelope).isEmpty() || !isVerifiedForOcrResolution(session, envelope) ||
+            !diningOutIdentityComplete(session, envelope)
+        ) return session.reviewStatus
+        if (session.projections.any {
+                PriceTraceIdentityJson.hasPendingOcrResolution(it.metadataJson) ||
+                    it.lastError?.startsWith(CHECKPOINT_READ_FAILED) == true ||
+                    (it.status == ProjectionStatus.BLOCKED && it.lastError != null)
+            }
+        ) return session.reviewStatus
+        return IngestionReviewStatus.READY
     }
 
     private fun diningOutItems(envelope: YeonsikOcrEnvelope): List<IngestionNutrition> = envelope.nutrition.filter {
@@ -1996,10 +2019,10 @@ class IngestionOrchestrator(
                 else -> state
             }
         }
-        val updatedSession = session.copy(
-            reviewStatus = if (result.requiresReview) IngestionReviewStatus.NEEDS_REVIEW else session.reviewStatus,
-            updatedAt = nowValue,
-            projections = targetStates,
+        val responseSession = session.copy(updatedAt = nowValue, projections = targetStates)
+        val updatedSession = responseSession.copy(
+            reviewStatus = if (result.requiresReview) IngestionReviewStatus.NEEDS_REVIEW
+                else reviewStatusAfterExactIdentityRecovery(responseSession, envelope),
         )
         store.save(updatedSession)
         return targetStates.first { it.projection == projection }

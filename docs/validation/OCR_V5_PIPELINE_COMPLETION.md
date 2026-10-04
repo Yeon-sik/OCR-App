@@ -38,6 +38,35 @@ publication flags, authority UUIDs, or extra user-verification authority.
     Amount/date/client-key/quantity/evidence changes fail before saving; merchant/menu
     source facts remain editable through the existing canonical review rules.
 
+12. The V5 strong-signal resolver could create another identity for an older verified
+    `pricetrace-db-store` location whose contact facts were missing. A private owner
+    recovery proves the immutable receipt/store/item/observation binding and original
+    verified source fingerprint, restores only matching missing facts, then reuses
+    the existing identity through the normal resolver. Competing identities fail closed.
+13. The first recovery function referenced an `updated_at` column absent from the
+    deployed Location table; a new forward compatibility migration removes that write.
+    PostgreSQL fixtures now use the actual table shape and apply both migrations twice.
+14. A pending owner-response refresh changed review status to `NEEDS_REVIEW` even
+    during an approved resolution, and exact success retained that stale status.
+    Core restores `READY` only for the same explicitly verified canonical fingerprint,
+    complete exact identities, no pending PT review/read error and no blocked target.
+    Missing approval or unresolved statuses can never gain review authority this way.
+
+## Reproduction and repaired state transition
+
+- Evidence failure: import a bundle, archive it, edit a canonical field, archive revision 2
+  with a non-null parent. The old RLS subquery rejected the valid parent with 42501.
+  Session and ownership errors are diagnosed separately before POST; the forward policy
+  and composite parent FK retain owner/artifact/parent isolation.
+- Legacy dining-out failure: load an import-only Fitness checkpoint and a legacy PT
+  response, confirm the saved source facts in OCR, resolve the server-issued token.
+  The original duplicate writer failed with 23505; the initial strict resolver proposed
+  a different identity and the immutable observation guard rejected it with 23514.
+- Repaired transition: legacy `UPLOADED` -> Nutrition `PENDING` + `NEEDS_REVIEW` -> explicit
+  OCR approval -> authenticated PT exact/resolved response -> original canonical import
+  reuse -> atomic publication -> Nutrition `UPLOADED` version 1 and review `READY`.
+- An ambiguous or insufficient identity remains `NEEDS_REVIEW`; public publication is
+  not called. A transient publication failure retains the same import/publication keys.
 ## Projection dependency graph
 
 ```mermaid
@@ -96,6 +125,10 @@ Unestimated receipt lines never create Nutrition rows.
 - PT forward migration: `20261004002338_ocr_receipt_menu_observation_reuse.sql`.
   Applied and registered; helper API/anon execution remains revoked, owner RPC is
   authenticated-only, and RLS remains enabled. No receipt/observation row was deleted.
+- PT forward migrations: `20261004063208_ocr_legacy_store_identity_recovery.sql` and
+  `20261004064719_ocr_legacy_store_identity_schema_compatibility.sql`.
+  Both are applied and registered. Owner-approved recovery preserves existing UUIDs and
+  observations, does not invent branch labels, and exposes no new client write path.
 - Evidence owner-policy repair from this branch is already applied to the configured project.
 - Fitness V5 publication and generic import repair migrations are already deployed.
 - Android Room 12 -> 13 adds local completion/receipt guard fields with safe defaults.
@@ -106,20 +139,61 @@ Unestimated receipt lines never create Nutrition rows.
 
 ## Validation record
 
-Local gate: Core 231 tests, Android 104 tests, Desktop 38 tests (two manual integration
-cases skipped by default), zero failures/errors. Android/Desktop and Room migration
-instrumentation sources compile. PT full suite 480 tests including 41 PostgreSQL
-engine cases passed, along with lint/typecheck/production build.
+PT full suite: 500 tests in 49 files, including 61 executable PostgreSQL engine cases;
+lint/typecheck/production build passed. PT main Pages and documentation CI passed at
+`bb6bf825e9ae4c385f5e1b597aa6d68b1d73079c` (PR #57 merged).
+OCR final local gate passed: Core 236 tests and Android 104 tests, no failures/errors.
+Desktop 38 tests passed with two opt-in integration tests skipped by default; those
+manual tests were executed separately. The final approved controller retry also
+asserts persisted review `READY`, successful publication completion and a second send
+with unchanged durable projection identities; it passed against the configured services. Android/Desktop and Room migration instrumentation
+sources compile. Added review-state regressions cover exact receipt/standalone recovery,
+missing explicit approval, unknown/pending authority, successful owner resolution/replay,
+and ambiguity with zero Nutrition calls.
 
-Live recovery currently stops safely before publication on a legacy identity conflict.
-The existing verified observation has an exact owner receipt/store/item/price binding,
-but its `pricetrace-db-store` location lacks address/phone. The strict V5 resolver did
-not use that server binding and proposed another Restaurant/Location. Investigation
-confirmed the original owner-verified receipt source and approved contact facts agree.
-The final owner resolution/publication result will be appended after this narrow
-server recovery is validated; no mismatched identity was published.
-The Android migration instrumentation source is included; no connected Android device
-was available, so device execution must be distinguished from compilation/unit tests.
+Fitness latest main unit/compile validation passed (439 app tests) and its current main
+release-readiness CI is green. CashOS main CI is green after the scoped PR #28 fixes
+(350 unit tests, 17 browser scenarios and lint/typecheck/build/budget checks).
+
+### Real approved record and remote proof
+
+The explicitly approved existing record passed the real owner-authenticated Desktop
+controller path: load -> review saved facts -> resolve PT token -> reuse private import
+-> public/link -> send again. The controller calls ordinary authenticated RPCs, and
+remote verification SQL is read-only. No client direct downstream writes were used.
+
+| Check | Before | After review and repeated send |
+| --- | --- | --- |
+| PT owner receipts / ingestion contents | 1 / 1 | 1 / 1 |
+| PT Restaurant / Location / Menu rows | 5 / 5 / 5 | 5 / 5 / 5 |
+| PT receipt Menu observations | 1 | 1; same UUID and immutable fingerprint |
+| PT merchant / source-line status | needs OCR review / unresolved | exact / resolved |
+| Fitness canonical imports | 1 | 1; same original import and Nutrition IDs |
+| Fitness publication for this Nutrition | 0 | 1 |
+| Fitness food visibility / link | private | public / approved; exact four PT IDs |
+| Cash receipt / binding / revision identities | 1 / 1 / 1 | 1 / 1 / 1; original receipt key |
+| Cash transaction ingestion rows | 0 | 0 |
+| OCR approved review state | stale needs_review | READY; verified fingerprint preserved |
+
+Evidence deployed RLS is enabled with `owner_id = auth.uid()` plus exact owned artifact
+existence. The composite parent/Artifact/owner FK is present. Four archived canonical
+revisions remain in the configured project; no source/revision data was deleted.
+
+### Required scenarios and proof scope
+
+| Scenario | Evidence |
+| --- | --- |
+| A existing receipt-backed Restaurant | Real approved OCR -> PT exact -> original Fitness import -> public/link -> replay passed |
+| B new Restaurant with safely exact PT identity | PT resolver and OCR/Fitness fixture regressions; no second live user record created |
+| C ambiguity | Needs-review and zero-publication regression tests; identity/source conflicts fail closed in PostgreSQL |
+| D multiple receipt lines | Exact source-line mapping regressions and PostgreSQL cases; unestimated lines do not create Nutrition |
+| E temporary publication failure / response loss | Original deterministic import/publication key recovery regressions |
+| F same bundle / repeated send | Real repeated send with unchanged remote counts plus Core replay regressions |
+| G packaged and insufficient receipt-free identity | Existing Android/Core fixtures; private import and publication-pending/fail-closed cases |
+
+The Android Room migration instrumentation sources compile. No connected Android device
+was available, so device execution remains unverified. The Windows launch check verifies
+the built executable, running process and window title, not a visual screenshot audit.
 
 Manual integration tests are opt-in and excluded from normal CI execution:
 
@@ -142,6 +216,58 @@ the separately executed live integration result.
 - Earlier branch commits: Evidence session/ownership validation and forward RLS repair;
   review fields and explicitly linked product-name synchronization.
 - Separate services: PT getter migration/contract/tests/source pack (PR #55),
-  CashOS investment action/responsive tests (PR #28).
+  PT guarded writer/legacy identity recovery (PR #56/#57), and CashOS investment
+  action/responsive tests (PR #28).
 
 Fitness application source and cross-service database ownership boundaries were preserved.
+
+## OCR changed file inventory
+
+- `app/src/main/java/com/pricetrace/receiptocr/AndroidCanonicalJsonValidator.kt`
+- `app/src/test/java/com/pricetrace/receiptocr/pricetrace/PriceTraceCanonicalGatewayTest.kt`
+- `core/src/main/java/com/pricetrace/receiptocr/fitness/FitnessCanonicalProjectionSubmitter.kt`
+- `core/src/main/java/com/pricetrace/receiptocr/fitness/NutritionCanonicalModels.kt`
+- `core/src/main/java/com/pricetrace/receiptocr/fitness/NutritionSupabaseGateway.kt`
+- `core/src/main/java/com/pricetrace/receiptocr/pricetrace/PriceTraceCanonicalGateway.kt`
+- `core/src/main/java/com/pricetrace/receiptscanner/ingestion/CanonicalIngestionUseCase.kt`
+- `core/src/main/java/com/pricetrace/receiptscanner/ingestion/EvidenceArchive.kt`
+- `core/src/main/java/com/pricetrace/receiptscanner/ingestion/IngestionModels.kt`
+- `core/src/main/java/com/pricetrace/receiptscanner/ingestion/IngestionOrchestrator.kt`
+- `core/src/main/java/com/pricetrace/receiptscanner/review/CanonicalReviewController.kt`
+- `core/src/test/java/com/pricetrace/receiptocr/fitness/FitnessCanonicalRecoveryTest.kt`
+- `core/src/test/java/com/pricetrace/receiptscanner/ingestion/EvidenceSupabaseArchivePortTest.kt`
+- `core/src/test/java/com/pricetrace/receiptscanner/ingestion/LegacyDiningOutCheckpointRecoveryTest.kt`
+- `core/src/test/java/com/pricetrace/receiptscanner/review/CanonicalProductNameReviewTest.kt`
+- `desktop-app/.env.example`
+- `desktop-app/src/main/kotlin/com/yeonsik/ingestion/desktop/CollectorReview.kt`
+- `desktop-app/src/main/kotlin/com/yeonsik/ingestion/desktop/DesktopIngestionController.kt`
+- `desktop-app/src/main/kotlin/com/yeonsik/ingestion/desktop/DesktopRuntimeConfig.kt`
+- `desktop-app/src/main/kotlin/com/yeonsik/ingestion/desktop/DesktopSessionStore.kt`
+- `desktop-app/src/test/kotlin/com/yeonsik/ingestion/desktop/CanonicalReviewFieldsTest.kt`
+- `desktop-app/src/test/kotlin/com/yeonsik/ingestion/desktop/DesktopApprovedCheckpointRecoveryTest.kt`
+- `desktop-app/src/test/kotlin/com/yeonsik/ingestion/desktop/DesktopCheckpointRemoteIntegrationTest.kt`
+- `desktop-app/src/test/kotlin/com/yeonsik/ingestion/desktop/DesktopIngestionRegressionTest.kt`
+- `desktop-app/src/test/kotlin/com/yeonsik/ingestion/desktop/DesktopProjectionCompletionPersistenceTest.kt`
+- `desktop-app/src/test/kotlin/com/yeonsik/ingestion/desktop/DesktopRuntimeConfigTest.kt`
+- `docs/validation/OCR_V5_PIPELINE_COMPLETION.md`
+- `infra/evidence-supabase/migrations/20261003_fix_canonical_revision_owner_rls.sql`
+- `infra/evidence-supabase/tests/canonical_revision_owner_rls.md`
+- `infra/evidence-supabase/tests/canonical_revision_rls_smoke.sql`
+- `receipt-scanner/src/androidTest/java/com/pricetrace/receiptscanner/storage/ReceiptDatabaseMigrationTest.kt`
+- `receipt-scanner/src/main/java/com/pricetrace/receiptscanner/storage/IngestionEntities.kt`
+- `receipt-scanner/src/main/java/com/pricetrace/receiptscanner/storage/ReceiptDatabase.kt`
+
+## Delivery and remaining prerequisites
+
+- PT PR #55/#56/#57 and CashOS PR #28 are merged; their required configured migrations
+  are deployed. Fitness current main requires no source change for this recovery.
+- OCR PR #21 contains the Evidence auth/RLS fix, simpler review fields and shared legacy
+  publication recovery. Final merge/build results are reported with the delivered SHA.
+- Desktop runtime credentials are bootstrapped consistently; client secrets are omitted
+  from source, generated bundles and this report.
+- Existing pending revisions keep their saved snapshot and can be retried after valid
+  authentication and owned artifact/parent validation; no re-entry of edits is required.
+- A newer separately unapproved packaged record stays awaiting user review and is not
+  sent automatically. Only the explicitly approved legacy record was recovered live.
+- Android device migration/UI execution remains a separate outstanding verification;
+  Core/unit/compile checks do not substitute for physical device proof.

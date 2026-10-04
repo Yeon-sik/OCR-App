@@ -1,6 +1,7 @@
 package com.pricetrace.receiptscanner.ingestion
 
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
+import com.pricetrace.receiptscanner.input.InputOrigin
 import com.pricetrace.receiptscanner.domain.ConfidenceLevel
 import com.pricetrace.receiptscanner.domain.ReceiptIdentifier
 import com.pricetrace.receiptscanner.domain.TranscriptionStatus
@@ -669,6 +670,98 @@ class LegacyDiningOutCheckpointRecoveryTest {
         assertEquals(started.session, restored)
     }
 
+    @Test
+    fun exactOwnerResponseRestoresExplicitlyApprovedReviewForReceiptAndStandalone() = runBlocking {
+        for (standalone in listOf(false, true)) {
+            val envelope = if (standalone) standaloneEnvelope() else envelope()
+            val fixture = fixture(exact = true, fitnessMetadata = PUBLICATION, sourceEnvelope = envelope,
+                localEvidence = if (standalone) STANDALONE_EVIDENCE else EVIDENCE)
+            fixture.reader.outcome = ProjectionSubmission.Success(RECEIPT, if (standalone) EXACT_STANDALONE else EXACT_RECEIPT)
+            if (standalone) fixture.orchestrator.markMerchantCandidateVerified(ID, envelope, STANDALONE_EVIDENCE, InputOrigin.EXTERNAL_JSON)
+            fixture.store.save(fixture.store.get(ID)!!.copy(reviewStatus = IngestionReviewStatus.NEEDS_REVIEW))
+            val restored = fixture.orchestrator.prepareExistingSession(ID, envelope)!!
+            assertEquals(IngestionReviewStatus.READY, restored.reviewStatus)
+            assertEquals(restored.canonicalFingerprint, restored.verifiedCanonicalFingerprint)
+            assertEquals(ProjectionStatus.UPLOADED, restored.fitness().status)
+            assertEquals(0, fixture.reader.resolutions)
+            assertEquals(0, fixture.reader.submits)
+            assertTrue(fixture.requests.isEmpty())
+        }
+    }
+
+    @Test
+    fun exactOwnerResponseNeverInventsApprovalForAnUnverifiedRevision() = runBlocking {
+        val fixture = fixture(exact = true, fitnessMetadata = PUBLICATION)
+        fixture.store.save(fixture.store.get(ID)!!.copy(
+            reviewStatus = IngestionReviewStatus.NEEDS_REVIEW, verifiedCanonicalFingerprint = null, verifiedAt = null,
+            verifiedArtifactFingerprints = emptyMap(),
+        ))
+        val restored = fixture.orchestrator.prepareExistingSession(ID, fixture.envelope)!!
+        assertEquals(IngestionReviewStatus.NEEDS_REVIEW, restored.reviewStatus)
+        assertNull(restored.verifiedCanonicalFingerprint)
+        assertTrue(fixture.requests.isEmpty())
+    }
+
+    @Test
+    fun unknownAuthorityStatusCannotRestoreReadyDespitePriorApprovalAndPublication() = runBlocking {
+        for (metadata in listOf(
+            EXACT_RECEIPT.replace("\"merchantResolutionStatus\":\"exact\"", "\"merchantResolutionStatus\":\"unknown\""),
+            EXACT_RECEIPT.replace("\"resolutionStatus\":\"resolved\"", "\"resolutionStatus\":\"pending\""),
+        )) {
+            val fixture = fixture(exact = true, fitnessMetadata = PUBLICATION)
+            fixture.reader.outcome = ProjectionSubmission.Success(RECEIPT, metadata)
+            fixture.store.save(fixture.store.get(ID)!!.copy(reviewStatus = IngestionReviewStatus.NEEDS_REVIEW))
+            val restored = fixture.orchestrator.prepareExistingSession(ID, fixture.envelope)!!
+            assertEquals(IngestionReviewStatus.NEEDS_REVIEW, restored.reviewStatus)
+            assertEquals(ProjectionStatus.PENDING, restored.fitness().status)
+            assertTrue(fixture.requests.isEmpty())
+        }
+    }
+
+    @Test
+    fun explicitOwnerResolutionClosesReviewAndResumesPublicationWithSameLegacyKey() = runBlocking {
+        val fixture = fixture()
+        fixture.orchestrator.prepareExistingSession(ID, fixture.envelope, restoredSnapshot = true)
+        fixture.reader.resolutionOutcome = ProjectionSubmission.Success(RECEIPT, RESOLVED_RECEIPT)
+        val useCase = recoveryUseCase(fixture)
+        val result = useCase.confirm(ID, fixture.envelope, EVIDENCE)
+        assertTrue(result.result.toString(), result.result is IngestionStartResult.Success)
+        val completed = fixture.store.get(ID)!!
+        assertEquals(IngestionReviewStatus.READY, completed.reviewStatus)
+        assertEquals(completed.canonicalFingerprint, completed.verifiedCanonicalFingerprint)
+        assertEquals(ProjectionStatus.UPLOADED, completed.fitness().status)
+        assertEquals("original-fitness-key", completed.fitness().idempotencyKey)
+        assertEquals(1, fixture.reader.resolutions)
+        assertEquals(1, fixture.requests.size)
+        useCase.retrySelected(ID, result.envelope, setOf(IngestionProjection.FITNESS_NUTRITION))
+        assertEquals(IngestionReviewStatus.READY, fixture.store.get(ID)!!.reviewStatus)
+        assertEquals(1, fixture.reader.resolutions)
+        assertEquals(1, fixture.requests.size)
+    }
+
+    @Test
+    fun unresolvedOwnerResolutionRetainsReviewAndNeverPublishesNutrition() = runBlocking {
+        val fixture = fixture()
+        fixture.orchestrator.prepareExistingSession(ID, fixture.envelope, restoredSnapshot = true)
+        fixture.reader.resolutionOutcome = ProjectionSubmission.Success(RECEIPT, NEEDS_REVIEW_RECEIPT, requiresReview = true)
+        val result = recoveryUseCase(fixture).confirm(ID, fixture.envelope, EVIDENCE)
+        assertTrue(result.result is IngestionStartResult.Failure)
+        assertEquals(IngestionReviewStatus.NEEDS_REVIEW, fixture.store.get(ID)!!.reviewStatus)
+        assertEquals(result.result.toString(), 1, fixture.reader.resolutions)
+        assertTrue(fixture.requests.isEmpty())
+    }
+
+    private fun recoveryUseCase(fixture: Fixture) = CanonicalIngestionUseCase(
+        store = fixture.store, now = { NOW }, submitters = mapOf(
+            IngestionProjection.PRICETRACE_RECEIPT to fixture.reader,
+            IngestionProjection.FITNESS_NUTRITION to object : IngestionProjectionSubmitter {
+                override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                    fixture.requests += request
+                    return ProjectionSubmission.Success("food-id", PUBLICATION)
+                }
+            },
+        ),
+    )
     private suspend fun fixture(
         exact: Boolean = false,
         fitnessMetadata: String = PRIVATE_IMPORT,
@@ -724,10 +817,17 @@ class LegacyDiningOutCheckpointRecoveryTest {
         var outcome: ProjectionSubmission = ProjectionSubmission.Success(RECEIPT, metadata, requiresReview = metadata == NEEDS_REVIEW_RECEIPT)
         var submits = 0
         var resolutions = 0
+        var resolutionOutcome: ProjectionSubmission? = null
         val reads = mutableListOf<ProjectionRequest>()
         override suspend fun submit(request: ProjectionRequest): ProjectionSubmission { submits++; error("PT must not re-ingest") }
         override suspend fun readAcceptedProjection(request: ProjectionRequest): ProjectionSubmission { reads += request; return outcome }
-        override suspend fun resolveMerchantIdentity(request: OcrMerchantIdentityResolutionRequest): ProjectionSubmission { resolutions++; error("Resolved merchant must not be resolved again") }
+        override suspend fun resolveMerchantIdentity(request: OcrMerchantIdentityResolutionRequest): ProjectionSubmission {
+            resolutions++
+            val result = resolutionOutcome ?: error("Resolved merchant must not be resolved again")
+            // An accepted resolution updates the server's owner-readable saved response.
+            if (result is ProjectionSubmission.Success) outcome = result
+            return result
+        }
     }
 
     private fun envelope(): YeonsikOcrEnvelope = YeonsikOcrEnvelope(
@@ -778,6 +878,8 @@ class LegacyDiningOutCheckpointRecoveryTest {
         const val NEEDS_REVIEW_RECEIPT = """{"receiptId":"$RECEIPT","merchantResolutionStatus":"needs_ocr_resolution","ocrResolution":{"resolutionId":"server-resolution-token","status":"needs_ocr_resolution","reasonCode":"legacy_source_identity_unresolved","requiredSourceFacts":["business_registration_number"]},"lines":[]}"""
         const val EXACT_RECEIPT = """{"receiptId":"$RECEIPT","merchantResolutionStatus":"exact","restaurantId":"$RESTAURANT","restaurantLocationId":"$LOCATION","lines":[{"sourceLineId":"line-1","resolutionStatus":"resolved","restaurantMenuId":"$MENU","catalogProductId":"$CATALOG"}]}"""
         const val NEEDS_REVIEW_STANDALONE = """{"observations":[{"priceObservationClientKey":"price-menu-1","response":{"kind":"restaurant_purchase","merchantResolutionStatus":"needs_ocr_resolution","menuResolutionStatus":"needs_ocr_resolution","ocrResolution":{"resolutionId":"server-standalone-resolution-token","status":"needs_ocr_resolution","requiredSourceFacts":["exact_branch_name_address_and_phone"]}}}]}"""
+        val RESOLVED_RECEIPT = EXACT_RECEIPT.dropLast(1) +
+            ""","ocrResolution":{"status":"resolved","resolutionId":"server-resolution-token","reasonCode":null,"requiredSourceFacts":[]}}"""
         const val EXACT_STANDALONE = """{"observations":[{"priceObservationClientKey":"price-menu-1","response":{"kind":"restaurant_purchase","merchantResolutionStatus":"exact","menuResolutionStatus":"resolved","authoritativeIds":{"restaurantId":"$RESTAURANT","restaurantLocationId":"$LOCATION","restaurantMenuId":"$MENU","catalogProductId":"$CATALOG"}}}]}"""
         const val PRIVATE_IMPORT = """[[{"canonical_import_id":"00000000-0000-4000-8000-000000000010","nutrition_food_id":"food-id","visibility":"private"}]]"""
         const val PUBLICATION = """[[{"canonical_import_id":"00000000-0000-4000-8000-000000000010","nutrition_food_id":"food-id","visibility":"public","restaurant_id":"$RESTAURANT","restaurant_location_id":"$LOCATION","restaurant_menu_id":"$MENU","catalog_product_id":"$CATALOG","nutrition_link_id":"00000000-0000-4000-8000-000000000011","nutrition_link_revision":1,"food_revision":1,"publication_revision":1,"published_at":"$NOW"}]]"""

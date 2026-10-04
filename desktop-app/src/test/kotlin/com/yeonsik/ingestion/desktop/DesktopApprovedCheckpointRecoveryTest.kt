@@ -23,6 +23,7 @@ class DesktopApprovedCheckpointRecoveryTest {
         controller.submit(setOf(IngestionProjection.FITNESS_NUTRITION))
         assertNull("OCR send: ${controller.state.value.error}", controller.state.value.error)
         val completed = requireNotNull(controller.state.value.session)
+        assertEquals(IngestionReviewStatus.READY, completed.reviewStatus)
         val next = completed.projections.associateBy { it.projection }
         assertEquals("Nutrition recovery: ${next[IngestionProjection.FITNESS_NUTRITION]?.lastError}",
             ProjectionStatus.UPLOADED, next[IngestionProjection.FITNESS_NUTRITION]?.status)
