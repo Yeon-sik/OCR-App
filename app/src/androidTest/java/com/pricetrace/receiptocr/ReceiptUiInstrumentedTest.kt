@@ -105,9 +105,10 @@ class ReceiptUiInstrumentedTest {
             }
         }
 
+        composeRule.onNodeWithTag("new_work_button").performClick()
         composeRule.onNodeWithTag("workflow_pricetrace").assertIsDisplayed()
         composeRule.onNodeWithTag("workflow_fitness").performClick()
-        composeRule.onNodeWithText("상품 영양성분 촬영·선택").assertIsDisplayed()
+        composeRule.onNodeWithText("영양성분표 촬영").assertIsDisplayed()
         composeRule.runOnIdle { assertEquals(OcrWorkflowType.FITNESS_NUTRITION, selected) }
     }
 
@@ -127,21 +128,25 @@ class ReceiptUiInstrumentedTest {
             }
         }
 
+        composeRule.onNodeWithTag("new_work_button").performClick()
         composeRule.onNodeWithTag("workflow_restaurant").performClick()
-        composeRule.onNodeWithText("식당 영수증 촬영·선택").assertIsDisplayed()
+        composeRule.onNodeWithText("식당 영수증 촬영").assertIsDisplayed()
         composeRule.runOnIdle { assertEquals(OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT, selected) }
     }
 
     @Test
-    fun homeUsesOneMonochromeHologramJudgmentSurface() {
+    fun homeSeparatesNewWorkFromTechnicalTools() {
         composeRule.setContent {
             ReceiptOcrTheme {
                 ReceiptOcrContent(uiState = ReceiptAppUiState())
             }
         }
 
-        composeRule.onNodeWithTag("home_hologram_hero").assertIsDisplayed()
-        composeRule.onNodeWithText("영수증 가격을\n검증해 기록하세요").assertIsDisplayed()
+        composeRule.onNodeWithTag("new_work_button").assertIsEnabled()
+        composeRule.onNodeWithTag("pick_canonical_bundle_button").assertIsDisplayed()
+        composeRule.onNodeWithTag("pick_json_button").assertDoesNotExist()
+        composeRule.onNodeWithTag("new_work_button").performClick()
+        composeRule.onNodeWithTag("workflow_merchant").performClick()
         composeRule.onNodeWithTag("scan_button").assertIsEnabled()
     }
 
@@ -665,15 +670,33 @@ class ReceiptUiInstrumentedTest {
     @Test
     fun homeJsonImportActionReachesPickerCallback() {
         var opened = false
+        var state by mutableStateOf(ReceiptAppUiState())
         composeRule.setContent {
             ReceiptOcrTheme {
-                ReceiptOcrContent(uiState = ReceiptAppUiState(), onPickJson = { opened = true })
+                ReceiptOcrContent(uiState = state, onPickJson = { opened = true },
+                    onShowApiSettings = { state = state.copy(screen = AppScreen.API_SETTINGS) })
             }
         }
-
-        composeRule.onNodeWithTag("session_list").performScrollToNode(hasTestTag("pick_json_button"))
+        composeRule.onNodeWithTag("pick_json_button").assertDoesNotExist()
+        composeRule.onNodeWithTag("api_settings_button").performClick()
+        composeRule.onNodeWithTag("advanced_tools_button").performClick()
         composeRule.onNodeWithTag("pick_json_button").assertIsEnabled().performClick()
         composeRule.runOnIdle { assertTrue(opened) }
+    }
+
+    @Test
+    fun merchantWorkUsesMerchantCopyAndKeepsBundleImportVisible() {
+        var state by mutableStateOf(ReceiptAppUiState())
+        composeRule.setContent {
+            ReceiptOcrTheme { ReceiptOcrContent(uiState = state,
+                onWorkflowSelected = { state = state.copy(selectedWorkflow = it) }) }
+        }
+        composeRule.onNodeWithTag("pick_canonical_bundle_button").assertIsDisplayed()
+        composeRule.onNodeWithTag("new_work_button").performClick()
+        composeRule.onNodeWithTag("workflow_merchant").performClick()
+        composeRule.onNodeWithTag("new_work").performScrollToNode(hasTestTag("scan_button"))
+        composeRule.onNodeWithText("가게 정보 촬영").assertIsDisplayed()
+        composeRule.onNodeWithText("영수증 촬영").assertDoesNotExist()
     }
 
     @Test

@@ -1,6 +1,8 @@
 package com.pricetrace.receiptocr
 
 import android.graphics.BitmapFactory
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -316,7 +318,18 @@ fun ReceiptOcrContent(
     onRefreshAccuracy: () -> Unit = {},
     onShareAccuracy: () -> Unit = {},
     onDismissMessage: () -> Unit = {},
-) {
+ ) {
+    var advancedOpen by rememberSaveable { mutableStateOf(false) }
+    if (advancedOpen) {
+        BackHandler { advancedOpen = false }
+        AdvancedToolsScreen(
+            onBack = { advancedOpen = false },
+            onJson = { advancedOpen = false; onPickJson() },
+            onValidator = { advancedOpen = false; onPickCanonicalJson() },
+            onEvaluation = { advancedOpen = false; onShowEvaluation() },
+        )
+        return
+    }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onBackground,
@@ -397,14 +410,12 @@ fun ReceiptOcrContent(
                     isBusy = uiState.isPreparingScanner || uiState.isImportingPages,
                     onScan = onScan,
                     onPickImages = onPickImages,
-                    onPickJson = onPickJson,
-                    onPickCanonicalJson = onPickCanonicalJson,
+
                     onPickCanonicalBundle = onPickCanonicalBundle,
                     onWorkflowSelected = onWorkflowSelected,
                     onSelectSession = onSelectSession,
                     onDeleteSession = onDeleteSession,
                     onShowApiSettings = onShowApiSettings,
-                    onShowEvaluation = onShowEvaluation,
                 )
                 AppScreen.IMPORT_PREVIEW -> uiState.importPreview?.let { preview ->
                     ImportPreviewScreen(
@@ -468,6 +479,7 @@ fun ReceiptOcrContent(
                     onOpenNutritionReview = onShowCanonicalNutritionReview,
                 )
                 AppScreen.API_SETTINGS -> ApiSettingsScreen(
+                    onShowAdvanced = { advancedOpen = true },
                     provider = uiState.correctionProvider,
                     supabaseUrl = uiState.nutritionSupabaseUrl,
                     isPublishableKeyConfigured = uiState.isNutritionPublishableKeyConfigured,
@@ -809,192 +821,6 @@ private fun MessageCard(message: String, onDismiss: () -> Unit) {
                 fontWeight = FontWeight.Medium,
             )
             TextButton(onClick = onDismiss) { Text("닫기") }
-        }
-    }
-}
-
-@Composable
-private fun SessionListScreen(
-    sessions: List<ReceiptSession>,
-    selectedWorkflow: OcrWorkflowType,
-    isBusy: Boolean,
-    onScan: () -> Unit,
-    onPickImages: () -> Unit,
-    onPickJson: () -> Unit,
-    onPickCanonicalJson: () -> Unit,
-    onPickCanonicalBundle: () -> Unit,
-    onWorkflowSelected: (OcrWorkflowType) -> Unit,
-    onSelectSession: (String) -> Unit,
-    onDeleteSession: (String) -> Unit,
-    onShowApiSettings: () -> Unit,
-    onShowEvaluation: () -> Unit,
-) {
-    val visibleSessions = sessions.filter { it.workflowType == selectedWorkflow }
-    val isFitness = selectedWorkflow == OcrWorkflowType.FITNESS_NUTRITION
-    val isRestaurant = selectedWorkflow == OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT
-    LazyColumn(
-        modifier = Modifier.fillMaxSize().testTag("session_list"),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        item {
-            Text(
-                "PRICETRACE",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                letterSpacing = 1.4.sp,
-            )
-            Text(
-                "OCR",
-                modifier = Modifier.padding(top = 2.dp),
-                style = MaterialTheme.typography.headlineMedium,
-            )
-            Text(
-                "촬영한 정보를 직접 확인하고 필요한 곳에만 보냅니다.",
-                modifier = Modifier.padding(top = 6.dp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
-        item {
-            WorkflowSelector(
-                selectedWorkflow = selectedWorkflow,
-                onWorkflowSelected = onWorkflowSelected,
-            )
-        }
-        item {
-            MonochromeHologramHero(
-                eyebrow = when {
-                    isFitness -> "FITNESS NUTRITION"
-                    isRestaurant -> "RESTAURANT PRICE OBSERVATION"
-                    else -> "PRODUCT PRICE OBSERVATION"
-                },
-                title = if (isFitness) {
-                    "영양 라벨을\n정확하게 기록하세요"
-                } else if (isRestaurant) {
-                    "식당 영수증을\n메뉴별 가격으로 기록하세요"
-                } else {
-                    "영수증 가격을\n검증해 기록하세요"
-                },
-                description = if (isFitness) {
-                    "상품 라벨을 인식한 뒤 영양성분을 직접 확인합니다."
-                } else if (isRestaurant) {
-                    "식당 이름·방문 날짜·메뉴와 옵션 추가 가격을 검수한 뒤 서버에 제출합니다."
-                } else {
-                    "영수증을 인식하고 항목·합계를 검수한 뒤 결과를 확정합니다."
-                },
-                footer = "로컬 우선 · 저장된 작업 ${visibleSessions.size}개",
-                modifier = Modifier.testTag("home_hologram_hero"),
-            )
-        }
-        item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = onScan,
-                    enabled = !isBusy,
-                    modifier = Modifier.weight(1f).testTag("scan_button"),
-                ) {
-                    if (isBusy) BusyIndicator()
-                    Text(
-                        when {
-                            isFitness -> "상품 영양성분 촬영·선택"
-                            isRestaurant -> "식당 영수증 촬영·선택"
-                            else -> "영수증 촬영·선택"
-                        },
-                    )
-                }
-                OutlinedButton(
-                    onClick = onPickImages,
-                    enabled = !isBusy,
-                    modifier = Modifier.weight(1f).testTag("pick_images_button"),
-                ) {
-                    Text("기존 사진 선택")
-                }
-            }
-        }
-        item {
-            OutlinedButton(
-                onClick = onPickJson,
-                enabled = !isBusy,
-                modifier = Modifier.fillMaxWidth().testTag("pick_json_button"),
-            ) {
-                Text("JSON 가져오기")
-            }
-        }
-        item {
-            Button(
-                onClick = onPickCanonicalBundle,
-                enabled = !isBusy,
-                modifier = Modifier.fillMaxWidth().testTag("pick_canonical_bundle_button"),
-            ) {
-                Text(".yeonsik 여러 파일 선택")
-            }
-        }
-        item {
-            OutlinedButton(
-                onClick = onPickCanonicalJson,
-                enabled = !isBusy,
-                modifier = Modifier.fillMaxWidth().testTag("pick_canonical_json_button"),
-            ) {
-                Text("올인원 JSON 검증기 (별도 ingestion)")
-            }
-        }
-        item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(
-                    onClick = onShowApiSettings,
-                    modifier = Modifier.weight(1f).testTag("api_settings_button"),
-                ) {
-                    Text("연결 설정")
-                }
-                if (!isFitness) {
-                    OutlinedButton(
-                        onClick = onShowEvaluation,
-                        modifier = Modifier.weight(1f).testTag("evaluation_button"),
-                    ) {
-                        Text("정확도 평가")
-                    }
-                }
-            }
-        }
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                SectionTitle("최근 작업")
-                Text(
-                    "${visibleSessions.size}개",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        if (visibleSessions.isEmpty()) {
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Text(
-                            if (isFitness) "저장된 영양 라벨이 없습니다." else "저장된 영수증이 없습니다.",
-                            style = MaterialTheme.typography.titleSmall,
-                        )
-                        Text(
-                            "위 촬영 버튼으로 첫 작업을 시작하세요.",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
-            }
-        } else {
-            items(visibleSessions, key = { it.documentId }) { session ->
-                SessionCard(
-                    session = session,
-                    onClick = { onSelectSession(session.documentId) },
-                    onDelete = { onDeleteSession(session.documentId) },
-                )
-            }
         }
     }
 }
@@ -2123,6 +1949,7 @@ private fun RowScope.WorkflowChoice(
 
 @Composable
 private fun ApiSettingsScreen(
+    onShowAdvanced: () -> Unit,
     provider: ReceiptCorrectionProvider?,
     supabaseUrl: String,
     isPublishableKeyConfigured: Boolean,
@@ -2163,6 +1990,11 @@ private fun ApiSettingsScreen(
                 "AI 교정과 분리된 서비스 로그인 세션을 각각 관리합니다.",
                 onBack,
             )
+        }
+        item {
+            OutlinedButton(onClick = onShowAdvanced, modifier = Modifier.fillMaxWidth().testTag("advanced_tools_button")) {
+                Text("고급 도구")
+            }
         }
         item {
             GeminiApiSettingsCard(
@@ -2597,7 +2429,7 @@ private fun CashOsConnectionCard(
     }
 }
 @Composable
-private fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: () -> Unit) {
+internal fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: () -> Unit) {
     var showDeleteConfirmation by remember { mutableStateOf(false) }
     val statusLabel = sessionStatusLabel(session)
     val needsAttention = session.lastError != null
@@ -2624,7 +2456,7 @@ private fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: 
                     )
                     Text(
                         listOfNotNull(
-                            if (session.workflowType == OcrWorkflowType.FITNESS_NUTRITION) "영양 라벨" else "가격 영수증",
+                            workflowTitle(session.workflowType),
                             dateLabel.takeIf { it.isNotBlank() },
                             amountLabel,
                         ).joinToString(" · "),
@@ -2680,8 +2512,8 @@ private fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: 
     if (showDeleteConfirmation) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirmation = false },
-            title = { Text("검수 세션 삭제") },
-            text = { Text("Room metadata, 이미지, JSON을 함께 삭제합니다. 이 작업은 되돌릴 수 없습니다.") },
+            title = { Text("작업 삭제") },
+            text = { Text("이 기기의 작업과 연결된 이미지·결과 파일을 삭제합니다. 이 작업은 되돌릴 수 없습니다.") },
             confirmButton = {
                 Button(
                     onClick = {
@@ -2698,10 +2530,10 @@ private fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: 
     }
 }
 
-private fun sessionStatusLabel(session: ReceiptSession): String = when {
+internal fun sessionStatusLabel(session: ReceiptSession): String = when {
     session.lastError != null -> "확인 필요"
     session.workflowType == OcrWorkflowType.FITNESS_NUTRITION &&
-        session.uploadStatus in setOf("uploaded", "published", "succeeded") -> "DB 저장 완료"
+        session.uploadStatus in setOf("uploaded", "published", "succeeded") -> "Fitness 전송 완료"
     session.reviewStatus in setOf("user_verified", "verified", "completed") -> "검수 완료"
     session.ocrStatus in setOf("completed", "succeeded", "recognized") -> "검수 대기"
     session.ocrStatus in setOf("processing", "in_progress", "running") -> "인식 중"
