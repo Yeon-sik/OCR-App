@@ -1,6 +1,8 @@
 package com.yeonsik.ingestion.desktop
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.input.key.*
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,6 +19,19 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.layout.height
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,6 +46,10 @@ import com.pricetrace.receiptscanner.ingestion.SourceAttachmentType
 import java.nio.file.Files
 import java.nio.file.Path
 import javax.imageio.ImageIO
+
+internal val LocalDesktopSourceSelection = staticCompositionLocalOf<(List<String>, String) -> Unit> { { _, _ -> } }
+internal val LocalDesktopSourceValue = staticCompositionLocalOf<(String) -> Unit> { {} }
+internal val LocalDesktopSourceContext = staticCompositionLocalOf { "" }
 
 @Composable
 fun EvidenceInspector(
@@ -53,7 +72,12 @@ fun EvidenceInspector(
             modifier = Modifier.fillMaxSize().padding(CollectorTokens.space3).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(CollectorTokens.space4),
         ) {
-            CollectorSection("Evidence inspector", "원본을 선택하면 이 패널에서 미리 볼 수 있습니다.") {
+            Text(LocalDesktopSourceContext.current, style = MaterialTheme.typography.bodyMedium)
+            val selected = state.evidence.firstOrNull { it.attachmentId == selectedEvidenceId } ?: state.evidence.firstOrNull()
+            if (selected != null) EvidencePreview(selected)
+            var attachOpen by rememberSaveable { mutableStateOf(false) }
+            CollectorButton(if (attachOpen) "원본 추가 닫기" else "원본 추가", { attachOpen = !attachOpen }, emphasized = false)
+            if (attachOpen) CollectorSection("원본 추가", "검수 자료에 원본을 연결합니다.") {
                 if (state.session == null) {
                     Text(
                         "검토할 항목을 열면 연결된 영수증·라벨·사진을 여기에서 확인할 수 있습니다.",
@@ -94,10 +118,6 @@ fun EvidenceInspector(
                 }
             }
 
-            val selected = state.evidence.firstOrNull { it.attachmentId == selectedEvidenceId } ?: state.evidence.firstOrNull()
-            if (selected != null) {
-                EvidencePreview(selected)
-            }
             state.bundleMetadata?.archiveStatus?.let { status ->
                 ValidationMessage(
                     message = "증거 보관 상태: ${DesktopUiLabels.evidenceArchiveStatus(status)}",
@@ -187,50 +207,61 @@ private fun EvidenceListItem(
 
 @Composable
 private fun EvidencePreview(evidence: DesktopEvidenceAttachment) {
-    val readable = Files.isRegularFile(evidence.path) && Files.isReadable(evidence.path)
-    val bitmap = remember(evidence.path, readable) {
-        if (!readable) {
-            null
-        } else {
-            val bytes = Files.readAllBytes(evidence.path)
+    var loading by remember(evidence.path) { mutableStateOf(true) }
+    val bitmap by produceState<ImageBitmap?>(null, evidence.path) {
+        value = withContext(Dispatchers.IO) {
             runCatching {
-                org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap()
-            }.getOrElse {
-                runCatching { ImageIO.read(evidence.path.toFile())?.toComposeImageBitmap() }.getOrNull()
+                org.jetbrains.skia.Image.makeFromEncoded(Files.readAllBytes(evidence.path)).toComposeImageBitmap()
+            }.getOrElse { runCatching { ImageIO.read(evidence.path.toFile())?.toComposeImageBitmap() }.getOrNull() }
+        }
+        loading = false
+    }
+    var enlarged by rememberSaveable(evidence.path.toString()) { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("원본 · ${evidence.path.fileName}", style = MaterialTheme.typography.labelLarge)
+        if (loading) Text("원본을 불러오는 중")
+        else if (bitmap == null) ValidationMessage("이 원본은 미리볼 수 없습니다.", CollectorStatusKind.REVIEW,
+            recoveryHint = "파일 연결은 유지됩니다. 파일 위치와 이미지 형식을 확인하세요.")
+        else {
+            SourceImageCanvas(bitmap!!, evidence.path.toString(), Modifier.fillMaxWidth().height(440.dp))
+            CollectorButton("원본 크게 보기", { enlarged = true }, emphasized = false)
+        }
+    }
+    if (enlarged && bitmap != null) Dialog(onDismissRequest = { enlarged = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize().padding(24.dp), color = MaterialTheme.colorScheme.surface) {
+            Column(Modifier.padding(16.dp)) {
+                Text(LocalDesktopSourceContext.current)
+                CollectorButton("검수로 돌아가기", { enlarged = false }, emphasized = false)
+                SourceImageCanvas(bitmap!!, evidence.path.toString(), Modifier.weight(1f).fillMaxWidth())
             }
         }
     }
-    CollectorSection(
-        "원본 미리보기",
-        "${DesktopUiLabels.sourceAttachmentType(evidence.type)} · ${evidence.path.fileName}",
-    ) {
-        when {
-            !readable -> ValidationMessage(
-                "원본 파일을 읽을 수 없습니다: ${evidence.path.fileName}",
-                CollectorStatusKind.ERROR,
-                recoveryHint = "파일 위치와 접근 권한을 확인한 뒤 원본을 다시 첨부하세요.",
-            )
-            bitmap == null -> ValidationMessage(
-                "이 원본 형식은 내장 미리보기를 만들 수 없습니다: ${evidence.path.fileName}",
-                CollectorStatusKind.REVIEW,
-                recoveryHint = "파일은 증거 연결에 유지됩니다. PNG/JPEG/WebP 형식이면 화면에서 바로 미리볼 수 있습니다.",
-            )
-            else -> Surface(
-                modifier = Modifier.fillMaxWidth().heightIn(min = 220.dp, max = 520.dp)
-                    .semantics { contentDescription = "${DesktopUiLabels.sourceAttachmentType(evidence.type)} 원본 미리보기: ${evidence.path.fileName}" },
-                shape = CollectorTokens.panelShape,
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-            ) {
-                Box(Modifier.fillMaxWidth().padding(CollectorTokens.space2), contentAlignment = Alignment.Center) {
-                    Image(
-                        bitmap = bitmap,
-                        contentDescription = "${DesktopUiLabels.sourceAttachmentType(evidence.type)} 원본: ${evidence.path.fileName}",
-                        modifier = Modifier.fillMaxWidth().sizeIn(maxHeight = 500.dp),
-                        contentScale = ContentScale.Fit,
-                    )
-                }
+}
+
+@Composable
+private fun SourceImageCanvas(bitmap: ImageBitmap, identity: String, modifier: Modifier) {
+    var scale by rememberSaveable(identity) { mutableStateOf(1f) }
+    var pan by remember(identity) { mutableStateOf(Offset.Zero) }
+    Column(modifier) {
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            CollectorButton("−", { scale = (scale / 1.25f).coerceAtLeast(1f); if (scale == 1f) pan = Offset.Zero }, emphasized = false, contentDescription = "원본 축소")
+            CollectorButton("+", { scale = (scale * 1.25f).coerceAtMost(8f) }, emphasized = false, contentDescription = "원본 확대")
+            CollectorButton("화면 맞춤", { scale = 1f; pan = Offset.Zero }, emphasized = false)
+            Text("${(scale * 100).toInt()}%", Modifier.align(Alignment.CenterVertically))
+        }
+        Text("원본에 포커스: + / − 확대·축소 · 0 화면 맞춤", style = MaterialTheme.typography.bodySmall)
+        Box(Modifier.weight(1f).fillMaxWidth().clipToBounds().collectorFocusOutline().onKeyEvent { event ->
+            if (event.type != KeyEventType.KeyDown || event.isCtrlPressed || event.isAltPressed) false else when (event.key) {
+                Key.Equals, Key.Plus -> { scale = (scale * 1.25f).coerceAtMost(8f); true }
+                Key.Minus -> { scale = (scale / 1.25f).coerceAtLeast(1f); if (scale == 1f) pan = Offset.Zero; true }
+                Key.Zero -> { scale = 1f; pan = Offset.Zero; true }
+                else -> false
             }
+        }.focusable().pointerInput(identity, scale) {
+            detectDragGestures { change, delta -> change.consume(); if (scale > 1f) pan += delta }
+        }) {
+            Image(bitmap, "원본 이미지. 확대 후 끌어서 이동", Modifier.fillMaxSize().graphicsLayer(
+                scaleX = scale, scaleY = scale, translationX = pan.x, translationY = pan.y), contentScale = ContentScale.Fit)
         }
     }
 }

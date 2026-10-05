@@ -22,6 +22,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
 
+    testImplementation(compose.desktop.uiTestJUnit4)
     testImplementation(libs.junit4)
     testImplementation(libs.kotlinx.coroutines.test)
 }

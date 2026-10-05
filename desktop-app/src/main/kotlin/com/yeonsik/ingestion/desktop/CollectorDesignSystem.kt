@@ -56,70 +56,16 @@ object CollectorTokens {
     val panePadding = 16.dp
     val paneGap = 12.dp
     val compactControlHeight = 44.dp
-    val standardRadius = 8.dp
-    val compactRadius = 6.dp
+    val standardRadius = 14.dp
+    val compactRadius = 10.dp
     val controlShape = RoundedCornerShape(compactRadius)
     val panelShape = RoundedCornerShape(standardRadius)
     val focusWidth = 2.dp
 }
 
-private val CollectorLightColors = lightColorScheme(
-    primary = Color(0xFF005FB8),
-    onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFFD9E9FF),
-    onPrimaryContainer = Color(0xFF001B3D),
-    secondary = Color(0xFF4E6077),
-    onSecondary = Color(0xFFFFFFFF),
-    secondaryContainer = Color(0xFFD9E3F6),
-    onSecondaryContainer = Color(0xFF0A1D31),
-    tertiary = Color(0xFF615A00),
-    onTertiary = Color(0xFFFFFFFF),
-    tertiaryContainer = Color(0xFFFFF1A9),
-    onTertiaryContainer = Color(0xFF1D1A00),
-    error = Color(0xFFB3261E),
-    onError = Color(0xFFFFFFFF),
-    errorContainer = Color(0xFFF9DEDC),
-    onErrorContainer = Color(0xFF410E0B),
-    background = Color(0xFFF7F8FA),
-    onBackground = Color(0xFF191C20),
-    surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF191C20),
-    surfaceVariant = Color(0xFFE2E7EC),
-    onSurfaceVariant = Color(0xFF42474E),
-    outline = Color(0xFF72777F),
-    outlineVariant = Color(0xFFC2C7CE),
-)
-
-private val CollectorDarkColors = darkColorScheme(
-    primary = Color(0xFFA9C7FF),
-    onPrimary = Color(0xFF00315F),
-    primaryContainer = Color(0xFF004880),
-    onPrimaryContainer = Color(0xFFD9E9FF),
-    secondary = Color(0xFFBBC7DB),
-    onSecondary = Color(0xFF253140),
-    secondaryContainer = Color(0xFF3B4859),
-    onSecondaryContainer = Color(0xFFD7E3F7),
-    tertiary = Color(0xFFF1E47A),
-    onTertiary = Color(0xFF353100),
-    tertiaryContainer = Color(0xFF4E4800),
-    onTertiaryContainer = Color(0xFFFFF7C1),
-    error = Color(0xFFFFB4AB),
-    onError = Color(0xFF690005),
-    errorContainer = Color(0xFF93000A),
-    onErrorContainer = Color(0xFFFFDAD6),
-    background = Color(0xFF101316),
-    onBackground = Color(0xFFE1E2E6),
-    surface = Color(0xFF191C20),
-    onSurface = Color(0xFFE1E2E6),
-    surfaceVariant = Color(0xFF42474E),
-    onSurfaceVariant = Color(0xFFC2C7CE),
-    outline = Color(0xFF8C9199),
-    outlineVariant = Color(0xFF42474E),
-)
-
 @Composable
 fun CollectorTheme(content: @Composable () -> Unit) {
-    val colors = if (isSystemInDarkTheme()) CollectorDarkColors else CollectorLightColors
+    val colors = if (isSystemInDarkTheme()) OcrSemanticTokens.dark else OcrSemanticTokens.light
     MaterialTheme(
         colorScheme = colors,
         typography = androidx.compose.material3.Typography(
@@ -150,7 +96,7 @@ fun Modifier.collectorFocusOutline(shape: Shape = CollectorTokens.controlShape):
     onFocusChanged { focused = it.hasFocus }
         .then(
             if (focused) {
-                Modifier.border(CollectorTokens.focusWidth, MaterialTheme.colorScheme.primary, shape)
+                Modifier.border(CollectorTokens.focusWidth, MaterialTheme.colorScheme.secondary, shape)
             } else {
                 Modifier
             },
@@ -198,7 +144,7 @@ fun StatusBadge(
     val colors = MaterialTheme.colorScheme
     val (container, content, border) = when (kind) {
         CollectorStatusKind.ERROR -> Triple(colors.errorContainer, colors.onErrorContainer, colors.error)
-        CollectorStatusKind.COMPLETE -> Triple(colors.secondaryContainer, colors.onSecondaryContainer, colors.secondary)
+        CollectorStatusKind.COMPLETE -> Triple(colors.surface, OcrSemanticTokens.success, OcrSemanticTokens.success)
         CollectorStatusKind.REVIEW -> Triple(colors.tertiaryContainer, colors.onTertiaryContainer, colors.tertiary)
         CollectorStatusKind.PROCESSING -> Triple(colors.primaryContainer, colors.onPrimaryContainer, colors.primary)
         CollectorStatusKind.NEUTRAL -> Triple(colors.surfaceVariant, colors.onSurfaceVariant, colors.outline)
@@ -279,7 +225,7 @@ fun CollectorIconButton(
     }
 }
 
-fun destinationAccent(destination: String, colors: ColorScheme = CollectorLightColors): Color = when (destination) {
+fun destinationAccent(destination: String, colors: ColorScheme = OcrSemanticTokens.light): Color = when (destination) {
     "PriceTrace" -> Color(0xFF16803A)
     "CashOS" -> Color(0xFF8A6800)
     "Fitness" -> Color(0xFF176C89)

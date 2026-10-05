@@ -1,6 +1,8 @@
 package com.pricetrace.receiptocr
 
 import android.graphics.BitmapFactory
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -55,6 +57,14 @@ import androidx.compose.material3.Button as MaterialButton
 import androidx.compose.material3.Card as MaterialCard
 import androidx.compose.material3.OutlinedButton as MaterialOutlinedButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
@@ -124,6 +134,7 @@ import com.pricetrace.receiptscanner.ingestion.ProductCandidate
 import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionConsumption
 import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
+import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.LocalEvidence
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
@@ -316,12 +327,32 @@ fun ReceiptOcrContent(
     onRefreshAccuracy: () -> Unit = {},
     onShareAccuracy: () -> Unit = {},
     onDismissMessage: () -> Unit = {},
-) {
+ ) {
+    var advancedOpen by rememberSaveable { mutableStateOf(false) }
+    if (advancedOpen) {
+        BackHandler { advancedOpen = false }
+        AdvancedToolsScreen(
+            onBack = { advancedOpen = false },
+            onJson = { advancedOpen = false; onPickJson() },
+            onValidator = { advancedOpen = false; onPickCanonicalJson() },
+            onEvaluation = { advancedOpen = false; onShowEvaluation() },
+        )
+        return
+    }
+    var reviewSource by remember(uiState.currentDocumentId, canonicalJsonValidatorState.ingestionId) { mutableStateOf(ReviewSourceSelection()) }
+    var sourceOpen by rememberSaveable(uiState.currentDocumentId, canonicalJsonValidatorState.ingestionId) { mutableStateOf(false) }
+    val bundleFiles = if (uiState.screen == AppScreen.CANONICAL_JSON_VALIDATOR) canonicalJsonValidatorState.bundle?.evidencePaths.orEmpty() else emptyMap()
+    if (sourceOpen) ReviewSourceDialog(pages, resolvePageFile, bundleFiles, reviewSource, { sourceOpen = false })
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onBackground,
     ) { innerPadding ->
-        Column(Modifier.fillMaxSize().padding(innerPadding)) {
+        Column(Modifier.fillMaxSize().padding(innerPadding).imePadding()) {
+            if (uiState.screen in reviewWorkspaceScreens) ReviewWorkspaceBar(
+                uiState, reviewSource, pages.isNotEmpty() || bundleFiles.isNotEmpty(), { sourceOpen = true },
+                onShowFields, onShowItems, onShowReconciliation,
+                { onShowOnlyAttentionItemsChanged(true); onShowItems() },
+            )
             uiState.message?.let { message ->
                 MessageCard(message, onDismissMessage)
             }
@@ -390,6 +421,8 @@ fun ReceiptOcrContent(
                     onOpen = onShowProductCandidateReview,
                 )
             }
+            CompositionLocalProvider(LocalReviewSource provides { selection, open -> reviewSource = selection; if (open) sourceOpen = true }) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
             when (uiState.screen) {
                 AppScreen.SESSION_LIST -> SessionListScreen(
                     sessions = sessions,
@@ -397,14 +430,12 @@ fun ReceiptOcrContent(
                     isBusy = uiState.isPreparingScanner || uiState.isImportingPages,
                     onScan = onScan,
                     onPickImages = onPickImages,
-                    onPickJson = onPickJson,
-                    onPickCanonicalJson = onPickCanonicalJson,
+
                     onPickCanonicalBundle = onPickCanonicalBundle,
                     onWorkflowSelected = onWorkflowSelected,
                     onSelectSession = onSelectSession,
                     onDeleteSession = onDeleteSession,
                     onShowApiSettings = onShowApiSettings,
-                    onShowEvaluation = onShowEvaluation,
                 )
                 AppScreen.IMPORT_PREVIEW -> uiState.importPreview?.let { preview ->
                     ImportPreviewScreen(
@@ -468,6 +499,7 @@ fun ReceiptOcrContent(
                     onOpenNutritionReview = onShowCanonicalNutritionReview,
                 )
                 AppScreen.API_SETTINGS -> ApiSettingsScreen(
+                    onShowAdvanced = { advancedOpen = true },
                     provider = uiState.correctionProvider,
                     supabaseUrl = uiState.nutritionSupabaseUrl,
                     isPublishableKeyConfigured = uiState.isNutritionPublishableKeyConfigured,
@@ -767,6 +799,8 @@ fun ReceiptOcrContent(
                     onBack = onBack,
                 )
             }
+            }
+            }
         }
     }
 }
@@ -780,7 +814,7 @@ private fun ExternalSourceImageRequiredBanner(onAttach: () -> Unit) {
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("원본 이미지가 필요합니다.", fontWeight = FontWeight.SemiBold)
-            Text("External JSON 데이터는 원본 이미지를 첨부하고 확인한 뒤에만 확정·저장할 수 있습니다.")
+            Text("가져온 값은 원본 이미지를 첨부하고 확인한 뒤에만 확정·저장할 수 있습니다.")
             MaterialOutlinedButton(
                 onClick = onAttach,
                 modifier = Modifier.fillMaxWidth().testTag("attach_external_source_image_button"),
@@ -809,192 +843,6 @@ private fun MessageCard(message: String, onDismiss: () -> Unit) {
                 fontWeight = FontWeight.Medium,
             )
             TextButton(onClick = onDismiss) { Text("닫기") }
-        }
-    }
-}
-
-@Composable
-private fun SessionListScreen(
-    sessions: List<ReceiptSession>,
-    selectedWorkflow: OcrWorkflowType,
-    isBusy: Boolean,
-    onScan: () -> Unit,
-    onPickImages: () -> Unit,
-    onPickJson: () -> Unit,
-    onPickCanonicalJson: () -> Unit,
-    onPickCanonicalBundle: () -> Unit,
-    onWorkflowSelected: (OcrWorkflowType) -> Unit,
-    onSelectSession: (String) -> Unit,
-    onDeleteSession: (String) -> Unit,
-    onShowApiSettings: () -> Unit,
-    onShowEvaluation: () -> Unit,
-) {
-    val visibleSessions = sessions.filter { it.workflowType == selectedWorkflow }
-    val isFitness = selectedWorkflow == OcrWorkflowType.FITNESS_NUTRITION
-    val isRestaurant = selectedWorkflow == OcrWorkflowType.PRICE_TRACE_RESTAURANT_RECEIPT
-    LazyColumn(
-        modifier = Modifier.fillMaxSize().testTag("session_list"),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        item {
-            Text(
-                "PRICETRACE",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                letterSpacing = 1.4.sp,
-            )
-            Text(
-                "OCR",
-                modifier = Modifier.padding(top = 2.dp),
-                style = MaterialTheme.typography.headlineMedium,
-            )
-            Text(
-                "촬영한 정보를 직접 확인하고 필요한 곳에만 보냅니다.",
-                modifier = Modifier.padding(top = 6.dp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
-        item {
-            WorkflowSelector(
-                selectedWorkflow = selectedWorkflow,
-                onWorkflowSelected = onWorkflowSelected,
-            )
-        }
-        item {
-            MonochromeHologramHero(
-                eyebrow = when {
-                    isFitness -> "FITNESS NUTRITION"
-                    isRestaurant -> "RESTAURANT PRICE OBSERVATION"
-                    else -> "PRODUCT PRICE OBSERVATION"
-                },
-                title = if (isFitness) {
-                    "영양 라벨을\n정확하게 기록하세요"
-                } else if (isRestaurant) {
-                    "식당 영수증을\n메뉴별 가격으로 기록하세요"
-                } else {
-                    "영수증 가격을\n검증해 기록하세요"
-                },
-                description = if (isFitness) {
-                    "상품 라벨을 인식한 뒤 영양성분을 직접 확인합니다."
-                } else if (isRestaurant) {
-                    "식당 이름·방문 날짜·메뉴와 옵션 추가 가격을 검수한 뒤 서버에 제출합니다."
-                } else {
-                    "영수증을 인식하고 항목·합계를 검수한 뒤 결과를 확정합니다."
-                },
-                footer = "로컬 우선 · 저장된 작업 ${visibleSessions.size}개",
-                modifier = Modifier.testTag("home_hologram_hero"),
-            )
-        }
-        item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = onScan,
-                    enabled = !isBusy,
-                    modifier = Modifier.weight(1f).testTag("scan_button"),
-                ) {
-                    if (isBusy) BusyIndicator()
-                    Text(
-                        when {
-                            isFitness -> "상품 영양성분 촬영·선택"
-                            isRestaurant -> "식당 영수증 촬영·선택"
-                            else -> "영수증 촬영·선택"
-                        },
-                    )
-                }
-                OutlinedButton(
-                    onClick = onPickImages,
-                    enabled = !isBusy,
-                    modifier = Modifier.weight(1f).testTag("pick_images_button"),
-                ) {
-                    Text("기존 사진 선택")
-                }
-            }
-        }
-        item {
-            OutlinedButton(
-                onClick = onPickJson,
-                enabled = !isBusy,
-                modifier = Modifier.fillMaxWidth().testTag("pick_json_button"),
-            ) {
-                Text("JSON 가져오기")
-            }
-        }
-        item {
-            Button(
-                onClick = onPickCanonicalBundle,
-                enabled = !isBusy,
-                modifier = Modifier.fillMaxWidth().testTag("pick_canonical_bundle_button"),
-            ) {
-                Text(".yeonsik 여러 파일 선택")
-            }
-        }
-        item {
-            OutlinedButton(
-                onClick = onPickCanonicalJson,
-                enabled = !isBusy,
-                modifier = Modifier.fillMaxWidth().testTag("pick_canonical_json_button"),
-            ) {
-                Text("올인원 JSON 검증기 (별도 ingestion)")
-            }
-        }
-        item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(
-                    onClick = onShowApiSettings,
-                    modifier = Modifier.weight(1f).testTag("api_settings_button"),
-                ) {
-                    Text("연결 설정")
-                }
-                if (!isFitness) {
-                    OutlinedButton(
-                        onClick = onShowEvaluation,
-                        modifier = Modifier.weight(1f).testTag("evaluation_button"),
-                    ) {
-                        Text("정확도 평가")
-                    }
-                }
-            }
-        }
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                SectionTitle("최근 작업")
-                Text(
-                    "${visibleSessions.size}개",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        if (visibleSessions.isEmpty()) {
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Text(
-                            if (isFitness) "저장된 영양 라벨이 없습니다." else "저장된 영수증이 없습니다.",
-                            style = MaterialTheme.typography.titleSmall,
-                        )
-                        Text(
-                            "위 촬영 버튼으로 첫 작업을 시작하세요.",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
-            }
-        } else {
-            items(visibleSessions, key = { it.documentId }) { session ->
-                SessionCard(
-                    session = session,
-                    onClick = { onSelectSession(session.documentId) },
-                    onDelete = { onDeleteSession(session.documentId) },
-                )
-            }
         }
     }
 }
@@ -1112,6 +960,7 @@ private fun CanonicalJsonValidatorScreen(
     onReviewUndo: () -> Unit,
     onReviewRedo: () -> Unit,
 ) {
+    var technicalOpen by rememberSaveable { mutableStateOf(false) }
     var reviewTab by remember { mutableStateOf(ReviewTab.STRUCTURED) }
     val plan = state.plan
     val eligible = plan?.eligible.orEmpty().sortedBy(IngestionProjection::wireValue)
@@ -1128,8 +977,8 @@ private fun CanonicalJsonValidatorScreen(
     ) {
         item {
             ScreenHeader(
-                "올인원 JSON 검증기",
-                "동일한 canonical Core로 파싱·수정·확정하고 필요한 projection만 제출합니다.",
+                if (bundleActive) "검수 자료" else "고급 · JSON 검증기",
+                "원본과 값을 확인하고 검수를 확정한 뒤, 보낼 곳을 선택하세요.",
                 onBack,
             )
         }
@@ -1143,12 +992,12 @@ private fun CanonicalJsonValidatorScreen(
         item {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Verification basis", style = MaterialTheme.typography.titleMedium)
+                    Text("검수 기준", style = MaterialTheme.typography.titleMedium)
                     Text(
                         if (state.verificationBasis == VerificationBasis.MANUAL_CANONICAL_REVIEW) {
-                            "MANUAL_CANONICAL_REVIEW · 원본 이미지 없이도 domain validation과 명시적 확인 후 확정할 수 있습니다."
+                            "원본 없이 직접 확인합니다. 필수 검증을 통과하고 검수를 확정해야 합니다."
                         } else {
-                            "SOURCE_EVIDENCE · 원본 attachment 또는 지원되는 text source evidence gate를 통과해야 확정할 수 있습니다."
+                            "연결된 원본 자료로 확인합니다. 필요한 원본과 검증 조건을 충족해야 확정할 수 있습니다."
                         },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1158,13 +1007,13 @@ private fun CanonicalJsonValidatorScreen(
                                 onClick = { onBasisChanged(VerificationBasis.MANUAL_CANONICAL_REVIEW) },
                                 enabled = !state.busy,
                                 modifier = Modifier.weight(1f),
-                            ) { Text("수동 canonical") }
+                            ) { Text("원본 없이 확인") }
                         }
                         MaterialOutlinedButton(
                             onClick = { onBasisChanged(VerificationBasis.SOURCE_EVIDENCE) },
                             enabled = !state.busy,
                             modifier = Modifier.weight(1f),
-                        ) { Text("원본 evidence") }
+                        ) { Text("원본과 대조") }
                     }
                 }
             }
@@ -1174,13 +1023,15 @@ private fun CanonicalJsonValidatorScreen(
             item {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Bundle / Evidence archive", style = MaterialTheme.typography.titleMedium)
-                        Text("Bundle · ${state.bundleValidationStatus?.name ?: bundle!!.validationStatus.name}")
+                        Text("자료 보관", style = MaterialTheme.typography.titleMedium)
+                        Text(archiveDisplay(state.bundleValidationStatus?.name ?: bundle!!.validationStatus.name))
                         if (bundle != null) {
-                            Text("Evidence archive · ${bundle.archiveStatus.name}")
+                            if (!bundle.verificationEventRecorded && state.session != null && state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint)
+                                Text("검수 기록 저장 미완료 · 검수 확정을 다시 시도하세요.", color = MaterialTheme.colorScheme.error)
+                            Text("원본 · ${archiveDisplay(bundle.archiveStatus.name)}")
                             bundle.archiveError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                             if (state.reviewEdits.isNotEmpty() || bundle.pendingRevision != null) {
-                                Text("Canonical revision archive · ${bundle.revisionArchiveStatus.name}")
+                                Text("수정본 · ${archiveDisplay(bundle.revisionArchiveStatus.name)}")
                                 bundle.revisionArchiveError?.let {
                                     Text(it, color = MaterialTheme.colorScheme.error)
                                 }
@@ -1191,7 +1042,7 @@ private fun CanonicalJsonValidatorScreen(
                                 onClick = onArchiveRetry,
                                 enabled = !state.busy,
                                 modifier = Modifier.fillMaxWidth().testTag("canonical_bundle_archive_retry"),
-                            ) { Text("Archive / Retry") }
+                            ) { Text("원본 보관 다시 시도") }
                         }
                         if (bundle?.pendingRevision != null ||
                             bundle?.revisionArchiveStatus == AndroidCanonicalRevisionArchiveStatus.FAILED
@@ -1200,14 +1051,15 @@ private fun CanonicalJsonValidatorScreen(
                                 onClick = onRevisionRetry,
                                 enabled = !state.busy,
                                 modifier = Modifier.fillMaxWidth().testTag("canonical_revision_archive_retry"),
-                            ) { Text("Revision / Retry") }
+                            ) { Text("수정본 보관 다시 시도") }
                         }
                     }
                 }
             }
         }
-        item { ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it }) }
-        if (reviewTab == ReviewTab.STRUCTURED) {
+        item { TextButton(onClick = { technicalOpen = !technicalOpen }, modifier = Modifier.testTag("canonical_advanced_details")) { Text(if (technicalOpen) "고급 정보 닫기" else "고급 정보") } }
+        if (technicalOpen || !bundleActive) item { ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it }) }
+        if (reviewTab == ReviewTab.STRUCTURED || bundleActive && !technicalOpen) {
             item {
                 AppReviewTable(
                     envelope = state.envelope,
@@ -1244,7 +1096,7 @@ private fun CanonicalJsonValidatorScreen(
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MaterialOutlinedButton(
+                if (!bundleActive) MaterialOutlinedButton(
                     onClick = onParse,
                     enabled = !state.busy && !bundleActive && state.rawJson.isNotBlank(),
                     modifier = Modifier.weight(1f).testTag("canonical_json_parse_button"),
@@ -1265,7 +1117,7 @@ private fun CanonicalJsonValidatorScreen(
         state.notice?.let { notice ->
             item { Text(notice, color = MaterialTheme.colorScheme.primary, modifier = Modifier.testTag("canonical_json_notice")) }
         }
-        if (state.envelope != null) {
+        if (technicalOpen && state.envelope != null) {
             item {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -1283,9 +1135,9 @@ private fun CanonicalJsonValidatorScreen(
             item {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("제출할 projection 선택", style = MaterialTheme.typography.titleMedium)
+                        Text("보낼 곳 · 보낼 내용", style = MaterialTheme.typography.titleMedium)
                         if (eligible.isEmpty()) {
-                            Text("현재 eligible projection이 없습니다.", color = MaterialTheme.colorScheme.error)
+                            Text("현재 보낼 수 있는 대상이 없습니다.", color = MaterialTheme.colorScheme.error)
                         } else {
                             eligible.forEach { projection ->
                                 Row(
@@ -1293,7 +1145,7 @@ private fun CanonicalJsonValidatorScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                 ) {
-                                    Text(projection.wireValue)
+                                    Text(ReceiptDeliveryLabels.projection(projection), Modifier.weight(1f))
                                     Checkbox(
                                         checked = projection in state.selectedProjections,
                                         onCheckedChange = { checked -> onProjectionSelected(projection, checked) },
@@ -1304,8 +1156,8 @@ private fun CanonicalJsonValidatorScreen(
                         }
                         if (disabled.isNotEmpty()) {
                             Text(
-                                "disabled · ${disabled.joinToString { projection ->
-                                    projection.wireValue + plan.disabledReasons[projection]
+                                "이 작업의 전송 대상 아님 · ${disabled.joinToString { projection ->
+                                    ReceiptDeliveryLabels.projection(projection) + plan.disabledReasons[projection]
                                         ?.let { reason -> " ($reason)" }.orEmpty()
                                 }}",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1313,6 +1165,20 @@ private fun CanonicalJsonValidatorScreen(
                             )
                         }
                     }
+                }
+            }
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    state.selectedProjections.forEach { projection ->
+                        plan.dependencies[projection]?.takeIf { it.isNotEmpty() }?.let { dependencies ->
+                            Text("${ReceiptDeliveryLabels.projection(projection)} · 먼저 처리: ${dependencies.joinToString { ReceiptDeliveryLabels.projection(it) }}")
+                        }
+                    }
+                    state.session?.projections?.filterNot { it.status == ProjectionStatus.DISABLED }?.forEach { result ->
+                        Text("${ReceiptDeliveryLabels.projection(result.projection)} · ${ReceiptDeliveryLabels.projectionStatus(result.status)}")
+                        result.lastError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    }
+                    Text("이미 전송한 대상은 유지됩니다. 실패한 대상을 선택해 다시 보낼 수 있습니다.", style = MaterialTheme.typography.bodySmall)
                 }
             }
             item {
@@ -1325,7 +1191,7 @@ private fun CanonicalJsonValidatorScreen(
                             (state.bundle == null || state.bundle.verificationEventRecorded) &&
                             revisionReady,
                         modifier = Modifier.weight(1f).testTag("canonical_json_submit_button"),
-                    ) { Text("선택 제출") }
+                    ) { Text("선택한 곳에 보내기") }
                     MaterialOutlinedButton(
                         onClick = onRetry,
                         enabled = !state.busy && state.session != null && state.selectedProjections.isNotEmpty() &&
@@ -1333,11 +1199,11 @@ private fun CanonicalJsonValidatorScreen(
                             (state.bundle == null || state.bundle.verificationEventRecorded) &&
                             revisionReady,
                         modifier = Modifier.weight(1f).testTag("canonical_json_retry_button"),
-                    ) { Text("재시도") }
+                    ) { Text("선택한 실패 항목 다시 보내기") }
                 }
             }
         }
-        if (state.canonicalJson.isNotBlank()) {
+        if (technicalOpen && state.canonicalJson.isNotBlank()) {
             item {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1368,7 +1234,7 @@ private fun CanonicalBundleBatchCard(
         modifier = Modifier.fillMaxWidth().testTag("canonical_bundle_batch"),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Bundle 일괄 가져오기", style = MaterialTheme.typography.titleMedium)
+            Text("검수 자료 가져오기", style = MaterialTheme.typography.titleMedium)
             Text(
                 "전체 ${summary.total} · 대기 ${summary.queued} · 검수 필요 ${summary.reviewRequired} · " +
                     "완료 ${summary.completed} · 실패 ${summary.failed} · 중복 ${summary.duplicate}",
@@ -1496,7 +1362,7 @@ private fun AppReviewTable(
         }
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("인식 정보 및 전송 계획 · ${model.schema}", style = MaterialTheme.typography.titleMedium)
+        Text("인식한 값 · 보낼 내용", style = MaterialTheme.typography.titleMedium)
         if (CanonicalFieldRegistry.fields(envelope).isNotEmpty()) {
             CanonicalTypedReviewEditor(
                 envelope = envelope,
@@ -1532,7 +1398,7 @@ private fun CanonicalTypedReviewEditor(
                 }
             }
             Text(
-                "허용된 typed field만 편집됩니다. source/evidence/식별자/전송 대상은 변경할 수 없습니다.",
+                "수정 가능한 값만 표시합니다. 원본과 식별 정보는 읽기 전용입니다.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -1557,7 +1423,8 @@ private fun CanonicalTypedReviewField(
     error: String?,
     onApply: (String?) -> Unit,
 ) {
-    var draft by remember(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
+    val sourceAction = LocalReviewSource.current
+    var draft by rememberSaveable(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
     val fieldTag = if (field.path == "receipt.merchant.name") {
         "canonical_review_merchant_name"
     } else {
@@ -1567,7 +1434,7 @@ private fun CanonicalTypedReviewField(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(field.label, style = MaterialTheme.typography.labelMedium)
             Text(
-                field.type.wireValue + if (modified) " · 수정됨" else "",
+                (if (field.nullable) "선택 항목" else "필수 항목") + if (modified) " · 수정됨" else "",
                 style = MaterialTheme.typography.labelSmall,
                 color = if (modified) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1597,8 +1464,9 @@ private fun CanonicalTypedReviewField(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedTextField(
                     value = draft,
-                    onValueChange = { draft = it },
-                    label = { Text(field.type.wireValue) },
+                    onValueChange = { draft = it; sourceAction(ReviewSourceSelection(field.label, it), false) },
+                    label = { Text("현재 값") },
+                    isError = error != null,
                     singleLine = field.type != CanonicalFieldType.DATETIME,
                     keyboardOptions = KeyboardOptions(
                         keyboardType = when (field.type) {
@@ -1607,7 +1475,7 @@ private fun CanonicalTypedReviewField(
                             else -> KeyboardType.Text
                         },
                     ),
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).onFocusChanged { if (it.isFocused) sourceAction(ReviewSourceSelection(field.label, draft), false) },
                 )
                 MaterialOutlinedButton(
                     onClick = { onApply(draft.takeIf(String::isNotBlank)) },
@@ -1792,19 +1660,20 @@ private fun ReceiptBenefitKind.canonicalDisplayName(): String = when (this) {
 private fun AppReceiptReviewTable(receipt: ReceiptV2, verified: Boolean) {
     val model = ReviewViewModel.fromReceipt(receipt, verified)
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("인식 정보 및 전송 계획 · ${model.schema}", style = MaterialTheme.typography.titleMedium)
+        Text("인식한 값 · 보낼 내용", style = MaterialTheme.typography.titleMedium)
         model.rows.forEach { row -> AppReviewTableRow(row) }
     }
 }
 
 @Composable
 private fun AppReviewTableRow(row: ReviewRow) {
-    var expanded by remember(row.id) { mutableStateOf(false) }
+    val sourceAction = LocalReviewSource.current
+    var expanded by rememberSaveable(row.id) { mutableStateOf(false) }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("${row.section} · ${row.item}", style = MaterialTheme.typography.labelMedium)
             Text(row.value, style = MaterialTheme.typography.bodyLarge)
-            row.confidence?.let { Text("confidence $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            row.confidence?.let { Text("인식 신뢰도 $it · 검수 여부와 별개", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             if (row.evidence.isNotEmpty()) {
                 Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -1821,6 +1690,8 @@ private fun AppReviewTableRow(row: ReviewRow) {
                     row.destinations.forEach { badge -> AppReviewDestinationBadge(badge) }
                 }
             }
+            TextButton(onClick = { sourceAction(ReviewSourceSelection(row.item, row.value,
+                attachmentIds = row.evidence.flatMap { it.sourceIds }), true) }) { Text("원본 대조") }
             if (row.details.isNotEmpty()) {
                 TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "상세 접기" else "상세 보기") }
             }
@@ -1880,7 +1751,7 @@ private fun MerchantCandidateReviewScreen(
         item {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Merchant candidate", style = MaterialTheme.typography.titleMedium)
+                    Text("가게 정보", style = MaterialTheme.typography.titleMedium)
                     Text("판매처 · " + candidate.name)
                     candidate.branchName?.takeIf(String::isNotBlank)?.let { Text("지점 · " + it) }
                     candidate.address?.takeIf(String::isNotBlank)?.let { Text("주소 · " + it) }
@@ -2015,7 +1886,7 @@ private fun ProductCandidateReviewScreen(
                     onClick = onOpenNutritionReview,
                     modifier = Modifier.fillMaxWidth().testTag("open_nutrition_review_from_product_candidate"),
                 ) {
-                    Text("ProductLabel nutrition 검수로 이동")
+                    Text("연결된 영양 정보 검수")
                 }
             }
         }
@@ -2123,6 +1994,7 @@ private fun RowScope.WorkflowChoice(
 
 @Composable
 private fun ApiSettingsScreen(
+    onShowAdvanced: () -> Unit,
     provider: ReceiptCorrectionProvider?,
     supabaseUrl: String,
     isPublishableKeyConfigured: Boolean,
@@ -2163,6 +2035,11 @@ private fun ApiSettingsScreen(
                 "AI 교정과 분리된 서비스 로그인 세션을 각각 관리합니다.",
                 onBack,
             )
+        }
+        item {
+            OutlinedButton(onClick = onShowAdvanced, modifier = Modifier.fillMaxWidth().testTag("advanced_tools_button")) {
+                Text("고급 도구")
+            }
         }
         item {
             GeminiApiSettingsCard(
@@ -2597,7 +2474,7 @@ private fun CashOsConnectionCard(
     }
 }
 @Composable
-private fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: () -> Unit) {
+internal fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: () -> Unit) {
     var showDeleteConfirmation by remember { mutableStateOf(false) }
     val statusLabel = sessionStatusLabel(session)
     val needsAttention = session.lastError != null
@@ -2624,7 +2501,7 @@ private fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: 
                     )
                     Text(
                         listOfNotNull(
-                            if (session.workflowType == OcrWorkflowType.FITNESS_NUTRITION) "영양 라벨" else "가격 영수증",
+                            workflowTitle(session.workflowType),
                             dateLabel.takeIf { it.isNotBlank() },
                             amountLabel,
                         ).joinToString(" · "),
@@ -2680,8 +2557,8 @@ private fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: 
     if (showDeleteConfirmation) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirmation = false },
-            title = { Text("검수 세션 삭제") },
-            text = { Text("Room metadata, 이미지, JSON을 함께 삭제합니다. 이 작업은 되돌릴 수 없습니다.") },
+            title = { Text("작업 삭제") },
+            text = { Text("이 기기의 작업과 연결된 이미지·결과 파일을 삭제합니다. 이 작업은 되돌릴 수 없습니다.") },
             confirmButton = {
                 Button(
                     onClick = {
@@ -2698,10 +2575,10 @@ private fun SessionCard(session: ReceiptSession, onClick: () -> Unit, onDelete: 
     }
 }
 
-private fun sessionStatusLabel(session: ReceiptSession): String = when {
+internal fun sessionStatusLabel(session: ReceiptSession): String = when {
     session.lastError != null -> "확인 필요"
     session.workflowType == OcrWorkflowType.FITNESS_NUTRITION &&
-        session.uploadStatus in setOf("uploaded", "published", "succeeded") -> "DB 저장 완료"
+        session.uploadStatus in setOf("uploaded", "published", "succeeded") -> "Fitness 전송 완료"
     session.reviewStatus in setOf("user_verified", "verified", "completed") -> "검수 완료"
     session.ocrStatus in setOf("completed", "succeeded", "recognized") -> "검수 대기"
     session.ocrStatus in setOf("processing", "in_progress", "running") -> "인식 중"
@@ -2788,13 +2665,13 @@ private fun CanonicalNutritionReviewEntry(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("관련 nutrition artifact 검수", fontWeight = FontWeight.SemiBold)
+            Text("연결된 영양 정보 검수", fontWeight = FontWeight.SemiBold)
             Text("receipt 검수와 분리된 확인입니다. 현재 $verifiedCount/${totalCount}개를 검수했습니다.")
             Button(
                 onClick = onOpen,
                 modifier = Modifier.fillMaxWidth().testTag("open_canonical_nutrition_review"),
             ) {
-                Text("nutrition 원본 검수 열기")
+                Text("영양 정보 원본 검수 열기")
             }
         }
     }
@@ -2871,7 +2748,7 @@ private fun ConsumptionReviewScreen(
         item {
             ScreenHeader(
                 "섭취 정보 검수",
-                "외부 JSON의 consumption은 항상 UNVERIFIED로 시작합니다. 원본과 대조해 수정한 뒤 명시적으로 확정하세요.",
+                "가져온 섭취 정보는 검수 전 상태입니다. 원본과 대조하고 수정한 뒤 확정하세요.",
                 onBack,
             )
         }
@@ -2912,7 +2789,7 @@ private fun ConsumptionReviewScreen(
                             onConsumedAtChanged(consumption.clientKey, it)
                         },
                         modifier = Modifier.fillMaxWidth().testTag("consumption_consumed_at_${consumption.clientKey}"),
-                        label = { Text("consumed_at") },
+                        label = { Text("섭취 시각") },
                         singleLine = true,
                     )
                     consumption.items.forEach { item ->
@@ -2948,7 +2825,7 @@ private fun ConsumptionReviewScreen(
                                     modifier = Modifier.weight(1f).testTag(
                                         "consumption_item_amount_${consumption.clientKey}_${item.nutritionClientKey}",
                                     ),
-                                    label = { Text("amount") },
+                                    label = { Text("섭취량") },
                                     singleLine = true,
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 )
@@ -2965,7 +2842,7 @@ private fun ConsumptionReviewScreen(
                                     modifier = Modifier.weight(1f).testTag(
                                         "consumption_item_unit_${consumption.clientKey}_${item.nutritionClientKey}",
                                     ),
-                                    label = { Text("unit") },
+                                    label = { Text("단위") },
                                     singleLine = true,
                                 )
                             }
@@ -3088,7 +2965,7 @@ private fun CanonicalRestaurantNutritionReviewScreen(
             }
         }
         if (artifacts.isEmpty()) {
-            item { Text("검수할 restaurant nutrition artifact가 없습니다.") }
+            item { Text("검수할 식당 영양 정보가 없습니다.") }
         }
     }
 }
@@ -3277,6 +3154,7 @@ private fun NutritionReviewScreen(
             )
         }
         item {
+            if (!isCanonicalReview) Text("보낼 곳 · Fitness\n보낼 내용 · 상품명과 검수한 영양성분. 이 버튼은 검수를 확정한 뒤 바로 전송합니다.", modifier = Modifier.testTag("nutrition_delivery_summary"))
             Button(
                 onClick = if (isCanonicalReview) onConfirmCanonicalReview else onConfirmAndPublish,
                 enabled = validationErrors.isEmpty() && (isCanonicalReview || signedInEmail != null) &&
@@ -3287,9 +3165,9 @@ private fun NutritionReviewScreen(
                 Text(
                     when {
                         isCanonicalReview && draft.status.wireValue == "user_verified" -> "검수 완료 · Fitness 저장은 다음 단계"
-                        isCanonicalReview -> "원본 대조 확정 · Fitness 저장 준비"
-                        draft.status.wireValue == "user_verified" -> "확정본 다시 저장"
-                        else -> "원본 대조 확정 후 DB 저장"
+                        isCanonicalReview -> "검수 확정"
+                        draft.status.wireValue == "user_verified" -> "검수 확정하고 Fitness에 보내기"
+                        else -> "검수 확정하고 Fitness에 보내기"
                     },
                 )
             }
@@ -3520,7 +3398,7 @@ private fun FieldReviewScreen(
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item { ScreenHeader("영수증 필드 검수", "OCR 초안을 원본과 직접 비교하세요.", onBack) }
+        item { ScreenHeader("기본 정보", "OCR 초안을 원본과 직접 비교하세요.", onBack) }
         item { ReviewToolbar(progress, canUndo, canRedo, onUndo, onRedo) }
         pages.firstOrNull()?.let { page ->
             item { EvidenceImage(page, resolvePageFile(page.storageKey), emptyList(), zoomEnabled = true) }
@@ -3682,7 +3560,7 @@ private fun FieldReviewScreen(
                 }
             }
         }
-        item { Button(onClick = onNext, modifier = Modifier.fillMaxWidth().testTag("fields_next_button")) { Text("상품 행 검수") } }
+        item { Button(onClick = onNext, modifier = Modifier.fillMaxWidth().testTag("fields_next_button")) { Text("항목 확인") } }
     }
 }
 
@@ -3726,7 +3604,7 @@ fun ItemReviewScreen(
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        item { ScreenHeader("상품 행 검수", "할인·세금·수수료를 상품으로 바꾸지 마세요.", onBack) }
+        item { ScreenHeader("항목 확인", "할인·세금·수수료를 상품으로 바꾸지 마세요.", onBack) }
         item { ReviewToolbar(progress, canUndo, canRedo, onUndo, onRedo) }
         item {
             OutlinedButton(
@@ -4149,7 +4027,10 @@ private fun LineItemCard(
         ?.filter { line -> line.id in item.sourceLineReferences }
         .orEmpty()
     val page = highlightedLines.firstOrNull()?.pageId?.let { pageId -> pages.firstOrNull { it.id == pageId } }
-    val highlightBoxes = highlightedLines.mapNotNull { it.boundingBox }
+    val highlightBoxes = highlightedLines.filter { it.pageId == page?.id }.mapNotNull { it.boundingBox }
+    val sourceAction = LocalReviewSource.current
+    val sourceContext = ReviewSourceSelection(item.description.orEmpty(), item.netAmountMinor?.toString().orEmpty(), page?.id, highlightBoxes, highlightedLines.joinToString("\n") { it.text })
+    CompositionLocalProvider(LocalReviewContext provides sourceContext) {
     Card(
         modifier = Modifier.fillMaxWidth().testTag(
             if (item.confidence == ConfidenceLevel.LOW) "low_confidence_${item.id}" else "line_item_${item.id}",
@@ -4172,6 +4053,7 @@ private fun LineItemCard(
                 }
                 LineTypeMenu(item.type, onTypeChanged)
             }
+            TextButton(onClick = { sourceAction(sourceContext, true) }, modifier = Modifier.testTag("source_for_${item.id}")) { Text("현재 항목 원본 대조") }
             page?.let {
                 EvidenceImage(it, resolvePageFile(it.storageKey), highlightBoxes, zoomEnabled = true, height = 180)
             }
@@ -4246,6 +4128,7 @@ private fun LineItemCard(
             },
         )
     }
+    }
 }
 
 @Composable
@@ -4293,12 +4176,12 @@ private fun ReconciliationScreen(
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        item { ScreenHeader("합계 검증", "행 합계 보존식과 필수 필드를 확인합니다.", onBack) }
+        item { ScreenHeader("합계 검증", "항목 금액과 최종 결제금액이 맞는지 확인합니다.", onBack) }
         item { ReviewToolbar(progress, canUndo, canRedo, onUndo, onRedo) }
         item {
             Card {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("행 net 합계: ${reconciliation?.lineNetTotalMinor ?: "계산 불가"}")
+                    Text("항목 금액 합계: ${reconciliation?.lineNetTotalMinor ?: "계산 불가"}")
                     Text("영수증 최종 합계: ${receipt.totals.grandTotalAmountMinor ?: "누락"}")
                     Text(
                         "차이: ${reconciliation?.differenceMinor ?: "계산 불가"}",
@@ -4336,7 +4219,7 @@ private fun ReconciliationScreen(
                 )
             }
         } else {
-            item { Text("모든 user_verified 필수 조건을 통과했습니다.", color = ReceiptPositive) }
+            item { Text("필수 조건을 통과했습니다. 원본을 확인한 뒤 직접 확정하세요.", color = ReceiptPositive) }
         }
         item {
             ReviewTextField(
@@ -4354,7 +4237,7 @@ private fun ReconciliationScreen(
         }
         item {
             Button(onClick = onConfirmVerified, modifier = Modifier.fillMaxWidth().testTag("confirm_verified_button")) {
-                Text("검수 완료 · user_verified 확정")
+                Text("검수 확정")
             }
         }
     }
@@ -4403,6 +4286,7 @@ fun JsonPreviewScreen(
     onSelectCashOsLedgerEntry: (String) -> Unit = {},
     onSubmitCashOsReceipt: () -> Unit = {},
 ) {
+    var technicalOpen by rememberSaveable { mutableStateOf(false) }
     var reviewTab by remember { mutableStateOf(ReviewTab.STRUCTURED) }
     val verified = receipt?.document?.source?.transcriptionStatus == TranscriptionStatus.USER_VERIFIED
     val canonicalNutritionVerified = canonicalNutritionCount > 0 &&
@@ -4418,7 +4302,7 @@ fun JsonPreviewScreen(
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        item { ScreenHeader("검증 결과", "저장하거나 공유하기 전에 포함 정보를 확인하세요.", onBack) }
+        item { ScreenHeader("보내기", "저장하거나 공유하기 전에 포함 정보를 확인하세요.", onBack) }
         item {
             Surface(
                 modifier = Modifier.testTag("json_status"),
@@ -4437,7 +4321,8 @@ fun JsonPreviewScreen(
                 )
             }
         }
-        item {
+        item { TextButton(onClick = { technicalOpen = !technicalOpen }, modifier = Modifier.testTag("delivery_advanced_details")) { Text(if (technicalOpen) "고급 공유 정보 닫기" else "고급 공유 정보") } }
+        if (technicalOpen) item {
             Row(
                 modifier = Modifier.fillMaxWidth().toggleable(includeRawText) {
                     onIncludeRawTextChanged(it)
@@ -4455,10 +4340,10 @@ fun JsonPreviewScreen(
                 Switch(checked = includeRawText, onCheckedChange = null)
             }
         }
-        item { ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it }) }
+        if (technicalOpen) item { ReviewTabs(selected = reviewTab, onSelected = { reviewTab = it }) }
         item {
-            if (reviewTab == ReviewTab.STRUCTURED && receipt != null) AppReceiptReviewTable(receipt, verified)
-            else {
+            if ((!technicalOpen || reviewTab == ReviewTab.STRUCTURED) && receipt != null) AppReceiptReviewTable(receipt, verified)
+            else if (technicalOpen) {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     SelectionContainer {
                         Text(
@@ -4498,12 +4383,12 @@ fun JsonPreviewScreen(
                     modifier = Modifier.fillMaxWidth().testTag("pricetrace_canonical_submit_button"),
                 ) {
                     if (isSubmittingCanonicalPriceTrace) BusyIndicator()
-                    Text("PriceTrace에 receipt.v2 + price observation 저장")
+                    Text("PriceTrace에 영수증과 가격 보내기")
                 }
                 Text(
                     when {
                         priceTraceSignedInEmail == null -> "PriceTrace 연결 설정에서 별도 로그인 후 canonical 제출할 수 있습니다."
-                        canonicalPriceTraceReceiptId != null -> "PriceTrace canonical receipt 완료 · $canonicalPriceTraceReceiptId"
+                        canonicalPriceTraceReceiptId != null -> "PriceTrace 전송 완료 · $canonicalPriceTraceReceiptId"
                         canonicalPriceTraceLastError != null -> "PriceTrace 재시도 필요 · $canonicalPriceTraceLastError"
                         else -> "검수된 전체 receipt.v2를 source images/raw text/payment reference 없이 제출합니다."
                     },
@@ -4523,7 +4408,7 @@ fun JsonPreviewScreen(
                     modifier = Modifier.fillMaxWidth().testTag("canonical_submit_all_ready_button"),
                 ) {
                     if (isSubmittingCanonicalAllReady) BusyIndicator()
-                    Text("준비된 canonical projection 모두 제출")
+                    Text("준비된 대상에 보내기")
                 }
                 Text(
                     "PriceTrace identity 확정 후 price observation, CashOS, Fitness를 의존성 순서로 제출합니다. 성공한 대상은 재전송하지 않습니다.",
@@ -4556,7 +4441,7 @@ fun JsonPreviewScreen(
                 }
                 Text(
                     if (canonicalConsumptionVerified) {
-                        "consumption 검수가 완료되었습니다."
+                        "섭취 정보 검수가 완료되었습니다."
                     } else {
                         "consumption 검수 ${canonicalConsumptionVerifiedCount}/${canonicalConsumptionArtifacts.size}개 완료 후 Fitness Meal을 제출할 수 있습니다."
                     },
@@ -4572,7 +4457,7 @@ fun JsonPreviewScreen(
                     enabled = !isExporting && !isSubmittingCanonicalNutrition && !isSubmittingCanonicalAllReady,
                     modifier = Modifier.fillMaxWidth().testTag("fitness_canonical_review_button"),
                 ) {
-                    Text("관련 nutrition 원본 검수 열기")
+                    Text("영양 정보 검수 열기")
                 }
                 Text(
                     if (canonicalNutritionVerifiedCount < canonicalNutritionCount) {
@@ -4595,14 +4480,14 @@ fun JsonPreviewScreen(
                     modifier = Modifier.fillMaxWidth().testTag("fitness_canonical_submit_button"),
                 ) {
                     if (isSubmittingCanonicalNutrition) BusyIndicator()
-                    Text("검수된 nutrition을 Fitness에 저장")
+                    Text("Fitness에 영양 정보 보내기")
                 }
             }
         }
         if (isCanonicalIngestion) {
             item {
                 Text(
-                    "CashOS v3가 원장·계정·카테고리를 서버에서 resolve합니다. 신규 OCR 흐름에서는 원장을 사전 선택하지 않습니다.",
+                    "CashOS가 거래에 맞는 원장·계정·카테고리를 확인합니다.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -4632,10 +4517,10 @@ fun JsonPreviewScreen(
             Text(
                 when {
                     cashOsSignedInEmail == null -> "CashOS 연결 설정에서 별도 로그인 후 제출할 수 있습니다."
-                    cashOsReceiptId != null && cashOsReceiptReplayed == true -> "CashOS replay 확인: $cashOsReceiptId"
-                    cashOsReceiptId != null -> "CashOS 원자 기록 완료: $cashOsReceiptId"
+                    cashOsReceiptId != null && cashOsReceiptReplayed == true -> "CashOS 기존 기록 확인: $cashOsReceiptId"
+                    cashOsReceiptId != null -> "CashOS 전송 완료: $cashOsReceiptId"
                     cashOsReceiptLastError != null -> "CashOS 재시도 필요: $cashOsReceiptLastError"
-                    else -> "CashOS에는 user-verified financial projection만 전송합니다."
+                    else -> "CashOS에는 검수가 확정된 지출 정보만 보냅니다."
                 },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
@@ -5469,7 +5354,7 @@ private fun Double.asPercent(): String = String.format(Locale.US, "%.1f%%", this
 private fun Double?.asPercentOrNa(): String = this?.asPercent() ?: "N/A (분모 없음)"
 
 @Composable
-private fun EvidenceImage(
+internal fun EvidenceImage(
     page: ReceiptPage,
     file: File,
     highlights: List<BoundingBox>,
@@ -5490,7 +5375,7 @@ private fun EvidenceImage(
     Card {
         Column {
             Box(
-                modifier = Modifier.fillMaxWidth().height(height.dp)
+                modifier = Modifier.fillMaxWidth().height(height.dp).clipToBounds()
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center,
             ) {
@@ -5553,7 +5438,7 @@ private fun EvidenceImage(
                 }
             }
             Text(
-                "페이지 ${page.pageIndex + 1} · ${page.width}×${page.height} · SHA-256 ${page.sha256.take(12)}… · r${page.revision}",
+                "원본 · 페이지 ${page.pageIndex + 1} · 두 손가락으로 확대",
                 modifier = Modifier.padding(12.dp),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -5561,7 +5446,7 @@ private fun EvidenceImage(
     }
 }
 
-private fun decodeSampledBitmap(file: File): android.graphics.Bitmap? {
+internal fun decodeSampledBitmap(file: File): android.graphics.Bitmap? {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeFile(file.absolutePath, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
@@ -5579,9 +5464,11 @@ private fun ReviewTextField(
     supporting: String? = null,
     testTag: String? = null,
 ) {
+    val sourceAction = LocalReviewSource.current
+    val sourceContext = LocalReviewContext.current
     OutlinedTextField(
         value = value,
-        onValueChange = onValueChange,
+        onValueChange = { next -> onValueChange(next); sourceAction(sourceContext.copy(label = label, value = next), false) },
         label = { Text(label) },
         isError = isError,
         supportingText = when {
@@ -5590,7 +5477,7 @@ private fun ReviewTextField(
             else -> null
         },
         singleLine = supporting == null,
-        modifier = Modifier.fillMaxWidth().let { modifier ->
+        modifier = Modifier.fillMaxWidth().semantics { stateDescription = if (isError) "확인 필요" else if (value.isBlank()) "값 미확인" else "현재 값" }.onFocusChanged { if (it.isFocused) sourceAction(sourceContext.copy(label = label, value = value), false) }.let { modifier ->
             testTag?.let(modifier::testTag) ?: modifier
         },
     )
@@ -5609,7 +5496,7 @@ private fun ReviewToolbar(
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (progress != null) {
                 Text(
-                    "행 ${progress.settledLineItemCount}/${progress.lineItemCount} 확인 · " +
+                    "자동 검사상 문제 없는 행 ${progress.settledLineItemCount}/${progress.lineItemCount} · " +
                         "차단 ${progress.blockingIssueCount}건 · 주의 ${progress.warningIssueCount}건",
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
@@ -5677,7 +5564,7 @@ private fun ScreenHeader(title: String, subtitle: String, onBack: () -> Unit) {
             modifier = Modifier.heightIn(min = 48.dp),
         ) { Text("← 이전") }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = MaterialTheme.typography.headlineSmall)
+            Text(title, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
             Text(
                 subtitle,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -5689,7 +5576,7 @@ private fun ScreenHeader(title: String, subtitle: String, onBack: () -> Unit) {
 
 @Composable
 private fun SectionTitle(value: String) {
-    Text(value, style = MaterialTheme.typography.titleLarge)
+    Text(value, style = MaterialTheme.typography.titleLarge, modifier = Modifier.semantics { heading() })
 }
 
 @Composable
@@ -5713,7 +5600,7 @@ private fun Button(
         onClick = onClick,
         modifier = modifier.heightIn(min = 52.dp),
         enabled = enabled,
-        shape = CircleShape,
+        shape = MaterialTheme.shapes.small,
         colors = ButtonDefaults.buttonColors(
             containerColor = MaterialTheme.colorScheme.inverseSurface,
             contentColor = MaterialTheme.colorScheme.inverseOnSurface,
@@ -5736,7 +5623,7 @@ private fun OutlinedButton(
         onClick = onClick,
         modifier = modifier.heightIn(min = 48.dp),
         enabled = enabled,
-        shape = CircleShape,
+        shape = MaterialTheme.shapes.small,
         colors = ButtonDefaults.outlinedButtonColors(
             containerColor = MaterialTheme.colorScheme.surface,
             contentColor = MaterialTheme.colorScheme.onSurface,
@@ -5757,7 +5644,7 @@ private fun Card(
     modifier: Modifier = Modifier,
     shape: Shape = MaterialTheme.shapes.medium,
     colors: CardColors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    elevation: CardElevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    elevation: CardElevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     MaterialCard(

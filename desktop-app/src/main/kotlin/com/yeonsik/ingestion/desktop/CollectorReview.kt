@@ -21,8 +21,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
@@ -40,6 +42,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner
 import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
 import com.pricetrace.receiptscanner.ingestion.ProjectionStatus
@@ -136,78 +139,90 @@ fun ReviewWorkspace(
                 state.bundleMetadata.verificationEventRecorded) &&
             revisionReady && selectedProjections.isNotEmpty()
 
-        Column(
-            modifier = Modifier.fillMaxSize().padding(CollectorTokens.space4).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(CollectorTokens.space5),
-        ) {
+        Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             ReviewHeader(
                 state = state,
                 title = reviewTitle(state, model.rows),
                 onDeveloperInfoVisibleChanged = onDeveloperInfoVisibleChanged,
                 developerInfoVisible = developerInfoVisible,
             )
-            state.error?.let { ValidationMessage(it, CollectorStatusKind.ERROR) }
-            state.notice?.let { ValidationMessage(it, CollectorStatusKind.PROCESSING, recoveryHint = null) }
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                state.error?.let { ValidationMessage(it, CollectorStatusKind.ERROR) }
+                state.notice?.let { ValidationMessage(it, CollectorStatusKind.PROCESSING, recoveryHint = null) }
 
-            if (state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.FAILED) {
-                InlineRecoveryAction(
-                    title = "증거 보관을 완료해야 합니다",
-                    message = state.bundleMetadata.archiveError ?: "증거 보관에 실패했습니다.",
-                    buttonLabel = "보관 다시 시도",
-                    busy = busy,
-                    onAction = onRetryArchive,
-                )
-            }
-            if (state.bundleMetadata?.pendingRevision != null ||
-                state.bundleMetadata?.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.FAILED
-            ) {
-                InlineRecoveryAction(
-                    title = "수정본 보관을 완료해야 합니다",
-                    message = state.bundleMetadata.revisionArchiveError
-                        ?: "수정한 canonical revision이 아직 보관되지 않았습니다.",
-                    buttonLabel = "수정본 보관 다시 시도",
-                    busy = busy,
-                    onAction = onRetryRevision,
-                )
-            }
+                if (state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.FAILED) {
+                    InlineRecoveryAction(
+                        title = "증거 보관을 완료해야 합니다",
+                        message = state.bundleMetadata.archiveError ?: "증거 보관에 실패했습니다.",
+                        buttonLabel = "보관 다시 시도",
+                        busy = busy,
+                        onAction = onRetryArchive,
+                    )
+                }
+                if (state.bundleMetadata?.pendingRevision != null ||
+                    state.bundleMetadata?.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.FAILED
+                ) {
+                    InlineRecoveryAction(
+                        title = "수정본 보관을 완료해야 합니다",
+                        message = state.bundleMetadata.revisionArchiveError
+                            ?: "수정한 검수본이 아직 보관되지 않았습니다.",
+                        buttonLabel = "수정본 보관 다시 시도",
+                        busy = busy,
+                        onAction = onRetryRevision,
+                    )
+                }
 
-            SourceSummary(state, model.rows)
-            ReceiptSection(model.rows)
-            NutritionSection(model.rows)
-            PurchaseAndGenericSections(model.rows)
-            EditableCanonicalSection(
-                envelope = envelope,
-                edits = state.reviewEdits,
-                fieldErrors = state.reviewFieldErrors,
-                busy = busy,
-                onEdit = onEdit,
-            )
-            DestinationSection(
-                state = state,
-                destinations = model.destinations,
-                selectedProjections = selectedProjections,
-                busy = busy,
-                onProjectionSelected = onProjectionSelected,
-            )
-            ConfirmAndSubmitSection(
-                state = state,
-                busy = busy,
-                canVerify = canVerify,
-                canSubmit = canSubmit,
-                verificationBasis = verificationBasis,
-                selectedProjections = selectedProjections,
-                submitConfirmationOpen = submitConfirmationOpen,
-                onVerificationBasisSelected = onVerificationBasisSelected,
-                onVerify = onVerify,
-                onOpenSubmitConfirmation = onOpenSubmitConfirmation,
-                onDismissSubmitConfirmation = onDismissSubmitConfirmation,
-                onConfirmSubmit = onConfirmSubmit,
-            )
-            if (developerInfoVisible) {
-                DeveloperInfoPanel(
+                if (state.bundleMetadata != null && !state.bundleMetadata.verificationEventRecorded && state.session != null &&
+                    state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint) {
+                    InlineRecoveryAction("검수 기록 저장 미완료", "검수 내용은 확정됐지만 기록 저장이 완료되지 않았습니다.",
+                        "검수 기록 다시 저장", busy, onVerify)
+                }
+                SourceSummary(state, model.rows)
+                if (state.reviewFieldErrors.isNotEmpty()) ValidationMessage(
+                    "수정 필요 ${state.reviewFieldErrors.size}개 · 아래 편집 항목을 확인하세요", CollectorStatusKind.ERROR)
+                var showAllValues by rememberSaveable { mutableStateOf(false) }
+                CollectorButton(if (showAllValues) "전체 값 접기" else "전체 값 ${model.rows.size}개 보기", { showAllValues = !showAllValues }, emphasized = false)
+                if (showAllValues) {
+                    ReceiptSection(model.rows)
+                    NutritionSection(model.rows)
+                    PurchaseAndGenericSections(model.rows)
+                }
+                EditableCanonicalSection(
+                    envelope = envelope,
+                    edits = state.reviewEdits,
+                    fieldErrors = state.reviewFieldErrors,
+                    busy = busy,
+                    onEdit = onEdit,
+                )
+                DestinationSection(
                     state = state,
-                    onImportJson = onImportJson,
-                    onClose = { onDeveloperInfoVisibleChanged(false) },
+                    destinations = model.destinations,
+                    selectedProjections = selectedProjections,
+                    busy = busy,
+                    onProjectionSelected = onProjectionSelected,
+                )
+                if (developerInfoVisible) {
+                    DeveloperInfoPanel(
+                        state = state,
+                        onImportJson = onImportJson,
+                        onClose = { onDeveloperInfoVisibleChanged(false) },
+                    )
+                }
+            }
+            Column(Modifier.fillMaxWidth().heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
+                ConfirmAndSubmitSection(
+                    state = state,
+                    busy = busy,
+                    canVerify = canVerify,
+                    canSubmit = canSubmit,
+                    verificationBasis = verificationBasis,
+                    selectedProjections = selectedProjections,
+                    submitConfirmationOpen = submitConfirmationOpen,
+                    onVerificationBasisSelected = onVerificationBasisSelected,
+                    onVerify = onVerify,
+                    onOpenSubmitConfirmation = onOpenSubmitConfirmation,
+                    onDismissSubmitConfirmation = onDismissSubmitConfirmation,
+                    onConfirmSubmit = onConfirmSubmit,
                 )
             }
         }
@@ -397,7 +412,8 @@ private fun ReviewRowGroup(title: String, rows: List<ReviewRow>) {
 
 @Composable
 private fun HumanReviewRow(row: ReviewRow) {
-    var detailsVisible by remember(row.id) { mutableStateOf(false) }
+    val selectSource = LocalDesktopSourceSelection.current
+    var detailsVisible by rememberSaveable(row.id) { mutableStateOf(false) }
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(CollectorTokens.space1),
@@ -424,6 +440,7 @@ private fun HumanReviewRow(row: ReviewRow) {
                 }
             }
         }
+        CollectorButton("원본 대조", { selectSource(row.evidence.flatMap { it.sourceIds }, "${row.item} · 현재 값: ${row.value}") }, emphasized = false)
         if (row.details.isNotEmpty()) {
             CollectorButton(
                 label = if (detailsVisible) "상세 접기" else "상세 보기",
@@ -521,8 +538,8 @@ private fun EditableCanonicalSection(
 ) {
     val (visibleFields, emptyOptionalFields) = remember(envelope) { canonicalReviewFieldGroups(envelope) }
     if (visibleFields.isEmpty() && emptyOptionalFields.isEmpty()) return
-    var editorVisible by remember(envelope) { mutableStateOf(false) }
-    var showEmptyOptionalFields by remember(envelope) { mutableStateOf(false) }
+    var editorVisible by rememberSaveable { mutableStateOf(false) }
+    var showEmptyOptionalFields by rememberSaveable { mutableStateOf(false) }
     CollectorSection(
         "수정",
         "상품명처럼 연결된 값은 한 번만 표시합니다. 필수 값과 입력된 값부터 확인하세요.",
@@ -550,7 +567,7 @@ private fun EditableCanonicalSection(
                 modifier = Modifier.weight(1f),
             )
         }
-        if (editorVisible) {
+        if (editorVisible || fieldErrors.isNotEmpty()) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = CollectorTokens.panelShape,
@@ -558,7 +575,7 @@ private fun EditableCanonicalSection(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             ) {
                 Column(Modifier.padding(CollectorTokens.space3), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space4)) {
-                    visibleFields.forEach { field ->
+                    visibleFields.sortedBy { if (it.path in fieldErrors) 0 else 1 }.forEach { field ->
                         AccessibleField(
                             field = field,
                             modified = CanonicalFieldRegistry.isModified(field, edits),
@@ -617,7 +634,8 @@ fun AccessibleField(
     busy: Boolean,
     onApply: (String?) -> Unit,
 ) {
-    var draft by remember(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
+    val sourceValue = LocalDesktopSourceValue.current
+    var draft by rememberSaveable(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
     Column(
         modifier = Modifier.fillMaxWidth().semantics {
             contentDescription = canonicalFieldContentDescription(field, modified, error)
@@ -648,8 +666,8 @@ fun AccessibleField(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2), verticalAlignment = Alignment.Top) {
                 OutlinedTextField(
                     value = draft,
-                    onValueChange = { draft = it },
-                    modifier = Modifier.weight(1f).collectorFocusOutline(CollectorTokens.controlShape),
+                    onValueChange = { draft = it; sourceValue("${field.label} · 미적용 값: $it") },
+                    modifier = Modifier.weight(1f).collectorFocusOutline(CollectorTokens.controlShape).onFocusChanged { if (it.isFocused) sourceValue("${field.label} · 현재 편집값: $draft") },
                     enabled = !busy,
                     label = { Text("새 값") },
                     singleLine = field.type != CanonicalFieldType.DATETIME,
@@ -740,13 +758,14 @@ private fun DestinationSection(
     busy: Boolean,
     onProjectionSelected: (IngestionProjection) -> Unit,
 ) {
-    CollectorSection("전송 대상", "대상 이름과 상태를 확인하고 전송할 항목을 선택합니다.") {
+    CollectorSection("보낼 곳 · 보낼 내용", "대상 이름과 상태를 확인하고 전송할 항목을 선택합니다.") {
         if (destinations.isNotEmpty()) {
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
                 destinations.forEach { DestinationStatus(it) }
             }
         }
         val projections = state.session?.projections.orEmpty().filterNot { it.status == ProjectionStatus.DISABLED }
+        Text(deliveryProgressLabel(projections.map { it.status }), style = MaterialTheme.typography.bodyMedium)
         if (projections.isEmpty()) {
             Text("활성 전송 대상이 없습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         } else {
@@ -775,6 +794,8 @@ private fun DestinationSection(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.bodySmall,
                             )
+                            val dependencies = state.envelope?.let { CanonicalProjectionPlanner.plan(it).dependencies[projection.projection] }.orEmpty()
+                            if (dependencies.isNotEmpty()) Text("먼저 처리: ${dependencies.joinToString { DesktopUiLabels.projection(it) }}", style = MaterialTheme.typography.bodySmall)
                             projection.lastError?.let { ValidationMessage(it, CollectorStatusKind.ERROR, compact = true) }
                         }
                     }
@@ -814,7 +835,7 @@ private fun ConfirmAndSubmitSection(
                 }
             }
         } else {
-            Text("검수 기준: 원본 증거 기반 (번들)", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            Text("검수 기준: 원본 자료와 대조", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
             CollectorButton(
@@ -825,7 +846,7 @@ private fun ConfirmAndSubmitSection(
                 contentDescription = "검수 확정. 현재 수정과 증거를 다시 검증합니다.",
             )
             CollectorButton(
-                label = "전송",
+                label = if (state.session?.projections?.any { it.projection in selectedProjections && it.status == ProjectionStatus.FAILED } == true) "선택한 실패 항목 다시 보내기" else "선택한 곳에 보내기",
                 onClick = onOpenSubmitConfirmation,
                 enabled = canSubmit,
                 emphasized = false,
@@ -843,12 +864,18 @@ private fun ConfirmAndSubmitSection(
                 Column(Modifier.padding(CollectorTokens.space3), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
                     Text("전송 확인", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "검수된 canonical 자료를 ${selectedProjections.size}개 대상으로 전송합니다. 전송 후 대상 시스템의 상태가 변경될 수 있습니다.",
+                        "선택한 곳에 검수된 자료를 보냅니다. 필요한 선행 작업은 기존 처리 순서를 따르며, 이미 성공한 대상은 다시 보내지 않습니다.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
+                    selectedProjections.forEach { projection ->
+                        Text(DesktopUiLabels.projection(projection), style = MaterialTheme.typography.labelLarge)
+                        state.envelope?.let { CanonicalProjectionPlanner.plan(it).dependencies[projection] }?.takeIf { it.isNotEmpty() }?.let { dependencies ->
+                            Text("먼저 처리: ${dependencies.joinToString { DesktopUiLabels.projection(it) }}", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
                         CollectorButton("전송 취소", onDismissSubmitConfirmation, emphasized = false, modifier = Modifier.weight(1f))
-                        CollectorButton("전송 확인", onConfirmSubmit, enabled = !busy, modifier = Modifier.weight(1f))
+                        CollectorButton("전송 확인", onConfirmSubmit, enabled = canSubmit, modifier = Modifier.weight(1f))
                     }
                 }
             }
@@ -982,16 +1009,16 @@ private fun overallStatusKind(state: DesktopUiState): CollectorStatusKind = when
 }
 
 private fun overallStatusLabel(state: DesktopUiState, kind: CollectorStatusKind): String = when (kind) {
-    CollectorStatusKind.COMPLETE -> "완료"
+    CollectorStatusKind.COMPLETE -> "모든 활성 대상 전송 완료"
     CollectorStatusKind.ERROR -> "오류"
     CollectorStatusKind.PROCESSING -> "처리 중"
-    CollectorStatusKind.REVIEW -> if (state.session?.verifiedCanonicalFingerprint == state.session?.canonicalFingerprint) "전송 가능" else "검토 필요"
+    CollectorStatusKind.REVIEW -> if (state.session != null && state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint) "검수 확정 · 전송 조건 확인" else "검수 필요"
     CollectorStatusKind.NEUTRAL -> "대기"
 }
 
 private fun suggestedRecovery(message: String): String = when {
     message.contains("required", ignoreCase = true) || message.contains("증거", ignoreCase = true) ->
-        "Evidence inspector에서 필요한 원본을 첨부하고 다시 검수하세요."
+        "원본 패널에서 필요한 원본을 첨부하고 다시 검수하세요."
     message.contains("revision", ignoreCase = true) ->
         "수정본 보관을 다시 시도한 뒤 검수하세요."
     message.contains("unsupported", ignoreCase = true) || message.contains("유효하지", ignoreCase = true) ->
