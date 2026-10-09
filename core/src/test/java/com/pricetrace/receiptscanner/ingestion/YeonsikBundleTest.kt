@@ -16,6 +16,28 @@ import java.util.zip.ZipOutputStream
 
 class YeonsikBundleTest {
     @Test
+    fun v5BindsHistoryAndFoodBytesInTheUnchangedBundleFormat() {
+        val canonical = example("yeonsik-ocr.v5.restaurant-purchase.example.json")
+        val evidence = mapOf(
+            "order-history-1" to Evidence(SourceAttachmentType.ORDER_HISTORY, "order.jpg", "order bytes".toByteArray()),
+            "payment-history-1" to Evidence(SourceAttachmentType.PAYMENT_HISTORY, "payment.jpg", "payment bytes".toByteArray()),
+            "food-photo-1" to Evidence(SourceAttachmentType.FOOD_PHOTO, "food.jpg", "food bytes".toByteArray()),
+        )
+        val bytes = bundle(canonical, evidence)
+        val result = readBundle(bytes)
+        assertEquals(YEONSIK_OCR_V5_SCHEMA, result.bundle.envelope.schemaVersion)
+        result.bundle.manifest.evidence.forEach { entry ->
+            val expected = evidence.getValue(entry.sourceFileId).bytes
+            assertEquals(digest(expected), entry.sha256)
+            assertEquals(expected.size.toLong(), entry.byteSize)
+            assertTrue(expected.contentEquals(Files.readAllBytes(result.directory.resolve(entry.path))))
+        }
+        assertEquals(result.bundle.bundleFingerprint, readBundle(bytes).bundle.bundleFingerprint)
+        assertRejected(bundle(canonical, evidence - "food-photo-1"), "match 1:1")
+        assertRejected(bundle(canonical, evidence, evidenceHash = "0".repeat(64)), "hash")
+        assertRejected(bundle(canonical, evidence, evidenceSizeDelta = 1), "size")
+    }
+    @Test
     fun validV2RestaurantAutoBindsEvidenceAndPassesSourceGate() {
         val canonical = example("yeonsik-ocr.v2.restaurant.example.json")
         val evidence = mapOf(

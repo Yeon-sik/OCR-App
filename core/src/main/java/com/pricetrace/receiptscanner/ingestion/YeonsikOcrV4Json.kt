@@ -463,7 +463,7 @@ object YeonsikOcrV4Json {
             "user-statement:sha256:" + StableIds.sha256(it)
         }
 
-    private fun decodePurchaseRecord(root: JsonObject): PurchaseRecord {
+    internal fun decodePurchaseRecord(root: JsonObject): PurchaseRecord {
         requireKeysAllowingOptional(
             root,
             PURCHASE_RECORD_REQUIRED_KEYS,
@@ -581,7 +581,7 @@ object YeonsikOcrV4Json {
         )
     }
 
-    private fun validatePurchaseEvidence(
+    internal fun validatePurchaseEvidence(
         source: IngestionSource,
         productCandidates: List<ProductCandidate>,
         records: List<PurchaseRecord>,
@@ -657,7 +657,7 @@ object YeonsikOcrV4Json {
             .mapValues { (_, value) -> value.takeUnless { it == JsonNull }?.jsonPrimitive?.contentOrNull }
     }
 
-    private fun decodeReview(
+    internal fun decodeReview(
         root: JsonObject,
         productCandidates: List<ProductCandidate>,
         records: List<PurchaseRecord>,

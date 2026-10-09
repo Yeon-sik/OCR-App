@@ -60,7 +60,7 @@ object CanonicalProjectionPlanner {
             if (envelope.productCandidates.isNotEmpty()) {
                 add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
             }
-            if (envelope.purchaseRecords.isEmpty() && envelope.nutrition.isNotEmpty()) {
+            if ((envelope.purchaseRecords.isEmpty() || envelope.schemaVersion == YEONSIK_OCR_V5_SCHEMA) && envelope.nutrition.isNotEmpty()) {
                 add(IngestionProjection.FITNESS_NUTRITION)
             }
             val mealValuesComplete = envelope.consumption.all(IngestionConsumption::isCompleteForFitnessMeal)
@@ -74,7 +74,7 @@ object CanonicalProjectionPlanner {
                 YEONSIK_OCR_V3_SCHEMA -> mealValuesComplete
                 else -> mealValuesComplete
             }
-            if (envelope.purchaseRecords.isEmpty() &&
+            if ((envelope.purchaseRecords.isEmpty() || envelope.schemaVersion == YEONSIK_OCR_V5_SCHEMA) &&
                 envelope.nutrition.isNotEmpty() &&
                 envelope.consumption.isNotEmpty() &&
                 mealEligible

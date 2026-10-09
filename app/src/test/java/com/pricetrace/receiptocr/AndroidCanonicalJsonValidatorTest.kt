@@ -55,6 +55,19 @@ import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
 
 class AndroidCanonicalJsonValidatorTest {
     @Test
+    fun v5AndroidReviewUsesTheSharedPlanAndRetainsPurchaseNutritionLinks() = runBlocking {
+        val validator = AndroidCanonicalJsonValidator(CanonicalIngestionUseCase(InMemoryIngestionSessionStore()))
+        val imported = validator.importJson(readExample("yeonsik-ocr.v5.restaurant-purchase.example.json"), AndroidCanonicalJsonValidatorState())
+        val envelope = requireNotNull(imported.envelope)
+        assertEquals(CanonicalProjectionPlanner.plan(envelope), imported.plan)
+        assertEquals(setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION, IngestionProjection.CASHOS_TRANSACTION, IngestionProjection.FITNESS_NUTRITION), imported.plan!!.eligible)
+        assertEquals("line-1", envelope.purchaseNutritionLinks.single().purchaseLineKey)
+        val rows = ReviewViewModel.fromCanonical(envelope).rows
+        assertTrue(rows.any { it.section == "구매 행과 영양 연결" })
+        assertTrue(com.pricetrace.receiptscanner.review.CanonicalFieldRegistry.fields(envelope).any { it.path == "links[food-1].purchase_line_key" })
+    }
+
+    @Test
     fun `android review derives PriceTrace status and reason per V4 purchase record`() = runBlocking {
         val source = YeonsikOcrV4Json.decode(
             readExample("yeonsik-ocr.v4.purchase.example.json"),

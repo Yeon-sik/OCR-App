@@ -702,6 +702,18 @@ class CanonicalReviewController(
         path.startsWith("nutrition[") -> applyNutritionField(envelope, path, parsed)
         path.startsWith("consumption[") -> applyConsumptionField(envelope, path, parsed)
         path.startsWith("purchase_records[") -> applyPurchaseField(envelope, path, parsed)
+        path.startsWith("links[") -> {
+            val match = Regex("""links\[([^]]+)]\.(.+)""").matchEntire(path) ?: error("invalid purchase link path")
+            val key = match.groupValues[1]
+            val value = parsed.value as? String ?: error("link key is required")
+            envelope.copy(purchaseNutritionLinks = envelope.purchaseNutritionLinks.map { link ->
+                if (link.nutritionClientKey != key) link else when (match.groupValues[2]) {
+                    "purchase_record_client_key" -> link.copy(purchaseRecordClientKey = value)
+                    "purchase_line_key" -> link.copy(purchaseLineKey = value)
+                    else -> error("link field is not editable")
+                }
+            })
+        }
         else -> error("이 필드는 편집할 수 없습니다.")
     }
 

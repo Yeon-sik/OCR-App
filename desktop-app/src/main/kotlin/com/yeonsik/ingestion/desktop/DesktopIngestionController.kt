@@ -603,7 +603,7 @@ class DesktopIngestionController(
             val current = _state.value
             val session = current.session ?: error("증거를 추가하려면 JSON을 먼저 가져오세요.")
             val envelope = currentEnvelope()
-            val isV4Purchase = envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA
+            val isV4Purchase = envelope.schemaVersion in setOf(com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA, com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA)
             val v4SourceIds = if (isV4Purchase) {
                 envelope.source.sourceFiles.filter { it.type == type }.map { it.id }
             } else {
@@ -612,16 +612,16 @@ class DesktopIngestionController(
             val usedIds = current.evidence.map { it.attachmentId }.toMutableSet()
             if (isV4Purchase) {
                 require(v4SourceIds.isNotEmpty()) {
-                    "V4 원본 파일이 ${DesktopUiLabels.sourceAttachmentType(type)} 유형으로 선언되지 않았습니다."
+                    "구매 원본 파일이 ${DesktopUiLabels.sourceAttachmentType(type)} 유형으로 선언되지 않았습니다."
                 }
                 require(paths.size <= v4SourceIds.count { it !in usedIds }) {
-                    "V4 원본 유형 ${DesktopUiLabels.sourceAttachmentType(type)}에 증거 파일이 너무 많습니다."
+                    "구매 원본 유형 ${DesktopUiLabels.sourceAttachmentType(type)}에 증거 파일이 너무 많습니다."
                 }
             }
             val added = paths.map { path ->
                 val logicalId = if (isV4Purchase) {
                     v4SourceIds.firstOrNull { it !in usedIds }
-                        ?: error("${DesktopUiLabels.sourceAttachmentType(type)} 유형에 사용할 수 있는 V4 원본 파일이 없습니다.")
+                        ?: error("${DesktopUiLabels.sourceAttachmentType(type)} 유형에 사용할 수 있는 구매 원본 파일이 없습니다.")
                 } else {
                     null
                 }

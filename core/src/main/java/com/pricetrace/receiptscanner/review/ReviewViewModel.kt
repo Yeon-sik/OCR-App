@@ -167,6 +167,17 @@ data class ReviewViewModel(
                 }
                 envelope.purchaseRecords.forEach { purchase -> addPurchaseRows(this, purchase, sourceFiles, envelope, plan, session, selectedProjections) }
                 envelope.nutrition.forEach { nutrition -> addNutritionRow(this, nutrition, sourceFiles, envelope, plan, session, selectedProjections) }
+                envelope.purchaseNutritionLinks.forEach { link ->
+                    val record = envelope.purchaseRecords.single { it.clientKey == link.purchaseRecordClientKey }
+                    val line = record.lineItems.single { it.lineKey == link.purchaseLineKey }
+                    add(ReviewRow(
+                        id = "purchase-nutrition:${link.nutritionClientKey}",
+                        section = "구매 행과 영양 연결",
+                        item = line.description ?: link.purchaseLineKey,
+                        value = "${link.purchaseRecordClientKey} / ${link.purchaseLineKey} → ${link.nutritionClientKey}",
+                        destinations = destinationBadgesFor(plan, session, selectedProjections, setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION, IngestionProjection.FITNESS_NUTRITION)),
+                    ))
+                }
                 envelope.consumption.forEach { consumption ->
                     add(
                         "섭취",
@@ -223,7 +234,7 @@ data class ReviewViewModel(
                 val reason = if (isRecordPriceTrace) {
                     recordCompatibility?.reasonCode
                 } else {
-                    projections.mapNotNull(plan.disabledReasons::get).distinct().joinToString()
+                    (projections.mapNotNull(plan.disabledReasons::get) + actual.mapNotNull { it.lastError }).distinct().joinToString()
                         .takeIf(String::isNotBlank)
                 }
                 val status = when {

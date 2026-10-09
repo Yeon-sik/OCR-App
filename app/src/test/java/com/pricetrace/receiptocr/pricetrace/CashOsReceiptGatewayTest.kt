@@ -25,6 +25,24 @@ import org.junit.Test
 
 class CashOsReceiptGatewayTest {
     @Test
+    fun v5PurchaseReusesTheExistingTransactionV4Adapter() = runTest {
+        val envelope = com.pricetrace.receiptscanner.ingestion.YeonsikOcrV5Json.decode(
+            java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5",
+        )
+        val transport = QueueTransport(PriceObservationHttpResponse(200,
+            """[{"ledger_entry_id":"ledger-v5","transaction_id":"transaction-v5","replayed":false,"item_count":1,"category_id":null,"account_id":null,"category_resolution":"unresolved","account_resolution":"unresolved","account_candidate_ids":[],"posting_state":"CONFIRMED_EXPENSE","posting_date_source":"paid_local_date"}]"""))
+        val result = CashOsCanonicalProjectionSubmitter(CashOsReceiptGateway(FakeStore(signedIn()), transport)).submit(ProjectionRequest(
+            ingestionId = "v5", projection = IngestionProjection.CASHOS_TRANSACTION,
+            canonicalPayload = "", idempotencyKey = "v5-key", envelope = envelope, localDocumentId = "v5",
+        ))
+        assertTrue(result is ProjectionSubmission.Success)
+        val body = Json.parseToJsonElement(transport.requests.single().body!!).jsonObject
+        assertEquals("cashos.transaction-ingest.v4", body.getValue("p_contract_version").jsonPrimitive.content)
+        assertEquals("confirmed", body.getValue("p_transaction_status").jsonPrimitive.content)
+        assertFalse(body.toString().contains("yeonsik-ocr.v5"))
+    }
+
+    @Test
     fun fetchCandidatesUsesAuthenticatedExpenseDateAndAmountQuery() = runTest {
         val transport = QueueTransport(
             PriceObservationHttpResponse(

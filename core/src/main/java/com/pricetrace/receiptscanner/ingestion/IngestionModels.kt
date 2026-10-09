@@ -11,6 +11,7 @@ const val YEONSIK_OCR_SCHEMA = "yeonsik-ocr.v1"
 const val YEONSIK_OCR_V2_SCHEMA = "yeonsik-ocr.v2"
 const val YEONSIK_OCR_V3_SCHEMA = "yeonsik-ocr.v3"
 const val YEONSIK_OCR_V4_SCHEMA = "yeonsik-ocr.v4"
+const val YEONSIK_OCR_V5_SCHEMA = "yeonsik-ocr.v5"
 
 /** PriceTrace purchase-price v4 uses PostgreSQL integer fields for these values. */
 const val PRICETRACE_V4_MAX_INTEGER = 2_147_483_647L
@@ -103,6 +104,7 @@ enum class IngestionMode(val wireValue: String) {
     RESTAURANT("restaurant"),
     PACKAGED_PRODUCT("packaged_product"),
     PURCHASE("purchase"),
+    RESTAURANT_PURCHASE("restaurant_purchase"),
     ;
 
     companion object {
@@ -1039,6 +1041,17 @@ data class IngestionLink(
     val nutritionClientKey: String,
 )
 
+/** V5 correlation uses local keys only; downstream identities remain server-owned. */
+data class PurchaseNutritionLink(
+    val purchaseRecordClientKey: String,
+    val purchaseLineKey: String,
+    val nutritionClientKey: String,
+) {
+    init {
+        require(purchaseRecordClientKey.isNotBlank() && purchaseLineKey.isNotBlank() && nutritionClientKey.isNotBlank())
+    }
+}
+
 enum class ConsumptionVerificationStatus(val wireValue: String) {
     UNVERIFIED("unverified"),
     USER_VERIFIED("user_verified"),
@@ -1132,6 +1145,7 @@ data class YeonsikOcrEnvelope(
     val schemaVersion: String = YEONSIK_OCR_SCHEMA,
     val priceObservations: List<StandalonePriceObservation> = emptyList(),
     val purchaseRecords: List<PurchaseRecord> = emptyList(),
+    val purchaseNutritionLinks: List<PurchaseNutritionLink> = emptyList(),
 ) {
     init {
         require(priceObservations.map { it.clientKey }.distinct().size == priceObservations.size) {
@@ -1146,10 +1160,12 @@ data class YeonsikOcrEnvelope(
         require(purchaseRecords.map { it.clientKey }.distinct().size == purchaseRecords.size) {
             "purchase record client_key values must be unique"
         }
-        require(purchaseRecords.isEmpty() || schemaVersion == YEONSIK_OCR_V4_SCHEMA) {
-            "purchase records require yeonsik-ocr.v4"
+        require(purchaseRecords.isEmpty() || schemaVersion in setOf(YEONSIK_OCR_V4_SCHEMA, YEONSIK_OCR_V5_SCHEMA)) {
+            "purchase records require yeonsik-ocr.v4 or v5"
         }
-        require(purchaseRecords.isEmpty() || mode == IngestionMode.PURCHASE) {
+        require(purchaseRecords.isEmpty() ||
+            (schemaVersion == YEONSIK_OCR_V4_SCHEMA && mode == IngestionMode.PURCHASE) ||
+            (schemaVersion == YEONSIK_OCR_V5_SCHEMA && mode == IngestionMode.RESTAURANT_PURCHASE)) {
             "purchase records require purchase mode"
         }
         require(purchaseRecords.isEmpty() || receipt == null) {
@@ -1157,6 +1173,9 @@ data class YeonsikOcrEnvelope(
         }
         require(purchaseRecords.isEmpty() || priceObservations.isEmpty()) {
             "purchase records cannot be combined with legacy price observations"
+        }
+        require(purchaseNutritionLinks.isEmpty() || schemaVersion == YEONSIK_OCR_V5_SCHEMA) {
+            "purchase nutrition links require yeonsik-ocr.v5"
         }
     }
 }

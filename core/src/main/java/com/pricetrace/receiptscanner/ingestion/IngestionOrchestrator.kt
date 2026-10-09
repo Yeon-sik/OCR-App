@@ -393,7 +393,9 @@ class IngestionOrchestrator(
         }?.metadataJson?.let { runCatching { Json.parseToJsonElement(it) as? JsonObject }.getOrNull() }
         return diningOutItems(envelope).map { item ->
             when (item) {
-                is IngestionNutrition.RestaurantEstimate -> item.lineId?.let { sourceLineId ->
+                is IngestionNutrition.RestaurantEstimate -> if (envelope.schemaVersion == YEONSIK_OCR_V5_SCHEMA) {
+                    PurchaseNutritionIdentity.exact(envelope, item.clientKey, standalone?.toString())
+                } else item.lineId?.let { sourceLineId ->
                     receiptIdentity?.let { PriceTraceIdentityJson.exactRestaurantMenuForSourceLine(it, sourceLineId) }
                 }
                 is IngestionNutrition.RestaurantMenuEstimate -> if (envelope.receipt != null) {
@@ -669,7 +671,7 @@ class IngestionOrchestrator(
     ): IngestionStartResult {
         val selected = envelope.consumption.filter { it.clientKey in consumptionClientKeys }
         if (selected.isEmpty()) return IngestionStartResult.Failure(listOf("consumption_artifact_missing"))
-        if (envelope.schemaVersion in setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V3_SCHEMA) && selected.any { !it.isCompleteForFitnessMeal() }) {
+        if (envelope.schemaVersion in setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V3_SCHEMA, YEONSIK_OCR_V5_SCHEMA) && selected.any { !it.isCompleteForFitnessMeal() }) {
             return IngestionStartResult.Failure(listOf("consumption_artifact_incomplete"))
         }
         if (selected.any { it.status != ConsumptionVerificationStatus.USER_VERIFIED }) {
@@ -801,13 +803,13 @@ class IngestionOrchestrator(
             return persistBlocked(session, projection, current, "price_observation_net_amount_required")
         }
         if (projection == IngestionProjection.FITNESS_MEAL &&
-            envelope.schemaVersion in setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V3_SCHEMA) &&
+            envelope.schemaVersion in setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V3_SCHEMA, YEONSIK_OCR_V5_SCHEMA) &&
             !fitnessMealValuesComplete(envelope)
         ) {
             return persistBlocked(session, projection, current, "consumption_artifact_incomplete")
         }
         if (projection == IngestionProjection.FITNESS_MEAL &&
-            envelope.schemaVersion in setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V3_SCHEMA) &&
+            envelope.schemaVersion in setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V3_SCHEMA, YEONSIK_OCR_V5_SCHEMA) &&
             envelope.consumption.any { it.status != ConsumptionVerificationStatus.USER_VERIFIED }
         ) {
             return persistBlocked(session, projection, current, "consumption_artifact_not_user_verified")
@@ -1495,17 +1497,22 @@ class IngestionOrchestrator(
                 )
         }
         is IngestionNutrition.RestaurantEstimate -> {
-            val artifactEnvelope = YeonsikOcrEnvelope(
-                mode = IngestionMode.RESTAURANT,
-                source = IngestionSource(producer = "fitness", sourceFiles = emptyList()),
-                nutrition = listOf(item),
-                schemaVersion = envelope.schemaVersion,
-            )
-            "restaurant_estimate|client_key=" + item.clientKey +
-                "|restaurant_name=" + ((if (includeRestaurantSourceName) fitnessRestaurantName(envelope) else null) ?: "<null>") +
-                "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
+            if (envelope.schemaVersion == YEONSIK_OCR_V5_SCHEMA) {
+                val link = envelope.purchaseNutritionLinks.single { it.nutritionClientKey == item.clientKey }
+                "restaurant-purchase-estimate|" + YeonsikOcrV2Json.nutritionJson(item, true) +
+                    "|link=" + link + "|seller=" + PurchaseNutritionIdentity.sellerName(envelope, item.clientKey)
+            } else {
+                val artifactEnvelope = YeonsikOcrEnvelope(
+                    mode = IngestionMode.RESTAURANT,
+                    source = IngestionSource(producer = "fitness", sourceFiles = emptyList()),
+                    nutrition = listOf(item),
+                    schemaVersion = envelope.schemaVersion,
+                )
+                "restaurant_estimate|client_key=" + item.clientKey +
+                    "|restaurant_name=" + ((if (includeRestaurantSourceName) fitnessRestaurantName(envelope) else null) ?: "<null>") +
+                    "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
+            }
         }
-
         is IngestionNutrition.RestaurantMenuEstimate -> {
             val artifactEnvelope = YeonsikOcrEnvelope(
                 mode = IngestionMode.RESTAURANT,
@@ -2085,7 +2092,7 @@ class IngestionOrchestrator(
         IngestionProjection.entries - enabledProjections(envelope).toSet()
 
     private fun fitnessMealValuesComplete(envelope: YeonsikOcrEnvelope): Boolean =
-        envelope.schemaVersion in setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V3_SCHEMA) &&
+        envelope.schemaVersion in setOf(YEONSIK_OCR_V2_SCHEMA, YEONSIK_OCR_V3_SCHEMA, YEONSIK_OCR_V5_SCHEMA) &&
             envelope.nutrition.isNotEmpty() &&
             envelope.consumption.isNotEmpty() &&
             envelope.consumption.all(IngestionConsumption::isCompleteForFitnessMeal)

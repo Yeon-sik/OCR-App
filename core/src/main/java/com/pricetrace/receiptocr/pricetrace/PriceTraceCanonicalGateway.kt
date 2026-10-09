@@ -631,7 +631,16 @@ class PriceTraceCanonicalGateway(
                     response.body.takeIf(String::isNotBlank),
                 )
             }
-            PriceTracePurchaseObservationV4Json.decodeResponse(response.body)
+            val decoded = PriceTracePurchaseObservationV4Json.decodeResponse(response.body)
+            if (envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA) {
+                val lineResults = (decoded.raw["lineResults"] as? JsonArray).orEmpty().map { it.jsonObject }
+                val keys = lineResults.map { it["lineKey"]?.jsonPrimitive?.contentOrNull }
+                val submittedKeys = record.lineItems.mapIndexed { index, line -> line.lineKey ?: "line-${index + 1}" }.toSet()
+                require(keys.all { key -> !key.isNullOrBlank() && key in submittedKeys } && keys.distinct().size == keys.size) {
+                    "pricetrace_purchase_line_results_invalid"
+                }
+                decoded.copy(raw = JsonObject(decoded.raw + ("purchaseRecordClientKey" to JsonPrimitive(record.clientKey))))
+            } else decoded
         }
         PriceTraceCanonicalOutcome.Success(buildJsonObject {
             put("schemaVersion", JsonPrimitive("purchase-price-observation.v4"))

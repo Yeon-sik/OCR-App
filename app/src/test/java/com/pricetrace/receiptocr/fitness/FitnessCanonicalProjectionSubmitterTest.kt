@@ -39,6 +39,54 @@ import org.junit.Test
 
 class FitnessCanonicalProjectionSubmitterTest {
     @Test
+    fun v5ImportsPrivateNutritionAndKeepsMissingPurchaseAuthorityPending() = runTest {
+        val envelope = v5Envelope()
+        val transport = QueueTransport(response("canonical-v5", "food-v5"))
+        val result = FitnessCanonicalProjectionSubmitter(NutritionSupabaseGateway(FakeStore(signedIn()), transport)).submit(
+            v5Request(envelope, """{"sources":[{"purchaseRecordClientKey":"purchase-1","lineResults":[{"lineKey":"line-1","observationCreated":true}]}]}"""),
+        ) as ProjectionSubmission.Failure
+        assertTrue(result.requiresReview)
+        assertTrue(result.message.startsWith("pricetrace_purchase_line_identity_metadata_missing"))
+        assertTrue(result.metadataJson!!.contains("food-v5"))
+        assertEquals(1, transport.requests.size)
+        assertTrue(transport.requests.single().url.endsWith("/import_canonical_nutrition_v2"))
+        val body = Json.parseToJsonElement(transport.requests.single().body!!).jsonObject
+        val provenance = body.getValue("p_provenance").jsonObject
+        assertEquals("purchase-1", provenance.getValue("purchase_record_client_key").jsonPrimitive.content)
+        assertEquals("line-1", provenance.getValue("purchase_line_key").jsonPrimitive.content)
+        assertEquals("food-1", provenance.getValue("nutrition_client_key").jsonPrimitive.content)
+    }
+
+    @Test
+    fun v5PublishesOnlyTheExactLinkedPurchaseLineAndRetriesWithTheSameKeys() = runTest {
+        val envelope = v5Envelope()
+        val identity = menuIdentity("v5-exact-menu")
+        val exact = Json.parseToJsonElement(standaloneMetadata("unused" to identity)).jsonObject
+            .getValue("observations").jsonArray.single().jsonObject.getValue("response").jsonObject
+        val unrelated = kotlinx.serialization.json.JsonObject(exact + ("lineKey" to kotlinx.serialization.json.JsonPrimitive("line-2")))
+        val linked = kotlinx.serialization.json.JsonObject(exact + ("lineKey" to kotlinx.serialization.json.JsonPrimitive("line-1")))
+        val metadata = """{"sources":[{"purchaseRecordClientKey":"purchase-1","lineResults":[$unrelated,$linked]}]}"""
+        val transport = QueueTransport(response("canonical-v5", "food-v5"), publicationResponse("canonical-v5", "food-v5", identity), response("canonical-v5", "food-v5"), publicationResponse("canonical-v5", "food-v5", identity))
+        val submitter = FitnessCanonicalProjectionSubmitter(NutritionSupabaseGateway(FakeStore(signedIn()), transport))
+        repeat(2) { assertTrue(submitter.submit(v5Request(envelope, metadata)) is ProjectionSubmission.Success) }
+        assertEquals(transport.requests[0].body, transport.requests[2].body)
+        assertEquals(transport.requests[1].body, transport.requests[3].body)
+        assertTrue(transport.requests[1].body!!.contains(identity.restaurantMenuId))
+        assertTrue(transport.requests[1].url.endsWith("/publish_verified_ocr_dining_out_nutrition_v1"))
+    }
+
+    private fun v5Envelope() = com.pricetrace.receiptscanner.ingestion.YeonsikOcrV5Json.decode(
+        java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5-document",
+    )
+
+    private fun v5Request(envelope: YeonsikOcrEnvelope, metadata: String) = ProjectionRequest(
+        ingestionId = "v5-ingestion", projection = IngestionProjection.FITNESS_NUTRITION,
+        canonicalPayload = "{}", idempotencyKey = "v5-key", envelope = envelope,
+        localDocumentId = "v5-document", revisionSeq = 1,
+        dependencyMetadataJson = mapOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION to metadata),
+    )
+
+    @Test
     fun restaurantMenuEstimateUsesFitnessV3RpcAndCarriesStandalonePriceLink() = runTest {
         val transport = QueueTransport(
             response("canonical-menu-1", "food-menu-1"),

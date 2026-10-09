@@ -43,6 +43,30 @@ import org.junit.Test
 
 class PriceTraceCanonicalGatewayTest {
     @Test
+    fun v5PurchaseUsesV4RpcAndCorrelatesServerResultsByRecordAndLineKeys() = runTest {
+        val envelope = YeonsikOcrV5Json.decode(java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5")
+        val transport = QueueTransport(PriceObservationHttpResponse(200,
+            """[{"purchaseSourceId":"source-v5","observationIds":["observation-v5"],"lineResults":[{"lineKey":"line-1","observationCreated":true,"observationId":"observation-v5"}]}]"""))
+        val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport).submitPurchasePriceObservationsV4("v5-key", envelope)
+        assertTrue(result is PriceTraceCanonicalOutcome.Success)
+        val body = Json.parseToJsonElement(transport.requests.single().body!!).jsonObject
+        assertEquals("purchase-price-observation.v4", body.getValue("p_purchase").jsonObject.getValue("schema_version").jsonPrimitive.content)
+        assertTrue(transport.requests.single().url.endsWith("/ingest_verified_purchase_price_observation_v1"))
+        val source = (result as PriceTraceCanonicalOutcome.Success).response.getValue("sources").jsonArray.single().jsonObject
+        assertEquals("purchase-1", source.getValue("purchaseRecordClientKey").jsonPrimitive.content)
+        assertEquals("line-1", source.getValue("lineResults").jsonArray.single().jsonObject.getValue("lineKey").jsonPrimitive.content)
+    }
+
+    @Test
+    fun v5DuplicateOrUnknownServerLineKeysAreRejected() = runTest {
+        val envelope = YeonsikOcrV5Json.decode(java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5")
+        listOf("""{"lineKey":"missing"}""", """{"lineKey":"line-1"},{"lineKey":"line-1"}""").forEach { lines ->
+            val transport = QueueTransport(PriceObservationHttpResponse(200, """[{"purchaseSourceId":"source-v5","observationIds":[],"lineResults":[$lines]}]"""))
+            assertTrue(PriceTraceCanonicalGateway(FakeStore(signedIn()), transport).submitPurchasePriceObservationsV4("v5-key", envelope) is PriceTraceCanonicalOutcome.Failure)
+        }
+    }
+
+    @Test
     fun acceptedReceiptReadRestoresResolutionTokenWithoutIngestionPost() = runTest {
         val receiptId = "11111111-1111-4111-8111-111111111111"
         val response = """{"receiptId":"$receiptId","merchantResolutionStatus":"needs_ocr_resolution","ocrResolution":{"status":"needs_ocr_resolution","resolutionId":"pt-resolution","reasonCode":"legacy_source_identity_unresolved","requiredSourceFacts":["business_registration_number"]}}"""

@@ -92,6 +92,7 @@ class FitnessCanonicalProjectionSubmitter(
                     is IngestionNutrition.RestaurantEstimate -> {
                         val restaurantName = envelope.receipt?.merchant?.name
                             ?: envelope.merchantCandidate?.name
+                            ?: com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.sellerName(envelope, item.clientKey)
                             ?: return ProjectionSubmission.Failure(
                                 "restaurant_name_missing",
                                 retryable = false,
@@ -101,6 +102,10 @@ class FitnessCanonicalProjectionSubmitter(
                             resolvedReceiptIdentity?.let { identity -> item.lineId?.let { sourceLineId ->
                                 PriceTraceIdentityJson.exactRestaurantMenuForSourceLine(identity, sourceLineId)
                             } }
+                        } else if (envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA) {
+                            com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.exact(
+                                envelope, item.clientKey, request.dependencyMetadataJson[IngestionProjection.PRICETRACE_PRICE_OBSERVATION],
+                            )
                         } else null
                         if (envelope.receipt != null && publicationIdentity == null) {
                             reviewReason = reviewReason ?: "restaurant_menu_identity_requires_ocr_review:${item.clientKey}"
@@ -113,7 +118,17 @@ class FitnessCanonicalProjectionSubmitter(
                             restaurantName = restaurantName,
                             item = item,
                             useV3Contract = useV3Contract,
-                        )
+                            priceTraceIdentity = publicationIdentity?.takeIf {
+                                envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA
+                            }?.toNutritionIdentity(restaurantName, item.menuName),
+                        ).let { payload ->
+                            val link = envelope.purchaseNutritionLinks.singleOrNull { it.nutritionClientKey == item.clientKey }
+                            if (link == null) payload else payload.copy(provenance = JsonObject(payload.provenance + mapOf(
+                                "purchase_record_client_key" to JsonPrimitive(link.purchaseRecordClientKey),
+                                "purchase_line_key" to JsonPrimitive(link.purchaseLineKey),
+                                "nutrition_client_key" to JsonPrimitive(link.nutritionClientKey),
+                            )))
+                        }
                     }
                     is IngestionNutrition.RestaurantMenuEstimate -> {
                         val restaurantName = envelope.receipt?.merchant?.name
@@ -194,10 +209,14 @@ class FitnessCanonicalProjectionSubmitter(
                         gateway.importCanonical(payload)
                     }) {
                         is NutritionCanonicalImportOutcome.Success -> {
-                            if (recoveredImport == null) responses += result.rawResponse
+                            if (envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA) {
+                                responses += v5NutritionMetadata(result.rawResponse, item.clientKey)
+                            } else if (recoveredImport == null) responses += result.rawResponse
                             lastFoodId = result.response.nutritionFoodId
                             if (identityRequiredForPublication && publicationIdentity == null) {
-                                reviewReason = reviewReason ?: "restaurant_menu_identity_requires_ocr_review:${item.clientKey}"
+                                reviewReason = reviewReason ?: if (envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA) {
+                                    "pricetrace_purchase_line_identity_metadata_missing:${item.clientKey}"
+                                } else "restaurant_menu_identity_requires_ocr_review:${item.clientKey}"
                             } else if (publicationIdentity != null) {
                                 val publication = NutritionDiningOutPublicationPayload(
                                     idempotencyKey = StableIds.sha256("$publicationKeySeed|publication"),
@@ -425,6 +444,16 @@ class FitnessCanonicalProjectionSubmitter(
         return serverResponses.takeIf { it.isNotEmpty() }?.let {
             json.encodeToString(JsonArray.serializer(), JsonArray(it.toList()))
         }
+    }
+
+    /** Local checkpoint correlation only; never changes the downstream RPC response contract. */
+    private fun v5NutritionMetadata(raw: String, clientKey: String): String {
+        fun annotate(value: JsonElement): JsonElement = when (value) {
+            is JsonArray -> JsonArray(value.map(::annotate))
+            is JsonObject -> JsonObject(value + ("nutrition_client_key" to JsonPrimitive(clientKey)))
+            else -> value
+        }
+        return annotate(Json.parseToJsonElement(raw)).toString()
     }
 
     private fun NutritionGatewayFailure.isRetryable(): Boolean = when (this) {

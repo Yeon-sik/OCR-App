@@ -48,6 +48,28 @@ import java.util.zip.ZipOutputStream
 
 class DesktopIngestionRegressionTest {
     @Test
+    fun v5ReviewBindsBothArtifactKindsAndRestoresExactLinks() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-console-v5"))
+        val bundle = DesktopProjectionBundle(DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")))
+        val controller = DesktopIngestionController(store = store, bundle = bundle)
+        controller.importJson(readExample("yeonsik-ocr.v5.restaurant-purchase.example.json"))
+        assertEquals("yeonsik-ocr.v5", controller.state.value.schema)
+        listOf(SourceAttachmentType.ORDER_HISTORY, SourceAttachmentType.PAYMENT_HISTORY, SourceAttachmentType.FOOD_PHOTO).forEach { type ->
+            val source = store.directory.resolve("${type.wireValue}.jpg").also { Files.writeString(it, "${type.wireValue} bytes") }
+            controller.attachEvidence(listOf(source), type)
+        }
+        assertEquals(setOf("order-history-1", "payment-history-1", "food-photo-1"), controller.state.value.evidence.map { it.attachmentId }.toSet())
+        controller.verify(VerificationBasis.SOURCE_EVIDENCE)
+        assertEquals(IngestionReviewStatus.READY, controller.state.value.session?.reviewStatus)
+        assertTrue(controller.state.value.artifacts.all { it.evidenceReady })
+        assertEquals(3, controller.state.value.session!!.projections.count { it.status != com.pricetrace.receiptscanner.ingestion.ProjectionStatus.DISABLED })
+        val restored = DesktopIngestionController(store = store, bundle = bundle)
+        restored.loadLatest()
+        assertEquals(controller.state.value.envelope!!.purchaseNutritionLinks, restored.state.value.envelope!!.purchaseNutritionLinks)
+        assertTrue(com.pricetrace.receiptscanner.review.ReviewViewModel.fromCanonical(restored.state.value.envelope!!).rows.any { it.section == "구매 행과 영양 연결" })
+    }
+
+    @Test
     fun `failure diagnostic JSON reports status reason and recognized details safely`() {
         val directory = Files.createTempDirectory("yeonsik-diagnostic-json")
         fun write(name: String, json: String) = directory.resolve(name).also { Files.writeString(it, json) }

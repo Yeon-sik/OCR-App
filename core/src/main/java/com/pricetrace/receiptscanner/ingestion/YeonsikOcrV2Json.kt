@@ -182,7 +182,7 @@ object YeonsikOcrV2Json {
         put("confidence", JsonPrimitive(value.confidence))
     }
 
-    private fun nutritionJson(item: IngestionNutrition, canonicalIds: Boolean): JsonObject = when (item) {
+    internal fun nutritionJson(item: IngestionNutrition, canonicalIds: Boolean): JsonObject = when (item) {
         is IngestionNutrition.ProductLabel -> buildJsonObject {
             put("client_key", JsonPrimitive(item.clientKey))
             put("kind", JsonPrimitive("product_label"))
@@ -414,7 +414,7 @@ object YeonsikOcrV2Json {
             "user-statement:sha256:${StableIds.sha256(it)}"
         } ?: error("text-backed product candidate requires source.user_text")
 
-    private fun decodeNutrition(element: JsonElement, preservePersistedVerification: Boolean): IngestionNutrition {
+    internal fun decodeNutrition(element: JsonElement, preservePersistedVerification: Boolean): IngestionNutrition {
         val root = element.jsonObject
         val kind = root.string("kind")
         val canonicalShape = root.keys == NUTRITION_KEYS
@@ -490,7 +490,7 @@ object YeonsikOcrV2Json {
         }
     }
 
-    private fun decodeConsumption(root: JsonObject, preservePersistedVerification: Boolean): IngestionConsumption {
+    internal fun decodeConsumption(root: JsonObject, preservePersistedVerification: Boolean): IngestionConsumption {
         require(root.keys == CONSUMPTION_KEYS || root.keys == CONSUMPTION_KEYS - "status")
         val consumedAt = root.nullableString("consumed_at")
         consumedAt?.let { value ->
@@ -586,7 +586,7 @@ object YeonsikOcrV2Json {
         return NutritionRange(root.nullableNumber("min"), root.nullableNumber("point"), root.nullableNumber("max"))
     }
 
-    private fun decodeSource(root: JsonObject): IngestionSource {
+    internal fun decodeSource(root: JsonObject): IngestionSource {
         requireKeys(root, SOURCE_KEYS)
         val producer = root.string("producer")
         require(producer == "chatgpt" || producer == "ocr_app") { "unsupported envelope producer" }
@@ -623,7 +623,7 @@ object YeonsikOcrV2Json {
         return IngestionLink(root.string("receipt_line_id"), root.string("nutrition_client_key"))
     }
 
-    private fun decodeHints(root: JsonObject): Map<String, String?> {
+    internal fun decodeHints(root: JsonObject): Map<String, String?> {
         require(root.keys subtract setOf("cashos") == emptySet<String>())
         val cashos = root.objectValue("cashos")
         require(cashos.keys subtract cashosHintKeys == emptySet<String>())
@@ -778,7 +778,7 @@ object YeonsikOcrV2Json {
                     (nutrition.isNotEmpty() || productCandidates.isNotEmpty()) &&
                     nutrition.all { it is IngestionNutrition.ProductLabel } && links.isEmpty(),
             )
-            IngestionMode.PURCHASE -> error("purchase mode requires yeonsik-ocr.v4")
+            IngestionMode.PURCHASE, IngestionMode.RESTAURANT_PURCHASE -> error("purchase mode requires yeonsik-ocr.v4")
         }
     }
 
@@ -838,7 +838,7 @@ object YeonsikOcrV2Json {
         put("nutrition_client_key", JsonPrimitive(value.nutritionClientKey))
     }
 
-    private fun consumptionJson(value: IngestionConsumption) = buildJsonObject {
+    internal fun consumptionJson(value: IngestionConsumption) = buildJsonObject {
         require(value.items.isNotEmpty()) { "v2 consumption must contain item-level values" }
         put("client_key", JsonPrimitive(value.clientKey))
         put("consumed_at", value.consumedAt?.let(::JsonPrimitive) ?: JsonNull)

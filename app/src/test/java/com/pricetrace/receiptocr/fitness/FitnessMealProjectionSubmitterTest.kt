@@ -32,6 +32,31 @@ import org.junit.Test
 
 class FitnessMealProjectionSubmitterTest {
     @Test
+    fun v5ExplicitConsumptionReusesTheExistingMealRpc() = runTest {
+        val eatenAt = "2026-10-09T12:00:00+09:00"
+        val draft = com.pricetrace.receiptscanner.ingestion.YeonsikOcrV5Json.decode(
+            java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5-meal",
+        )
+        val envelope = draft.copy(
+            source = draft.source.copy(userText = "$eatenAt 1 serving 섭취"),
+            consumption = listOf(IngestionConsumption("consumption-1", consumedAt = eatenAt, status = ConsumptionVerificationStatus.USER_VERIFIED,
+                items = listOf(com.pricetrace.receiptscanner.ingestion.IngestionConsumptionItem("food-1", 1.0, "serving", 1.0, "user_provided")))),
+        )
+        val transport = QueueTransport(NutritionHttpResponse(200,
+            """[{"meal_import_id":"meal-v5","meal_record_id":"record-v5","idempotent_replay":false,"eaten_at":"$eatenAt","record_date":"2026-10-09","item_count":1,"nutrition_food_ids":["food-v5"],"contract_version":"verified-meal.v1"}]"""))
+        val result = FitnessMealProjectionSubmitter(NutritionSupabaseGateway(FakeStore(signedIn()), transport)).submit(
+            request(envelope, """[{"nutrition_food_id":"food-v5","canonical_import_id":"nutrition-v5","input_contract":"food-estimate.v1","nutrition_client_key":"food-1","visibility":"private"},{"nutrition_food_id":"food-v5","canonical_import_id":"nutrition-v5","visibility":"public","publication_revision":1}]"""),
+        )
+        assertTrue(result is ProjectionSubmission.Success)
+        assertTrue(transport.requests.single().url.endsWith("/import_verified_meal_v1"))
+        val body = Json.parseToJsonElement(transport.requests.single().body!!).jsonObject
+        assertEquals(eatenAt, body.getValue("p_eaten_at").jsonPrimitive.content)
+        assertEquals("dining_out", body.getValue("p_source").jsonObject.getValue("meal_kind").jsonPrimitive.content)
+        assertEquals("yeonsik-ocr.v5", body.getValue("p_source").jsonObject.getValue("schema_version").jsonPrimitive.content)
+        assertEquals("food-1", body.getValue("p_items").jsonArray.single().jsonObject.getValue("client_key").jsonPrimitive.content)
+    }
+
+    @Test
     fun itemLevelConsumptionUsesActualConsumedAtAndFitnessMealRpc() = runTest {
         val eatenAt = "2026-09-06T08:10:00+09:00"
         val transport = QueueTransport(

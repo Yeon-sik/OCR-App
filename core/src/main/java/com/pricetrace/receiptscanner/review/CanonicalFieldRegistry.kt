@@ -191,8 +191,13 @@ object CanonicalFieldRegistry {
             }
         }
 
-        if (envelope.schemaVersion == YEONSIK_OCR_V4_SCHEMA) {
+        if (envelope.schemaVersion in setOf(YEONSIK_OCR_V4_SCHEMA, com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA)) {
             envelope.purchaseRecords.forEach { record -> addAll(purchaseFields(record)) }
+        }
+        envelope.purchaseNutritionLinks.forEach { link ->
+            val prefix = "links[${link.nutritionClientKey}]"
+            add(text("$prefix.purchase_record_client_key", "${link.nutritionClientKey} 연결 구매 기록", nullable = false))
+            add(text("$prefix.purchase_line_key", "${link.nutritionClientKey} 연결 구매 행", nullable = false))
         }
     }.map { field -> field.copy(value = value(envelope, field.path)) }
 
@@ -273,6 +278,15 @@ object CanonicalFieldRegistry {
             nutritionPath.matches(canonical) -> nutritionValue(envelope, nutritionPath.matchEntire(canonical)!!)
             consumptionPath.matches(canonical) -> consumptionValue(envelope, consumptionPath.matchEntire(canonical)!!)
             purchasePath.matches(canonical) -> purchaseValue(envelope, purchasePath.matchEntire(canonical)!!)
+            canonical.startsWith("links[") -> {
+                val match = Regex("""links\[([^]]+)]\.(.+)""").matchEntire(canonical)
+                val link = envelope.purchaseNutritionLinks.singleOrNull { it.nutritionClientKey == match?.groupValues?.get(1) }
+                when (match?.groupValues?.get(2)) {
+                    "purchase_record_client_key" -> link?.purchaseRecordClientKey
+                    "purchase_line_key" -> link?.purchaseLineKey
+                    else -> null
+                }
+            }
             else -> null
         }
     }
