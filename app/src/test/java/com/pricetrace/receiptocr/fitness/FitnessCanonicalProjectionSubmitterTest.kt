@@ -49,7 +49,7 @@ class FitnessCanonicalProjectionSubmitterTest {
         assertTrue(result.message.startsWith("pricetrace_purchase_line_identity_metadata_missing"))
         assertTrue(result.metadataJson!!.contains("food-v5"))
         assertEquals(1, transport.requests.size)
-        assertTrue(transport.requests.single().url.endsWith("/import_canonical_nutrition_v2"))
+        assertTrue(transport.requests.single().url.endsWith("/import_canonical_nutrition_v3"))
         val body = Json.parseToJsonElement(transport.requests.single().body!!).jsonObject
         val provenance = body.getValue("p_provenance").jsonObject
         assertEquals("purchase-1", provenance.getValue("purchase_record_client_key").jsonPrimitive.content)
@@ -59,18 +59,38 @@ class FitnessCanonicalProjectionSubmitterTest {
 
     @Test
     fun v5PublishesOnlyTheExactLinkedPurchaseLineAndRetriesWithTheSameKeys() = runTest {
-        val envelope = v5Envelope()
-        val identity = menuIdentity("v5-exact-menu")
+        val original = v5Envelope()
+        val record = original.purchaseRecords.single()
+        val envelope = original.copy(purchaseRecords = listOf(record.copy(lineItems =
+            record.lineItems + record.lineItems.single().copy(lineKey = "line-2"))))
+        val identity = PriceTraceRestaurantMenuIdentity(
+            "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222",
+            "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444",
+        )
         val exact = Json.parseToJsonElement(standaloneMetadata("unused" to identity)).jsonObject
             .getValue("observations").jsonArray.single().jsonObject.getValue("response").jsonObject
-        val unrelated = kotlinx.serialization.json.JsonObject(exact + ("lineKey" to kotlinx.serialization.json.JsonPrimitive("line-2")))
-        val linked = kotlinx.serialization.json.JsonObject(exact + ("lineKey" to kotlinx.serialization.json.JsonPrimitive("line-1")))
+        val purchaseAuthority = exact + mapOf(
+            "sourceAcceptanceStatus" to kotlinx.serialization.json.JsonPrimitive("accepted"),
+            "observationCreated" to kotlinx.serialization.json.JsonPrimitive(true),
+            "observationStatus" to kotlinx.serialization.json.JsonPrimitive("created"),
+            "observationType" to kotlinx.serialization.json.JsonPrimitive("restaurant_menu_manual_observation"),
+            "observationId" to kotlinx.serialization.json.JsonPrimitive("55555555-5555-4555-8555-555555555555"),
+            "authorityStatus" to kotlinx.serialization.json.JsonPrimitive("exact"),
+        )
+        val unrelated = kotlinx.serialization.json.JsonObject(purchaseAuthority + ("lineKey" to kotlinx.serialization.json.JsonPrimitive("line-2")))
+        val linked = kotlinx.serialization.json.JsonObject(purchaseAuthority + ("lineKey" to kotlinx.serialization.json.JsonPrimitive("line-1")))
         val metadata = """{"sources":[{"purchaseRecordClientKey":"purchase-1","lineResults":[$unrelated,$linked]}]}"""
         val transport = QueueTransport(response("canonical-v5", "food-v5"), publicationResponse("canonical-v5", "food-v5", identity), response("canonical-v5", "food-v5"), publicationResponse("canonical-v5", "food-v5", identity))
         val submitter = FitnessCanonicalProjectionSubmitter(NutritionSupabaseGateway(FakeStore(signedIn()), transport))
         repeat(2) { assertTrue(submitter.submit(v5Request(envelope, metadata)) is ProjectionSubmission.Success) }
         assertEquals(transport.requests[0].body, transport.requests[2].body)
         assertEquals(transport.requests[1].body, transport.requests[3].body)
+        assertTrue(transport.requests[0].url.endsWith("/import_canonical_nutrition_v3"))
+        val importBody = Json.parseToJsonElement(transport.requests[0].body!!).jsonObject
+        assertEquals(JsonNull, importBody["p_pricetrace_identity"])
+        listOf("p_manufacturer_name", "p_brand_name", "p_sub_brand_name", "p_product_name").forEach {
+            assertEquals(JsonNull, importBody[it])
+        }
         assertTrue(transport.requests[1].body!!.contains(identity.restaurantMenuId))
         assertTrue(transport.requests[1].url.endsWith("/publish_verified_ocr_dining_out_nutrition_v1"))
     }

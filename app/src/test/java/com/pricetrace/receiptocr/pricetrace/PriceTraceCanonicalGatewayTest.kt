@@ -46,7 +46,7 @@ class PriceTraceCanonicalGatewayTest {
     fun v5PurchaseUsesV4RpcAndCorrelatesServerResultsByRecordAndLineKeys() = runTest {
         val envelope = YeonsikOcrV5Json.decode(java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5")
         val transport = QueueTransport(PriceObservationHttpResponse(200,
-            """[{"purchaseSourceId":"source-v5","observationIds":["observation-v5"],"lineResults":[{"lineKey":"line-1","observationCreated":true,"observationId":"observation-v5"}]}]"""))
+            v5AuthorityResponse()))
         val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport).submitPurchasePriceObservationsV4("v5-key", envelope)
         assertTrue(result is PriceTraceCanonicalOutcome.Success)
         val body = Json.parseToJsonElement(transport.requests.single().body!!).jsonObject
@@ -60,10 +60,180 @@ class PriceTraceCanonicalGatewayTest {
     @Test
     fun v5DuplicateOrUnknownServerLineKeysAreRejected() = runTest {
         val envelope = YeonsikOcrV5Json.decode(java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5")
-        listOf("""{"lineKey":"missing"}""", """{"lineKey":"line-1"},{"lineKey":"line-1"}""").forEach { lines ->
+        listOf("", """{"lineKey":""}""", """{"lineKey":" "}""", """{"lineKey":null}""", """{"lineKey":1}""",
+            """{"lineKey":"missing"}""", """{"lineKey":"line-1"},{"lineKey":"line-1"}""").forEach { lines ->
             val transport = QueueTransport(PriceObservationHttpResponse(200, """[{"purchaseSourceId":"source-v5","observationIds":[],"lineResults":[$lines]}]"""))
             assertTrue(PriceTraceCanonicalGateway(FakeStore(signedIn()), transport).submitPurchasePriceObservationsV4("v5-key", envelope) is PriceTraceCanonicalOutcome.Failure)
         }
+    }
+
+    private val v5SourceId = "55555555-5555-4555-8555-555555555555"
+    private fun v5AuthorityResponse(sourceId: String = v5SourceId): String = """{
+        "purchaseSourceId":"$sourceId","observationCreated":true,"observationIds":["66666666-6666-4666-8666-666666666666"],
+        "sourceSaved":true,"sourceAcceptanceStatus":"accepted","lineAuthorityVersion":"purchase-line-authority.v1",
+        "lineResults":[{"lineKey":"line-1","kind":"restaurant_purchase","sourceAcceptanceStatus":"accepted",
+        "observationCreated":true,"observationStatus":"created","observationType":"restaurant_menu_manual_observation",
+        "observationId":"66666666-6666-4666-8666-666666666666","authorityStatus":"exact",
+        "merchantResolutionStatus":"exact","menuResolutionStatus":"exact","authoritativeIds":{
+        "restaurantId":"11111111-1111-4111-8111-111111111111","restaurantLocationId":"22222222-2222-4222-8222-222222222222",
+        "restaurantMenuId":"33333333-3333-4333-8333-333333333333","catalogProductId":"44444444-4444-4444-8444-444444444444"}}]}"""
+
+    private fun v5Envelope() = YeonsikOcrV5Json.decode(java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5")
+    private fun v5LegacyResponse() = """{"purchaseSourceId":"$v5SourceId","observationCreated":true,"observationIds":["66666666-6666-4666-8666-666666666666"],"lineResults":[{"lineKey":"line-1","observationCreated":true}]}"""
+    private fun v5CachedResponse() = """{"schemaVersion":"purchase-price-observation.v4","observationCreated":true,"sources":[${v5LegacyResponse().dropLast(1)},"purchaseRecordClientKey":"purchase-1"}]}"""
+
+    @Test
+    fun v5LegacyImmediateResponseRecoversOwnerAuthorityWithoutCanonicalUuid() = runTest {
+        val envelope = v5Envelope()
+        val transport = QueueTransport(PriceObservationHttpResponse(200, v5LegacyResponse()),
+            PriceObservationHttpResponse(200, v5AuthorityResponse()))
+        val outcome = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport).submitPurchasePriceObservationsV4("key", envelope) as PriceTraceCanonicalOutcome.Success
+        assertEquals(2, transport.requests.size)
+        assertTrue(transport.requests[1].url.endsWith("/get_purchase_price_ingestion_response_v1"))
+        assertEquals("""{"p_purchase_source_id":"$v5SourceId"}""", transport.requests[1].body)
+        assertEquals("33333333-3333-4333-8333-333333333333", PurchaseNutritionIdentity.exact(envelope, "food-1", outcome.response.toString())!!.restaurantMenuId)
+        assertFalse(YeonsikOcrEnvelopeCodec.encode(envelope).contains(v5SourceId))
+        assertFalse(transport.requests[0].body!!.contains(v5SourceId))
+    }
+
+    @Test
+    fun v5PartialNullAuthorityMetadataIsRecoveredRatherThanTreatedAsComplete() = runTest {
+        listOf(v5AuthorityResponse().replace("\"authorityStatus\":\"exact\"", "\"authorityStatus\":null"),
+            v5AuthorityResponse().replace("\"authoritativeIds\":{", "\"missingIds\":{")).forEach { partial ->
+            val transport = QueueTransport(PriceObservationHttpResponse(200, partial), PriceObservationHttpResponse(200, v5AuthorityResponse()))
+            assertTrue(PriceTraceCanonicalGateway(FakeStore(signedIn()), transport).submitPurchasePriceObservationsV4("key", v5Envelope()) is PriceTraceCanonicalOutcome.Success)
+            assertEquals(2, transport.requests.size)
+        }
+    }
+
+    @Test
+    fun v5CheckpointRecoveryUsesOnlyOwnerGetterAndKeepsRecordCorrelation() = runTest {
+        val transport = QueueTransport(PriceObservationHttpResponse(200, v5AuthorityResponse()))
+        val submitter = PriceTraceCanonicalProjectionSubmitter(PriceTraceCanonicalGateway(FakeStore(signedIn()), transport))
+        val result = submitter.readAcceptedProjection(ProjectionRequest("v5", IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+            "{}", "unchanged-key", envelope = v5Envelope(), previousMetadataJson = v5CachedResponse())) as ProjectionSubmission.Success
+        assertEquals(1, transport.requests.size)
+        assertTrue(transport.requests.single().url.endsWith("/get_purchase_price_ingestion_response_v1"))
+        assertEquals("purchase-1", Json.parseToJsonElement(result.metadataJson!!).jsonObject["sources"]!!.jsonArray.single().jsonObject["purchaseRecordClientKey"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun v5RecoveryRejectsWrongSelectorMissingLineOrLegacyGetterResponse() = runTest {
+        listOf(v5AuthorityResponse("77777777-7777-4777-8777-777777777777"),
+            v5AuthorityResponse().replace("\"line-1\"", "\"other-line\""), v5LegacyResponse()).forEach { response ->
+            val gateway = PriceTraceCanonicalGateway(FakeStore(signedIn()), QueueTransport(PriceObservationHttpResponse(200, response)))
+            assertTrue(gateway.readAcceptedPurchaseResponses(v5Envelope(), Json.parseToJsonElement(v5CachedResponse()).jsonObject) is PriceTraceCanonicalOutcome.Failure)
+        }
+    }
+
+    @Test
+    fun v5GetterFailureRetainsAcceptedMetadataForReadOnlyRetry() = runTest {
+        val transport = QueueTransport(PriceObservationHttpResponse(200, v5LegacyResponse()),
+            PriceObservationHttpResponse(503, "unavailable"), PriceObservationHttpResponse(200, v5AuthorityResponse()))
+        val submitter = PriceTraceCanonicalProjectionSubmitter(PriceTraceCanonicalGateway(FakeStore(signedIn()), transport))
+        val request = ProjectionRequest("v5", IngestionProjection.PRICETRACE_PRICE_OBSERVATION, "{}", "unchanged-key",
+            envelope = v5Envelope().copy(review = v5Envelope().review.copy(status = IngestionReviewStatus.READY)))
+        val first = submitter.submit(request) as ProjectionSubmission.Failure
+        assertTrue(first.retryable)
+        assertTrue(first.metadataJson!!.contains(v5SourceId))
+        assertTrue(submitter.readAcceptedProjection(request.copy(previousMetadataJson = first.metadataJson)) is ProjectionSubmission.Success)
+        assertEquals(1, transport.requests.count { it.url.endsWith("/ingest_verified_purchase_price_observation_v1") })
+        assertEquals(2, transport.requests.count { it.url.endsWith("/get_purchase_price_ingestion_response_v1") })
+    }
+
+    @Test
+    fun v5MissingReturnedLineFromTwoSubmittedLinesIsRejectedBeforeGetter() = runTest {
+        val value = v5Envelope()
+        val record = value.purchaseRecords.single()
+        val envelope = value.copy(purchaseRecords = listOf(record.copy(lineItems = record.lineItems + record.lineItems.single().copy(lineKey = "line-2"))))
+        val transport = QueueTransport(PriceObservationHttpResponse(200, v5AuthorityResponse()))
+        assertTrue(PriceTraceCanonicalGateway(FakeStore(signedIn()), transport).submitPurchasePriceObservationsV4("key", envelope) is PriceTraceCanonicalOutcome.Failure)
+        assertEquals(1, transport.requests.size)
+    }
+
+    @Test
+    fun v5OwnerRecoveryKeepsRecordsDistinctEvenWithTheSameLineKeyAndReversedOrder() = runTest {
+        val value = v5Envelope()
+        val secondId = "77777777-7777-4777-8777-777777777777"
+        val envelope = value.copy(purchaseRecords = value.purchaseRecords + value.purchaseRecords.single().copy(clientKey = "purchase-2"))
+        val first = Json.parseToJsonElement(v5CachedResponse()).jsonObject["sources"]!!.jsonArray.single().jsonObject
+        val second = kotlinx.serialization.json.JsonObject(first + mapOf(
+            "purchaseRecordClientKey" to kotlinx.serialization.json.JsonPrimitive("purchase-2"),
+            "purchaseSourceId" to kotlinx.serialization.json.JsonPrimitive(secondId)))
+        val cached = kotlinx.serialization.json.buildJsonObject {
+            put("observationCreated", kotlinx.serialization.json.JsonPrimitive(true))
+            put("sources", kotlinx.serialization.json.JsonArray(listOf(second, first)))
+        }
+        val transport = QueueTransport(PriceObservationHttpResponse(200, v5AuthorityResponse(secondId)
+            .replace("33333333-3333-4333-8333-333333333333", "88888888-8888-4888-8888-888888888888")),
+            PriceObservationHttpResponse(200, v5AuthorityResponse()))
+        val outcome = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .readAcceptedPurchaseResponses(envelope, cached) as PriceTraceCanonicalOutcome.Success
+        assertEquals("33333333-3333-4333-8333-333333333333", PurchaseNutritionIdentity.exact(envelope, "food-1", outcome.response.toString())!!.restaurantMenuId)
+        assertEquals(2, transport.requests.size)
+        assertTrue(transport.requests.all { it.url.endsWith("/get_purchase_price_ingestion_response_v1") })
+    }
+
+    @Test
+    fun v5SelectedFitnessPipelineRunsPurchaseThenV3PrivateImportThenPublicationAndReplaySkipsSinks() = runTest {
+        val calls = mutableListOf<String>()
+        val ptTransport = object : PriceObservationHttpTransport {
+            override suspend fun execute(request: PriceObservationHttpRequest): PriceObservationHttpResponse {
+                calls += "purchase"
+                assertTrue(request.url.endsWith("/ingest_verified_purchase_price_observation_v1"))
+                assertFalse(Json.parseToJsonElement(request.body!!).jsonObject["p_purchase"]!!.jsonObject["items"]!!.jsonArray.single().jsonObject.containsKey("seller"))
+                return PriceObservationHttpResponse(200, v5AuthorityResponse())
+            }
+        }
+        val nutritionConfig = com.pricetrace.receiptocr.fitness.NutritionSupabaseConfig(
+            url = "https://nutrition.example.com", publishableKey = "publishable-key-with-safe-length",
+            userId = "user-1", accessToken = "access-token", refreshToken = "refresh-token",
+        )
+        val nutritionStore = object : com.pricetrace.receiptocr.fitness.NutritionSupabaseStore {
+            override fun read() = nutritionConfig
+            override fun saveConnection(url: String, publishableKey: String) = Result.success(nutritionConfig)
+            override fun saveSession(userId: String, email: String, accessToken: String, refreshToken: String) = Result.success(nutritionConfig)
+            override fun clearSession() = true
+        }
+        val nutritionTransport = object : com.pricetrace.receiptocr.fitness.NutritionHttpTransport {
+            override suspend fun execute(request: com.pricetrace.receiptocr.fitness.NutritionHttpRequest): com.pricetrace.receiptocr.fitness.NutritionHttpResponse {
+                val body = Json.parseToJsonElement(request.body!!).jsonObject
+                return when {
+                    request.url.endsWith("/import_canonical_nutrition_v3") -> {
+                        calls += "private_import_v3"
+                        assertEquals(JsonNull, body["p_pricetrace_identity"])
+                        assertEquals("food-estimate.v1", body["p_input_contract"]!!.jsonPrimitive.content)
+                        com.pricetrace.receiptocr.fitness.NutritionHttpResponse(200,
+                            """[{"canonical_import_id":"canonical-v5","idempotent_replay":false,"nutrition_food_id":"food-v5","input_contract":"food-estimate.v1","projection_source_type":"food_image_estimate","projection_import_id":null,"catalog_product_id":null,"estimation_evidence_id":"evidence-v5","visibility":"private"}]""")
+                    }
+                    request.url.endsWith("/publish_verified_ocr_dining_out_nutrition_v1") -> {
+                        calls += "public_publication"
+                        assertEquals("33333333-3333-4333-8333-333333333333", body["p_restaurant_menu_id"]!!.jsonPrimitive.content)
+                        com.pricetrace.receiptocr.fitness.NutritionHttpResponse(200,
+                            """[{"canonical_import_id":"canonical-v5","nutrition_food_id":"food-v5","restaurant_id":"11111111-1111-4111-8111-111111111111","restaurant_location_id":"22222222-2222-4222-8222-222222222222","restaurant_menu_id":"33333333-3333-4333-8333-333333333333","catalog_product_id":"44444444-4444-4444-8444-444444444444","nutrition_link_id":"link-v5","nutrition_link_revision":1,"visibility":"public","food_revision":1,"publication_revision":1,"published_at":"2026-10-09T00:00:00Z","replayed":false}]""")
+                    }
+                    else -> error("unexpected Nutrition route: ${request.url}")
+                }
+            }
+        }
+        val useCase = CanonicalIngestionUseCase(InMemoryIngestionSessionStore(), mapOf(
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION to PriceTraceCanonicalProjectionSubmitter(PriceTraceCanonicalGateway(FakeStore(signedIn()), ptTransport)),
+            IngestionProjection.FITNESS_NUTRITION to com.pricetrace.receiptocr.fitness.FitnessCanonicalProjectionSubmitter(
+                com.pricetrace.receiptocr.fitness.NutritionSupabaseGateway(nutritionStore, nutritionTransport)),
+        ))
+        val envelope = v5Envelope()
+        val canonical = YeonsikOcrEnvelopeCodec.encode(envelope)
+        val evidence = envelope.source.sourceFiles.map { LocalEvidence(it.id, it.type, true) }
+        val imported = useCase.importJson(canonical, "v5-document", "v5-pipeline", evidence,
+            bundleFingerprint = "a".repeat(64)) as CanonicalImportResult.Success
+        val confirmed = useCase.confirm("v5-pipeline", imported.envelope, evidence)
+        val states = useCase.submitSelected("v5-pipeline", confirmed.envelope, setOf(IngestionProjection.FITNESS_NUTRITION))
+        assertEquals(ProjectionStatus.UPLOADED, states.single { it.projection == IngestionProjection.FITNESS_NUTRITION }.status)
+        assertEquals(listOf("purchase", "private_import_v3", "public_publication"), calls)
+        assertTrue((useCase.importJson(canonical, "v5-document", "v5-pipeline", evidence,
+            bundleFingerprint = "a".repeat(64)) as CanonicalImportResult.Success).startResult is IngestionStartResult.Duplicate)
+        useCase.submitSelected("v5-pipeline", confirmed.envelope, setOf(IngestionProjection.FITNESS_NUTRITION))
+        assertEquals(3, calls.size)
     }
 
     @Test

@@ -15,10 +15,10 @@ class YeonsikOcrV5Test {
     private fun evidence() = envelope().source.sourceFiles.map { LocalEvidence(it.id, it.type, true) }
     private val expected = setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION, IngestionProjection.CASHOS_TRANSACTION, IngestionProjection.FITNESS_NUTRITION)
 
-    @Test fun paidPurchaseAndFoodPhotoPlanThreeIndependentSinksAndRoundTrip() {
+    @Test fun paidPurchaseAndFoodPhotoWaitForLinkedPurchaseAuthorityAndRoundTrip() {
         val value = envelope()
         assertEquals(expected, CanonicalProjectionPlanner.plan(value).eligible)
-        assertTrue(CanonicalProjectionPlanner.dependenciesFor(IngestionProjection.FITNESS_NUTRITION, value).isEmpty())
+        assertEquals(setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION), CanonicalProjectionPlanner.dependenciesFor(IngestionProjection.FITNESS_NUTRITION, value))
         assertTrue(IngestionEvidenceGate.evaluate(value, evidence()).isAllowed)
         assertEquals(YeonsikOcrV5Json.canonicalize(value), YeonsikOcrV5Json.canonicalize(YeonsikOcrEnvelopeCodec.decode(YeonsikOcrEnvelopeCodec.encode(value), "other-document")))
         assertEquals(14, Json.parseToJsonElement(YeonsikOcrEnvelopeCodec.encode(value)).jsonObject.size)
@@ -111,7 +111,7 @@ class YeonsikOcrV5Test {
         val value = envelope()
         assertNull(PurchaseNutritionIdentity.exact(value, "food-1", """{"sources":[{"purchaseRecordClientKey":"purchase-1","lineResults":[{"lineKey":"line-1","observationCreated":true,"observationId":"opaque"}]}]}"""))
         assertNull(PurchaseNutritionIdentity.exact(value, "food-1", null))
-        val line = """{"lineKey":"line-1","kind":"restaurant_purchase","merchantResolutionStatus":"exact","menuResolutionStatus":"exact","authoritativeIds":{"restaurantId":"11111111-1111-4111-8111-111111111111","restaurantLocationId":"22222222-2222-4222-8222-222222222222","restaurantMenuId":"33333333-3333-4333-8333-333333333333","catalogProductId":"44444444-4444-4444-8444-444444444444"}}"""
+        val line = """{"lineKey":"line-1","kind":"restaurant_purchase","sourceAcceptanceStatus":"accepted","observationCreated":true,"observationStatus":"created","observationType":"restaurant_menu_manual_observation","observationId":"55555555-5555-4555-8555-555555555555","authorityStatus":"exact","merchantResolutionStatus":"exact","menuResolutionStatus":"exact","authoritativeIds":{"restaurantId":"11111111-1111-4111-8111-111111111111","restaurantLocationId":"22222222-2222-4222-8222-222222222222","restaurantMenuId":"33333333-3333-4333-8333-333333333333","catalogProductId":"44444444-4444-4444-8444-444444444444"}}"""
         fun metadata(rows: String = line) = """{"sources":[{"purchaseRecordClientKey":"purchase-1","lineResults":[$rows]}]}"""
         assertNotNull(PurchaseNutritionIdentity.exact(value, "food-1", metadata()))
         assertNull(PurchaseNutritionIdentity.exact(value, "food-1", metadata(line.replace("line-1", "line-2"))))
@@ -138,4 +138,65 @@ class YeonsikOcrV5Test {
         assertEquals(1, calls.count { it == IngestionProjection.PRICETRACE_PRICE_OBSERVATION })
         assertEquals(1, calls.count { it == IngestionProjection.CASHOS_TRANSACTION })
     }
+
+    @Test fun ineligibleLinkedPurchaseDoesNotPermanentlyBlockPrivateNutrition() = runBlocking {
+        val original = envelope()
+        val record = original.purchaseRecords.single()
+        val value = original.copy(purchaseRecords = listOf(record.copy(lineItems = record.lineItems.map {
+            it.copy(quantity = 1.5, unitPriceAmountKrw = null)
+        })))
+        YeonsikOcrV5Json.validate(value)
+        assertFalse(record.copy(lineItems = value.purchaseRecords.single().lineItems).priceTraceSubmissionEligible)
+        assertTrue(CanonicalProjectionPlanner.dependenciesFor(IngestionProjection.FITNESS_NUTRITION, value).isEmpty())
+        var imports = 0
+        val useCase = CanonicalIngestionUseCase(InMemoryIngestionSessionStore(), mapOf(
+            IngestionProjection.FITNESS_NUTRITION to object : IngestionProjectionSubmitter {
+                override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                    imports++
+                    assertFalse(request.dependencyMetadataJson.containsKey(IngestionProjection.PRICETRACE_PRICE_OBSERVATION))
+                    return ProjectionSubmission.Failure("identity_pending", false, requiresReview = true)
+                }
+            },
+        ))
+        val imported = useCase.importJson(YeonsikOcrEnvelopeCodec.encode(value), "v5-document", "private-session", evidence()) as CanonicalImportResult.Success
+        val confirmed = useCase.confirm("private-session", imported.envelope, evidence())
+        useCase.submitSelected("private-session", confirmed.envelope, setOf(IngestionProjection.FITNESS_NUTRITION))
+        assertEquals(1, imports)
+    }
+
+    @Test fun selectingFitnessRecoversLegacyPurchaseCheckpointBeforePrivateImportAndNeverReingests() = runBlocking {
+        val calls = mutableListOf<String>()
+        val legacy = """{"sources":[{"purchaseRecordClientKey":"purchase-1","purchaseSourceId":"55555555-5555-4555-8555-555555555555","lineResults":[{"lineKey":"line-1"}]}]}"""
+        val recovered = sourceOnlyAuthority()
+        val purchase = object : IngestionProjectionSubmitter, OcrProjectionResponseReader {
+            override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                calls += "purchase"
+                return ProjectionSubmission.Success("purchase-id", legacy)
+            }
+            override suspend fun readAcceptedProjection(request: ProjectionRequest): ProjectionSubmission {
+                calls += "owner_getter"
+                assertEquals(legacy, request.previousMetadataJson)
+                return ProjectionSubmission.Success("purchase-id", recovered, primaryUploaded = false,
+                    primaryPendingReason = "price_observation_not_created")
+            }
+        }
+        val fitness = object : IngestionProjectionSubmitter {
+            override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                calls += "private_nutrition"
+                assertEquals(recovered, request.dependencyMetadataJson[IngestionProjection.PRICETRACE_PRICE_OBSERVATION])
+                assertNull(PurchaseNutritionIdentity.exact(request.envelope!!, "food-1", recovered))
+                return ProjectionSubmission.Failure("identity_pending", false, requiresReview = true)
+            }
+        }
+        val useCase = CanonicalIngestionUseCase(InMemoryIngestionSessionStore(), mapOf(
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION to purchase, IngestionProjection.FITNESS_NUTRITION to fitness,
+        ))
+        val imported = useCase.importJson(example(), "v5-document", "recovery-session", evidence()) as CanonicalImportResult.Success
+        val confirmed = useCase.confirm("recovery-session", imported.envelope, evidence())
+        useCase.submitSelected("recovery-session", confirmed.envelope, setOf(IngestionProjection.FITNESS_NUTRITION))
+        assertEquals(listOf("purchase", "owner_getter", "private_nutrition"), calls)
+        assertFalse(YeonsikOcrEnvelopeCodec.encode(confirmed.envelope).contains("55555555-5555-4555-8555-555555555555"))
+    }
+
+    private fun sourceOnlyAuthority() = """{"sources":[{"purchaseRecordClientKey":"purchase-1","purchaseSourceId":"55555555-5555-4555-8555-555555555555","sourceSaved":true,"sourceAcceptanceStatus":"accepted","lineAuthorityVersion":"purchase-line-authority.v1","lineResults":[{"lineKey":"line-1","kind":"restaurant_purchase","sourceAcceptanceStatus":"accepted","observationCreated":false,"observationStatus":"not_created","authorityStatus":"unresolved","merchantResolutionStatus":"unresolved","menuResolutionStatus":"unresolved","authoritativeIds":null}]}]}"""
 }

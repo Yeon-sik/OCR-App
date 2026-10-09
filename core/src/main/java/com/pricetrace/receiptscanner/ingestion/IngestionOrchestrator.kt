@@ -227,7 +227,10 @@ class IngestionOrchestrator(
         val acceptedProjections = session.projections.filter { state ->
             state.projection in setOf(IngestionProjection.PRICETRACE_RECEIPT, IngestionProjection.PRICETRACE_PRICE_OBSERVATION) &&
                 state.status != ProjectionStatus.DISABLED && state.metadataJson != null &&
-                ((legacyDiningOut && state.completionContractVersion == 0) || PriceTraceIdentityJson.hasPendingOcrResolution(state.metadataJson) ||
+                ((legacyDiningOut && state.completionContractVersion == 0) ||
+                    (state.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
+                        PurchaseNutritionIdentity.needsAuthorityRecovery(envelope, state.metadataJson)) ||
+                    PriceTraceIdentityJson.hasPendingOcrResolution(state.metadataJson) ||
                     state.lastError?.startsWith(CHECKPOINT_READ_FAILED) == true)
         }
         for (state in acceptedProjections) {
@@ -259,10 +262,14 @@ class IngestionOrchestrator(
                     // A saved owner binding proves source acceptance even when the prior
                     // transport failed after PT committed a resolution. Identity review
                     // remains a separate gate; never re-ingest that accepted request.
-                    status = ProjectionStatus.UPLOADED,
+                    status = if (envelope.schemaVersion == YEONSIK_OCR_V5_SCHEMA && !result.primaryUploaded) {
+                        ProjectionStatus.BLOCKED
+                    } else ProjectionStatus.UPLOADED,
                     remoteId = state.remoteId ?: result.remoteId,
                     metadataJson = result.metadataJson ?: state.metadataJson,
-                    lastError = null,
+                    lastError = if (envelope.schemaVersion == YEONSIK_OCR_V5_SCHEMA && !result.primaryUploaded) {
+                        result.primaryPendingReason
+                    } else null,
                     completionContractVersion = DINING_OUT_COMPLETION_CONTRACT_VERSION,
                     updatedAt = now(),
                 )
@@ -823,7 +830,11 @@ class IngestionOrchestrator(
         }
         val dependencies = projectionDependencies(projection, envelope)
         val missingDependencies = dependencies.filter { dependency ->
-            session.projections.firstOrNull { it.projection == dependency }?.status != ProjectionStatus.UPLOADED
+            val dependencyState = session.projections.firstOrNull { it.projection == dependency }
+            dependencyState?.status != ProjectionStatus.UPLOADED &&
+                !(projection == IngestionProjection.FITNESS_NUTRITION &&
+                    dependency == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
+                    PurchaseNutritionIdentity.sourceAccepted(envelope, dependencyState?.metadataJson))
         }
         if (missingDependencies.isNotEmpty()) {
             return persistBlocked(
@@ -884,7 +895,9 @@ class IngestionOrchestrator(
             revisionSeq = projectionRevisionSeq,
             canonicalFingerprint = session.canonicalFingerprint,
             dependencyMetadataJson = session.projections
-                .filter { it.status == ProjectionStatus.UPLOADED && it.metadataJson != null }
+                .filter { it.metadataJson != null && (it.status == ProjectionStatus.UPLOADED ||
+                    (it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
+                        PurchaseNutritionIdentity.sourceAccepted(envelope, it.metadataJson))) }
                 .associate { it.projection to it.metadataJson!! },
             previousMetadataJson = current.metadataJson,
             recoverCanonicalImport = projection == IngestionProjection.FITNESS_NUTRITION &&

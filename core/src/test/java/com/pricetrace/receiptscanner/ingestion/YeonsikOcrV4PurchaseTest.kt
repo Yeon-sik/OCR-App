@@ -13,6 +13,7 @@ import com.pricetrace.receiptscanner.review.ReviewViewModel
 import com.pricetrace.receiptscanner.input.InputOrigin
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -472,6 +473,30 @@ class YeonsikOcrV4PurchaseTest {
         assertEquals(null, decoded.paidOn)
         assertEquals(record.orderedAt, decoded.orderedAt)
         assertEquals(record.paidAt, decoded.paidAt)
+    }
+
+    @Test
+    fun `line seller omission inherits exact record source while unknown stays null`() {
+        val record = orderRecord(seller = "검증 식당", purchaseKind = PurchaseKind.RESTAURANT,
+            sellerBusinessKind = "food_service", sellerSourceNamespace = "restaurant-owner", sellerSourceCode = "branch-7")
+        fun payload(value: PurchaseRecord) = PriceTracePurchaseObservationV4Json.toJson(
+            PriceTracePurchaseObservationV4Payload(PriceTracePurchaseObservationV4Contract(), value, VerificationBasis.SOURCE_EVIDENCE))
+        val serving = " 원본 1인분 / 곱빼기 "
+        val inherited = payload(record.copy(lineItems = record.lineItems.map { it.copy(sellerOverride = null, optionText = serving) }))
+        assertEquals(JsonPrimitive("restaurant-owner"), inherited["seller"]!!.jsonObject["source_namespace"])
+        assertEquals(JsonPrimitive("branch-7"), inherited["seller"]!!.jsonObject["source_code"])
+        assertFalse(inherited["items"]!!.jsonArray.single().jsonObject.containsKey("seller"))
+        assertEquals(JsonPrimitive(serving), inherited["items"]!!.jsonArray.single().jsonObject["option_text"])
+        val unknown = payload(record.copy(seller = null, sellerBranchName = null, sellerSourceNamespace = null,
+            sellerSourceCode = null, sellerBusinessKind = null))
+        assertEquals(JsonNull, unknown["seller"])
+        assertEquals(JsonNull, unknown["items"]!!.jsonArray.single().jsonObject["seller"])
+        val different = payload(record.copy(lineItems = record.lineItems.map { it.copy(sellerOverride = "별도 식당") }))["items"]!!
+            .jsonArray.single().jsonObject["seller"]!!.jsonObject
+        assertEquals(JsonPrimitive("별도 식당"), different["seller_name"])
+        assertEquals(JsonNull, different["source_namespace"])
+        assertEquals(JsonNull, different["source_code"])
+        assertEquals(JsonNull, different["branch_name"])
     }
 
     @Test

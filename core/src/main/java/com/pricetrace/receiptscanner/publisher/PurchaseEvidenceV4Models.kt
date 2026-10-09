@@ -192,7 +192,10 @@ object PriceTracePurchaseObservationV4Json {
             put("gross_price", line.grossAmountKrw?.let(::JsonPrimitive) ?: JsonNull)
             put("discount", line.discountAmountKrw?.let(::JsonPrimitive) ?: JsonNull)
             put("net_price", line.netAmountKrw?.let(::JsonPrimitive) ?: JsonNull)
-            put("seller", lineSeller ?: JsonNull)
+            // Omission inherits the record's verified seller facts; null means unknown.
+            if (line.sellerOverride != null || record.seller == null) {
+                put("seller", lineSeller ?: JsonNull)
+            }
         }
     }
 

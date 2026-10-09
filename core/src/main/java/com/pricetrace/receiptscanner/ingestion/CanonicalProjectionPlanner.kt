@@ -192,6 +192,15 @@ object CanonicalProjectionPlanner {
                     if (envelope.nutrition.any { it is IngestionNutrition.RestaurantMenuEstimate }) {
                         add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
                     }
+                    if (envelope.schemaVersion == YEONSIK_OCR_V5_SCHEMA &&
+                        envelope.purchaseNutritionLinks.any { link ->
+                            envelope.purchaseRecords.any {
+                                it.clientKey == link.purchaseRecordClientKey && it.priceTraceSubmissionEligible
+                            }
+                        }
+                    ) {
+                        add(IngestionProjection.PRICETRACE_PRICE_OBSERVATION)
+                    }
                 }
             }
             IngestionProjection.FITNESS_MEAL -> add(IngestionProjection.FITNESS_NUTRITION)

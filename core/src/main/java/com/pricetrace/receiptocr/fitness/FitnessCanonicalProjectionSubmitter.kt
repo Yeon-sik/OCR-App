@@ -48,7 +48,9 @@ class FitnessCanonicalProjectionSubmitter(
         val priceTraceIdentity = resolvedReceiptIdentity?.let(PriceTraceIdentityJson::encode)
         // external-reference.v1 is implemented by Fitness's hierarchy-aware v3 RPC. Keep
         // product_label_ocr V2 calls on the legacy v2 boundary for backward compatibility.
-        val useV3Contract = envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA ||
+        val useV3Contract = envelope.schemaVersion in setOf(
+            YEONSIK_OCR_V3_SCHEMA, com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA,
+        ) ||
             envelope.nutrition.any { item ->
                 item is IngestionNutrition.ProductLabel &&
                     item.draft.sourceType == NutritionContract.EXTERNAL_REFERENCE_SOURCE_TYPE
@@ -118,9 +120,8 @@ class FitnessCanonicalProjectionSubmitter(
                             restaurantName = restaurantName,
                             item = item,
                             useV3Contract = useV3Contract,
-                            priceTraceIdentity = publicationIdentity?.takeIf {
-                                envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA
-                            }?.toNutritionIdentity(restaurantName, item.menuName),
+                            // Private import facts stay identical when authority is later recovered.
+                            // PT identity belongs to the separate publication request.
                         ).let { payload ->
                             val link = envelope.purchaseNutritionLinks.singleOrNull { it.nutritionClientKey == item.clientKey }
                             if (link == null) payload else payload.copy(provenance = JsonObject(payload.provenance + mapOf(
