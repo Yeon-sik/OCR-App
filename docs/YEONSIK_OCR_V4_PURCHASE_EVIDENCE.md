@@ -54,6 +54,56 @@ allowlist에는 `order_history`를 포함한다. 다만 현재 확인한 PriceTr
 
 ## canonical model
 
+### 구매 행의 구조화 옵션 (V4/V5 공통)
+
+`PurchaseRecordLine.optionItems: List<PurchaseOption> = emptyList()`는 parent line에 종속된다.
+schema version은 V4/V5 그대로이며 option은 별도 구매·메뉴 행이 아니다.
+
+```json
+{
+  "option_text": null,
+  "option_items": [
+    {"option_key": "option-1", "description": "보통", "quantity": 1, "amount_krw": 0},
+    {"option_key": "option-2", "description": "현미잡곡밥 180g (약275kcal → 순탄수 61g)", "quantity": 1, "amount_krw": 0},
+    {"option_key": "option-3", "description": "리뷰이벤트 계란후라이 1개 추가 (순단백질7g)", "quantity": 1, "amount_krw": 0}
+  ]
+}
+```
+
+- `option_key`는 parent 내부 unique/non-blank stable local key이고 authority ID가 아니다.
+- `description`은 non-blank이며 수신기의 길이 제한을 canonical에 적용하지 않는다.
+- `quantity`는 null 또는 양의 유한 source number이다. 누락한 수량을 1로 추론하지 않는다.
+- `amount_krw`는 null 또는 0 이상의 관측 정수(Long)이다. 0원 표시가 있을 때만 0이다.
+- source order를 배열 그대로 보존한다. non-empty `option_items`와 `option_text`를 함께 넣으면 거부한다.
+- legacy `option_items` 누락은 `[]`로 decode하며 신규 encoder는 항상 배열을 출력한다.
+  legacy/unstructured `option_text`는 계속 허용한다.
+
+Desktop/Android 검수 화면에서 parent별 추가·삭제·위/아래 이동을 제공한다. 설명·수량·금액은
+registry의 typed scalar editor로 수정하고 null 처리할 수 있다. 목록 구조는
+`PurchaseOptionListMutation.Add/Delete/Reorder`의 닫힌 명령만 사용한다. key는 앱이
+`option-N`으로 생성하며 사용자가 편집할 수 없다. undo/redo와 저장된 변경 이력을 통해 삭제된
+key도 재사용하지 않는다. legacy 텍스트는 사용자가 먼저 지운 뒤 구조화 옵션을 추가한다.
+매 변경은 full canonical validation을 통과해야 저장되며, 오류가 있으면 확정·전송이 차단된다.
+다른 정상 편집이나 재정렬로 기존 필드 오류를 지우지 않는다. 해당 값을 수정하거나 그 옵션을
+삭제해야 오류가 해소된다. 기존 값으로 되돌린 no-op 편집도 해당 필드의 오류만 해소한다.
+원본 bytes·manifest·producer/source/user_text·evidence는 수정하지 않는다.
+
+2026-10-11에 현재 로컬 PriceTrace HEAD의
+`supabase/migrations/20260911140000_purchase_price_observation_v4.sql`을 다시 확인했다.
+purchase receiver는 단일 `option_text`와 PostgreSQL `length` 기준 500자만 받는다.
+OCR-App adapter는 source order로 `설명 ×수량 [금액 KRW]`를 ` | `로 연결하고 null 수량·금액의
+suffix는 생략한다. legacy `option_text`는 공백까지 그대로 전달한다. 500자 초과 또는 NUL/단독 surrogate처럼
+수신기가 표현할 수 없는 값은 `pricetrace_v4_option_text_max_500_characters_required` 또는
+`pricetrace_v4_option_text_unrepresentable`로 해당 PriceTrace record/projection만 fail-closed한다.
+truncate/round/replace하지 않으며 CashOS·Fitness·canonical 사실을 손상시키지 않는다.
+
+옵션 추가·수정·삭제·재정렬은 canonical revision이다. 기존 purchase record JSON을 사용하는
+artifact/projection fingerprint에 options와 배열 순서가 포함되므로 변경된 payload의 이전
+idempotency key·remote ID·checkpoint를 재사용하지 않는다. V5 링크·영양 provenance·섭취는
+옵션 변경으로 생성하거나 계산하지 않는다.
+
+[구조화 옵션 V5 전체 예제](../examples/yeonsik-ocr.v5.restaurant-purchase-options.example.json).
+
 `purchase_records`의 각 record는 다음을 보존한다.
 
 - `platform`과 nullable `seller` (둘은 대소문자 무시 비교로 동일할 수 없다)

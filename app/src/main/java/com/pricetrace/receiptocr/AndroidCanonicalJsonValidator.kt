@@ -360,7 +360,7 @@ class AndroidCanonicalJsonValidator(
         val ingestionId = requireNotNull(state.ingestionId) { "Ingestion id is missing." }
         val controller = structuredReviewController
             ?.takeIf { it.state.value.envelope == envelope }
-            ?: CanonicalReviewController(envelope, initialEdits = state.reviewEdits)
+            ?: CanonicalReviewController(envelope, initialEdits = state.reviewEdits, initialFieldErrors = state.reviewFieldErrors)
         structuredReviewController = controller
         if (!mutation(controller)) {
             return state.copy(
@@ -372,8 +372,9 @@ class AndroidCanonicalJsonValidator(
         val edited = controller.state.value.envelope
         val editedJson = YeonsikOcrEnvelopeCodec.encodePersisted(edited)
         val newEdits = controller.state.value.edits.drop(state.reviewEdits.size)
+        val editedState = state.copy(reviewFieldErrors = controller.state.value.fieldErrors, error = controller.state.value.error)
         if (newEdits.isEmpty()) {
-            return state.copy(reviewFieldErrors = emptyMap(), error = null, notice = "변경된 canonical 필드가 없습니다.")
+            return editedState.copy(notice = "변경된 canonical 필드가 없습니다.")
         }
 
         val bundle = state.bundle
@@ -401,7 +402,7 @@ class AndroidCanonicalJsonValidator(
                 edits = newEdits,
             )
             return archiveAndMaterializeRevision(
-                state = state,
+                state = editedState,
                 request = request,
                 edited = edited,
                 allEdits = controller.state.value.edits,
@@ -409,7 +410,7 @@ class AndroidCanonicalJsonValidator(
         }
 
         return materializeRevision(
-            state = state,
+            state = editedState,
             startResult = useCase.reviseCanonicalDraft(ingestionId, edited),
             edited = edited,
             reviewEdits = controller.state.value.edits,
@@ -587,9 +588,9 @@ class AndroidCanonicalJsonValidator(
             plan = plan,
             selectedProjections = state.selectedProjections.intersect(plan.eligible),
             reviewEdits = reviewEdits,
-            reviewFieldErrors = emptyMap(),
+            reviewFieldErrors = state.reviewFieldErrors,
             bundle = bundle,
-            error = null,
+            error = state.reviewFieldErrors.values.distinct().joinToString(", ").takeIf { it.isNotEmpty() },
             notice = "구조화 편집을 저장했습니다. 이전 검증 상태는 무효화되어 다시 확정해야 합니다.",
         ).also(::persistBundleState)
     }
@@ -687,6 +688,7 @@ class AndroidCanonicalJsonValidator(
     suspend fun confirm(
         state: AndroidCanonicalJsonValidatorState,
     ): AndroidCanonicalJsonValidatorState {
+        require(state.reviewFieldErrors.isEmpty()) { "Resolve option/field edit errors before confirmation." }
         require(state.bundleValidationStatus != AndroidBundleValidationStatus.INVALID) { "Bundle is invalid." }
         state.bundle?.let { bundle ->
             require(bundle.pendingRevision == null &&
@@ -762,6 +764,7 @@ class AndroidCanonicalJsonValidator(
     private suspend fun submitInternal(
         state: AndroidCanonicalJsonValidatorState,
     ): AndroidCanonicalJsonValidatorState {
+        require(state.reviewFieldErrors.isEmpty()) { "Resolve option/field edit errors before submitting." }
         require(state.bundleValidationStatus != AndroidBundleValidationStatus.INVALID) { "Bundle is invalid." }
         val envelope = requireNotNull(state.envelope) { "Import JSON before submitting." }
         state.bundle?.let { bundle ->

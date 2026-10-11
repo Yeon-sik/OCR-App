@@ -41,6 +41,16 @@ top-level은 아래 **14개 key와 정확히 일치**해야 한다. 누락·추�
 
 ## Evidence와 revision
 
+구매 행은 V4의 `PurchaseRecordLine`/codec을 재사용하며 `option_items`도 같은 계약이다.
+[V4 구조화 옵션 계약](YEONSIK_OCR_V4_PURCHASE_EVIDENCE.md#구매-행의-구조화-옵션-v4v5-공통)과
+[세 옵션 전체 예제](../examples/yeonsik-ocr.v5.restaurant-purchase-options.example.json)를 참고한다.
+option은 parent line 내부에만 존재한다. Nutrition link는 계속
+`purchase_record_client_key + purchase_line_key + nutrition_client_key`의 exact 3-key이며
+`option_key`를 링크에 넣지 않는다. 옵션의 kcal/탄수/단백질 문자열은 영양 숫자나
+`food_image_estimate` provenance로 승격되지 않는다. 옵션 편집은 nutrient·food evidence·
+consumption·source/user_text를 변경하지 않는다. purchase만으로 consumption을 만들지 않는다.
+옵션으로 PriceTrace의 500자 제한을 넘으면 PT 경로만 차단되며 Fitness/CashOS 계획은 유지된다.
+
 ZIP 형식은 계속 `yeonsik-bundle.v1`이다. 기존 reader가 canonical/source ID/type과 manifest를 1:1로 binding하고, SHA-256와 byte_size 및 materialized bytes를 검증한다. 기존 evidence archive와 owner/hash checkpoint를 재사용한다.
 
 V5 gate는 purchase artifact의 history evidence와 nutrition artifact의 food evidence를 독립적으로 확인한다. 주문 사진은 영양 evidence를 충족하지 않고 음식 사진은 구매 evidence가 되지 않는다. 선언된 food ID별로 읽을 수 있는 FOOD_PHOTO binding이 있어야 한다. manual review도 음식 evidence를 대신하지 않는다.

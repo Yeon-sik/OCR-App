@@ -21,6 +21,31 @@ OCR-App은 외부 JSON을 검증하고, 원본 증거를 로컬에 연결하고,
 
 ## Product
 
+### mode validation과 producer 오류
+
+`merchant`는 top-level `merchant_candidate`가 필수이고 `nutrition`, `product_candidates`,
+`consumption`, `links`는 빈 배열이어야 한다. receipt가 있으면 non-food-service여야 한다.
+상품 후보 또는 product_label이 있는 producer 입력은 `packaged_product` mode를 사용해야 한다.
+runtime은 잘못된 mode를 자동 변경하거나 후보를 삭제해 수리하지 않는다.
+
+`packaged_product`에서는 top-level `merchant_candidate=null`이어야 한다. non-food-service
+receipt는 함께 보존할 수 있으며 `receipt.merchant`는 지울 필요가 없다. product candidate나
+ProductLabel nutrition 중 하나 이상이 있어야 하고 nutrition은 모두 ProductLabel, links는
+빈 배열이어야 한다. restaurant의 기존 의미는 유지한다.
+
+모든 조건은 충돌 field와 mode를 포함한 diagnostic으로 실패한다. 예:
+
+```text
+V2 merchant mode requires product_candidates=[]; packaged product artifacts require mode=packaged_product.
+V2 merchant mode requires nutrition=[]; product_label nutrition requires mode=packaged_product.
+V2 packaged_product requires merchant_candidate=null; receipt.merchant may remain.
+```
+
+Desktop/Android JSON 및 bundle import는 이 core detail을 사용자 오류에 그대로 전달한다.
+Bundle v1의 hash/type/binding 규칙은 그대로다. producer가 canonical bytes를 수정했다면
+최종 bytes로 `manifest.canonical_sha256`을 다시 계산해야 한다. runtime은 mismatch를
+자동 보정하지 않는다. 동일 exact evidence bytes의 여러 logical source binding도 유지한다.
+
 source attachment type에 `product_photo` (`PRODUCT_PHOTO`)를 추가했다. `product_candidates`
 항목은 다음 관측 사실과 evidence만 가질 수 있다.
 

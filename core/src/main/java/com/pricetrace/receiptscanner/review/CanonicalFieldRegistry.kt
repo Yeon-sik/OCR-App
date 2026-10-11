@@ -55,8 +55,8 @@ object CanonicalFieldRegistry {
     private val nutritionPath = Regex("""nutrition\[([^]]+)]\.(.+)""")
     private val consumptionPath = Regex("""consumption\[([^]]+)]\.(.+)""")
     private val consumptionItemPath = Regex("""items\[([^]]+)]\.(.+)""")
-    private val purchasePath = Regex("""purchase_records\[([^]]+)]\.(.+)""")
-    private val purchaseLinePath = Regex("""line_items\[([^]]+)]\.(.+)""")
+    private val purchasePath = Regex("""purchase_records\[([^]]+)]\.(.+)""", RegexOption.DOT_MATCHES_ALL)
+    private val purchaseLinePath = Regex("""line_items\[([^]]+)]\.(.+)""", RegexOption.DOT_MATCHES_ALL)
 
     /** Returns only fields supported by the typed review UI for this envelope. */
     fun fields(envelope: YeonsikOcrEnvelope): List<CanonicalEditableField> = buildList {
@@ -326,7 +326,14 @@ object CanonicalFieldRegistry {
             val linePrefix = "$prefix.line_items[$key]"
             fields += text("$linePrefix.description", "$key 설명", nullable = false)
             fields += text("$linePrefix.seller_override", "$key 판매자 override")
-            fields += text("$linePrefix.option_text", "$key 옵션")
+            if (line.optionItems.isEmpty()) fields += text("$linePrefix.option_text", "$key 옵션 텍스트")
+            line.optionItems.forEachIndexed { optionIndex, option ->
+                val optionPrefix = "$linePrefix.option_items[${option.optionKey}]"
+                val label = "$key 옵션 ${optionIndex + 1}"
+                fields += text("$optionPrefix.description", "$label 설명", nullable = false)
+                fields += decimal("$optionPrefix.quantity", "$label 수량", nullable = true, min = BigDecimal.ZERO, minExclusive = true)
+                fields += integer("$optionPrefix.amount_krw", "$label 금액", nullable = true, min = BigDecimal.ZERO)
+            }
             fields += enum("$linePrefix.price_status", "$key 가격 상태", listOf("itemized", "ambiguous", "unknown"), nullable = false)
             fields += text("$linePrefix.merchant_sku", "$key 판매자 SKU")
             fields += decimal("$linePrefix.quantity", "$key 수량", nullable = true, min = BigDecimal.ZERO, minExclusive = true)
@@ -497,7 +504,17 @@ object CanonicalFieldRegistry {
             field.startsWith("line_items[") -> {
                 val lineMatch = purchaseLinePath.matchEntire(field) ?: return null
                 val line = record.lineItems.findByKey(lineMatch.groupValues[1]) ?: return null
-                when (lineMatch.groupValues[2]) {
+                val lineField = lineMatch.groupValues[2]
+                val optionMatch = Regex("""option_items\[([\s\S]+)]\.(description|quantity|amount_krw)""").matchEntire(lineField)
+                if (optionMatch != null) {
+                    val option = line.optionItems.singleOrNull { it.optionKey == optionMatch.groupValues[1] } ?: return null
+                    when (optionMatch.groupValues[2]) {
+                        "description" -> option.description
+                        "quantity" -> option.quantity?.toString()
+                        "amount_krw" -> option.amountKrw?.toString()
+                        else -> null
+                    }
+                } else when (lineField) {
                     "description" -> line.description
                     "seller_override" -> line.sellerOverride
                     "option_text" -> line.optionText

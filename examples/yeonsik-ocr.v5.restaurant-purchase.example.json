@@ -65,6 +65,7 @@
           "description": "육회비빔밥",
           "seller_override": null,
           "option_text": null,
+          "option_items": [],
           "price_status": "itemized",
           "merchant_sku": null,
           "quantity": 2,

@@ -46,6 +46,16 @@ object YeonsikOcrV2Json {
         require(root.string("schema_version") == YEONSIK_OCR_V2_SCHEMA)
 
         val mode = IngestionMode.fromWireValue(root.string("mode"))
+        if (mode == IngestionMode.MERCHANT) {
+            // A wrong mode must remain visible even when a text-backed product cannot be decoded
+            // under merchant mode. Reject the producer contract before parsing its artifacts.
+            validateMerchantArtifacts(
+                root.arrayValue("product_candidates").isEmpty(),
+                root.arrayValue("nutrition").isEmpty(),
+                root["consumption"]?.jsonArray?.isEmpty() ?: true,
+                root.arrayValue("links").isEmpty(),
+            )
+        }
         val source = decodeSource(root.objectValue("source"))
         val receipt = root["receipt"]?.takeUnless { it == JsonNull }?.let { element ->
             val encoded = json.encodeToString(JsonElement.serializer(), element)
@@ -654,6 +664,7 @@ object YeonsikOcrV2Json {
         consumption: List<IngestionConsumption>,
         links: List<IngestionLink>,
     ) {
+        validateMode(mode, merchant, receipt, nutrition, productCandidates, consumption, links)
         val sourceIds = source.sourceFiles.map { it.id }.toSet()
         require(productCandidates.map { it.clientKey }.distinct().size == productCandidates.size) {
             "product candidate client_key values must be unique"
@@ -759,11 +770,26 @@ object YeonsikOcrV2Json {
             }
         }
 
+    }
+
+    /** Check the mode contract before reference validation so the conflicting field is actionable. */
+    private fun validateMode(
+        mode: IngestionMode,
+        merchant: MerchantCandidate?,
+        receipt: ReceiptV2?,
+        nutrition: List<IngestionNutrition>,
+        productCandidates: List<ProductCandidate>,
+        consumption: List<IngestionConsumption>,
+        links: List<IngestionLink>,
+    ) {
         when (mode) {
-            IngestionMode.MERCHANT -> require(
-                merchant != null && receipt?.merchant?.businessKind != BusinessKind.FOOD_SERVICE &&
-                    nutrition.isEmpty() && productCandidates.isEmpty() && consumption.isEmpty() && links.isEmpty(),
-            )
+            IngestionMode.MERCHANT -> {
+                require(merchant != null) { "V2 merchant mode requires merchant_candidate." }
+                validateMerchantArtifacts(productCandidates.isEmpty(), nutrition.isEmpty(), consumption.isEmpty(), links.isEmpty())
+                require(receipt?.merchant?.businessKind != BusinessKind.FOOD_SERVICE) {
+                    "V2 merchant mode does not allow a food_service receipt; use restaurant mode."
+                }
+            }
             IngestionMode.RESTAURANT -> require(
                 merchant != null &&
                     (receipt == null || receipt.merchant.businessKind == BusinessKind.FOOD_SERVICE) &&
@@ -773,13 +799,34 @@ object YeonsikOcrV2Json {
                     // new receipt-free path is only for ordinary restaurant estimates.
                     (receipt != null || nutrition.none { it is IngestionNutrition.MealComponentEstimate }),
             )
-            IngestionMode.PACKAGED_PRODUCT -> require(
-                merchant == null && receipt?.merchant?.businessKind != BusinessKind.FOOD_SERVICE &&
-                    (nutrition.isNotEmpty() || productCandidates.isNotEmpty()) &&
-                    nutrition.all { it is IngestionNutrition.ProductLabel } && links.isEmpty(),
-            )
+            IngestionMode.PACKAGED_PRODUCT -> {
+                require(merchant == null) {
+                    "V2 packaged_product requires merchant_candidate=null; receipt.merchant may remain."
+                }
+                require(receipt?.merchant?.businessKind != BusinessKind.FOOD_SERVICE) {
+                    "V2 packaged_product does not allow a food_service receipt."
+                }
+                require(nutrition.isNotEmpty() || productCandidates.isNotEmpty()) {
+                    "V2 packaged_product requires a product candidate or product_label nutrition."
+                }
+                require(nutrition.all { it is IngestionNutrition.ProductLabel }) {
+                    "V2 packaged_product nutrition must contain only product_label artifacts."
+                }
+                require(links.isEmpty()) { "V2 packaged_product requires links=[]." }
+            }
             IngestionMode.PURCHASE, IngestionMode.RESTAURANT_PURCHASE -> error("purchase mode requires yeonsik-ocr.v4")
         }
+    }
+
+    private fun validateMerchantArtifacts(productsEmpty: Boolean, nutritionEmpty: Boolean, consumptionEmpty: Boolean, linksEmpty: Boolean) {
+        require(productsEmpty) {
+            "V2 merchant mode requires product_candidates=[]; packaged product artifacts require mode=packaged_product."
+        }
+        require(nutritionEmpty) {
+            "V2 merchant mode requires nutrition=[]; product_label nutrition requires mode=packaged_product."
+        }
+        require(consumptionEmpty) { "V2 merchant mode requires consumption=[]." }
+        require(linksEmpty) { "V2 merchant mode requires links=[]." }
     }
 
     private fun validateTargets(

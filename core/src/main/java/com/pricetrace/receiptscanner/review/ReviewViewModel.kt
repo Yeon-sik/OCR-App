@@ -315,6 +315,13 @@ data class ReviewViewModel(
             purchase.lineItems.forEachIndexed { index, line ->
                 rows.add(ReviewRow("purchase:${purchase.clientKey}:line:$index", "구매 상품", line.description.orEmpty(), listOfNotNull(line.quantity?.let { "수량 $it" }, line.netAmountKrw?.let { "$it KRW" }).joinToString(" · "), purchaseLineEvidenceFor(sourceFiles, envelope, purchase, line, index), destinations, details = buildList {
                     line.optionText?.let { add(ReviewDetail("옵션", it)) }
+                    line.optionItems.forEachIndexed { optionIndex, option ->
+                        add(ReviewDetail("옵션 ${optionIndex + 1}", buildString {
+                            append(option.description)
+                            option.quantity?.let { append(" ×${number(it)}") }
+                            option.amountKrw?.let { append(" [$it KRW]") }
+                        }))
+                    }
                     line.merchantSku?.let { add(ReviewDetail("판매자 SKU", it)) }
                     line.priceStatus.let { add(ReviewDetail("가격 상태", it)) }
                     line.grossAmountKrw?.let { add(ReviewDetail("정가", "$it KRW")) }

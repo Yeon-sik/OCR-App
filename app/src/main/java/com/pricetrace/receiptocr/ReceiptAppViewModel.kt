@@ -838,6 +838,12 @@ class ReceiptAppViewModel(
     fun updateCanonicalField(fieldPath: String, value: String?) =
         runCanonicalStructuredEdit { it.updateField(fieldPath, value) }
 
+    fun mutateCanonicalPurchaseOptions(
+        purchaseRecordKey: String,
+        purchaseLineKey: String,
+        mutation: com.pricetrace.receiptscanner.review.PurchaseOptionListMutation,
+    ) = runCanonicalStructuredEdit { it.mutatePurchaseOptions(purchaseRecordKey, purchaseLineKey, mutation) }
+
     fun updateCanonicalLineDescription(lineId: String, value: String) =
         runCanonicalStructuredEdit { it.updateLineDescription(lineId, value) }
 

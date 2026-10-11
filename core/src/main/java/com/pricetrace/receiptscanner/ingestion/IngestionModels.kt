@@ -25,6 +25,8 @@ object PriceTraceV4SubmissionReason {
     const val LINE_AMOUNT_INTEGER_RANGE_REQUIRED = "pricetrace_v4_line_amount_int32_range_required"
     const val PAYMENT_AMOUNT_NON_NEGATIVE_INTEGER_REQUIRED = "pricetrace_v4_payment_amount_non_negative_integer_required"
     const val PAYMENT_AMOUNT_INTEGER_RANGE_REQUIRED = "pricetrace_v4_payment_amount_int32_range_required"
+    const val OPTION_TEXT_LENGTH_REQUIRED = "pricetrace_v4_option_text_max_500_characters_required"
+    const val OPTION_TEXT_UNREPRESENTABLE = "pricetrace_v4_option_text_unrepresentable"
 }
 
 private val CANONICAL_EVIDENCE_SOURCE_TYPES = setOf(
@@ -578,6 +580,25 @@ data class PurchaseRecordTotals(
         get() = paidAmountKrw ?: grandTotalAmountKrw
 }
 
+/** Source facts subordinate to one purchase line; optionKey is a local key, never authority. */
+data class PurchaseOption(
+    val optionKey: String,
+    val description: String,
+    val quantity: Double? = null,
+    val amountKrw: Long? = null,
+) {
+    init {
+        require(optionKey.isNotBlank()) { "purchase option option_key must be non-blank" }
+        require(description.isNotBlank()) { "purchase option description must be non-blank" }
+        require(quantity == null || quantity.isFinite() && quantity > 0.0) {
+            "purchase option quantity must be a positive finite number or null"
+        }
+        require(amountKrw == null || amountKrw >= 0L) {
+            "purchase option amount_krw must be a non-negative integer or null"
+        }
+    }
+}
+
 data class PurchaseRecordLine(
     val lineKey: String? = null,
     val productClientKey: String? = null,
@@ -591,6 +612,7 @@ data class PurchaseRecordLine(
     val grossAmountKrw: Long? = null,
     val discountAmountKrw: Long? = null,
     val netAmountKrw: Long? = null,
+    val optionItems: List<PurchaseOption> = emptyList(),
 ) {
     init {
         require(lineKey == null || lineKey.isNotBlank())
@@ -604,7 +626,12 @@ data class PurchaseRecordLine(
         require(sellerOverride == null || sellerOverride.isNotBlank())
         require(sellerOverride == null || sellerOverride.length <= 500)
         require(optionText == null || optionText.isNotBlank())
-        require(optionText == null || optionText.length <= 500)
+        require(optionItems.map { it.optionKey }.distinct().size == optionItems.size) {
+            "purchase line option_key values must be unique within the parent line"
+        }
+        require(optionItems.isEmpty() || optionText == null) {
+            "purchase line with option_items requires option_text=null"
+        }
         require(priceStatus in setOf("itemized", "ambiguous", "unknown")) {
             "purchase line price_status is invalid"
         }
@@ -723,6 +750,11 @@ object PriceTraceV4SubmissionCompatibility {
     fun evaluate(record: PurchaseRecord): PriceTraceSubmissionCompatibility {
         if (!record.priceTraceSourceEligible) {
             return PriceTraceSubmissionCompatibility(eligible = false)
+        }
+
+        record.lineItems.forEach { line ->
+            val reason = PriceTracePurchaseOptions.incompatibilityReason(line)
+            if (reason != null) return PriceTraceSubmissionCompatibility(eligible = false, reasonCode = reason)
         }
 
         record.lineItems.forEach { line ->

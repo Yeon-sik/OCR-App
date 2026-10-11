@@ -55,6 +55,84 @@ import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
 
 class AndroidCanonicalJsonValidatorTest {
     @Test
+    fun invalidV2ModeDiagnosticReachesAndroidJsonAndBundleErrorsWithoutRepair() = runBlocking {
+        val root = Json.parseToJsonElement(readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json")).jsonObject
+        val invalid = kotlinx.serialization.json.JsonObject(root + ("mode" to JsonPrimitive("merchant"))).toString()
+        val validator = AndroidCanonicalJsonValidator(CanonicalIngestionUseCase(InMemoryIngestionSessionStore()),
+            bundleRoot = Files.createTempDirectory("android-mode-diagnostic").toFile())
+        val expected = "V2 merchant mode requires product_candidates=[]; packaged product artifacts require mode=packaged_product."
+        val imported = validator.importJson(invalid, AndroidCanonicalJsonValidatorState())
+        assertTrue(imported.error.orEmpty(), imported.error.orEmpty().contains(expected))
+        assertFalse(imported.error.orEmpty().contains("Failed requirement."))
+        assertEquals(null, imported.envelope)
+        assertEquals(invalid, imported.rawJson)
+        val bundle = validator.importBundle(ByteArrayInputStream(textOnlyBundle(invalid)), "bad-mode.yeonsik", AndroidCanonicalJsonValidatorState())
+        assertTrue(bundle.error.orEmpty(), bundle.error.orEmpty().contains(expected))
+        assertFalse(bundle.error.orEmpty().contains("Failed requirement."))
+        assertEquals(AndroidBundleValidationStatus.INVALID, bundle.bundleValidationStatus)
+        assertEquals(null, bundle.session)
+    }
+
+    @Test
+    fun androidOptionMutationsPersistRevisionAndInvalidEditBlocksConfirmAndSubmit() = runBlocking {
+        val validator = AndroidCanonicalJsonValidator(CanonicalIngestionUseCase(InMemoryIngestionSessionStore()))
+        var state = validator.importJson(readExample("yeonsik-ocr.v4.purchase.example.json"), AndroidCanonicalJsonValidatorState())
+        val original = state.envelope!!
+        state = validator.reviseStructuredReview(state) { it.mutatePurchaseOptions("purchase-1", "0", com.pricetrace.receiptscanner.review.PurchaseOptionListMutation.Add("선택", amountKrw = 0L)) }
+        assertEquals("option-1", state.envelope!!.purchaseRecords.single().lineItems.single().optionItems.single().optionKey)
+        assertEquals(original.source, state.envelope!!.source)
+        val valid = state
+        state = validator.reviseStructuredReview(state) { it.updateField("purchase_records[purchase-1].line_items[0].option_items[option-1].quantity", "0") }
+        assertEquals(valid.canonicalJson, state.canonicalJson)
+        assertEquals(valid.reviewEdits, state.reviewEdits)
+        assertTrue(state.reviewFieldErrors.isNotEmpty())
+        state = validator.reviseStructuredReview(state) { it.updateField("purchase_records[purchase-1].line_items[0].option_items[option-1].description", "다른 정상 편집") }
+        assertTrue(state.reviewFieldErrors.isNotEmpty())
+        state = validator.reviseStructuredReview(state) { it.updateField("purchase_records[purchase-1].line_items[0].option_items[option-1].amount_krw", "0") }
+        assertTrue(state.reviewFieldErrors.isNotEmpty())
+        assertTrue(runCatching { validator.confirm(state) }.isFailure)
+        assertTrue(runCatching { validator.submit(state) }.isFailure)
+        state = validator.reviseStructuredReview(state) { it.updateField("purchase_records[purchase-1].line_items[0].option_items[option-1].quantity", "0.5") }
+        assertTrue(state.reviewFieldErrors.isEmpty())
+        state = validator.confirm(state)
+        assertEquals(IngestionReviewStatus.READY, state.session!!.reviewStatus)
+    }
+
+    @Test
+    fun androidManualOptionsLeaveBundleManifestAttachmentBytesAndProducerSourceUntouched() = runBlocking {
+        val original = readExample("yeonsik-ocr.v4.purchase.example.json")
+        // Keep an exact attachment-backed order source through the manual revision.
+        val root = Json.parseToJsonElement(original).jsonObject
+        val source = root.getValue("source").jsonObject
+        val oneSource = kotlinx.serialization.json.JsonObject(root + ("source" to kotlinx.serialization.json.JsonObject(source +
+            ("source_files" to JsonArray(listOf(source.getValue("source_files").let { (it as JsonArray).first() }))))))
+        val record = (root.getValue("purchase_records") as JsonArray).single().jsonObject
+        val evidence = (record.getValue("evidence") as JsonArray).map { item ->
+            val fact = item.jsonObject
+            kotlinx.serialization.json.JsonObject(fact + ("source_attachment_ids" to JsonArray(listOf(JsonPrimitive("order-history-1")))) +
+                ("source_type" to JsonPrimitive("order_history")))
+        }
+        val canonical = kotlinx.serialization.json.JsonObject(oneSource + ("purchase_records" to JsonArray(listOf(
+            kotlinx.serialization.json.JsonObject(record + ("evidence" to JsonArray(evidence))))))).toString()
+        val validator = AndroidCanonicalJsonValidator(CanonicalIngestionUseCase(InMemoryIngestionSessionStore()),
+            evidenceArchivePort = SuccessfulArchivePort(), bundleRoot = Files.createTempDirectory("android-option-evidence").toFile())
+        val imported = validator.importBundle(ByteArrayInputStream(evidenceBundle(canonical, sourceFileId = "order-history-1", type = SourceAttachmentType.ORDER_HISTORY)),
+            "options.yeonsik", AndroidCanonicalJsonValidatorState())
+        assertNotNull(imported.envelope)
+        val before = imported.bundle!!
+        val bytes = before.evidencePaths.mapValues { File(it.value).readBytes().toList() }
+        val edited = validator.reviseStructuredReview(imported) { it.mutatePurchaseOptions("purchase-1", "0", com.pricetrace.receiptscanner.review.PurchaseOptionListMutation.Add("수동 옵션 275kcal")) }
+        assertEquals(null, edited.error)
+        assertEquals(before.manifestJson, edited.bundle!!.manifestJson)
+        assertEquals(before.canonicalSha256, edited.bundle.canonicalSha256)
+        assertEquals(bytes, edited.bundle.evidencePaths.mapValues { File(it.value).readBytes().toList() })
+        assertEquals(imported.rawJson, edited.rawJson)
+        assertEquals(imported.envelope!!.source, edited.envelope!!.source)
+        assertEquals(imported.envelope.purchaseRecords.single().evidence, edited.envelope.purchaseRecords.single().evidence)
+        assertEquals(AndroidCanonicalRevisionArchiveStatus.ARCHIVED, edited.bundle.revisionArchiveStatus)
+    }
+
+    @Test
     fun v5AndroidReviewUsesTheSharedPlanAndRetainsPurchaseNutritionLinks() = runBlocking {
         val validator = AndroidCanonicalJsonValidator(CanonicalIngestionUseCase(InMemoryIngestionSessionStore()))
         val imported = validator.importJson(readExample("yeonsik-ocr.v5.restaurant-purchase.example.json"), AndroidCanonicalJsonValidatorState())
