@@ -95,6 +95,99 @@ immediate V4 응답이나 저장된 checkpoint에 authority metadata가 없으�
 
 metadata 누락·중복 source/line·ambiguity·다른 key는 모두 fail-closed다. 이번 OCR 작업은 서버 migration이나 production 계약을 만들지 않았다. 운영에는 PriceTrace 브랜치의 `20261009040159` runtime compatibility 및 `20261009040200` authority/getter migration 배포가 필요하다. Fitness/CashOS에는 V5용 RPC나 DB 변경이 필요하지 않으며 기존 API를 호출한다. migration의 실제 원격 적용은 이번 작업에서 실행·검증하지 않았다.
 
+## 식당과 지점 source snapshot 보존
+
+2026-10-11 수정은 기존 canonical의 source fact를 projection까지 전달한다. schema/version/key와
+downstream DB 계약은 그대로다. [V5 예제](../examples/yeonsik-ocr.v5.restaurant-purchase.example.json)는
+주문 source evidence에서 seller `맛단-맛있는 다이어트식단`, `seller_branch_name = 영등포점`을
+분리해 제공한 합성 예제이며, runtime은 이름 문자열에서 지점을 추정하지 않는다.
+
+`PurchaseNutritionIdentity.sellerName/sellerBranchName`은 nutrition client key → exact local link →
+purchase record client key → 실제 purchase line key 순서로 읽는다. line의 `sellerOverride`가
+null이면 record seller/branch를 쓴다. override가 있으면 seller는 override, branch는 null이다.
+override 이름이 record seller와 같은 문자열이어도 branch를 상속하지 않는다.
+link/record/line이 없거나 중복되어 하나로 정해지지 않으면 resolver는 null을 반환한다.
+
+Fitness private `food-estimate.v1` import의 기존 `p_provenance.restaurant_name/branch_name`에
+이 source pair를 전달한다. branch가 없으면 JSON null이며 product nutrition에는 적용하지 않는다.
+PriceTrace purchase payload의 기존 `seller.seller_name/branch_name` mapping도 그대로 보존한다.
+
+explicit consumption이 검증되어 Meal을 만들 때는 **실제 consumed nutrition key만** 따라간다.
+섭취하지 않은 구매 행이나 nutrition이 top-level snapshot을 바꾸지 않는다.
+
+| Consumed source pair | Meal의 기존 `p_source` |
+| --- | --- |
+| 모든 seller와 non-null branch가 각각 동일 | `store_name`, `branch_name` 모두 보존 |
+| seller 동일, branch 미상 또는 known/null 혼합 | `store_name`만 보존, branch field 생략 |
+| seller 동일, branch 서로 다름 | `store_name`만 보존, branch field 생략 |
+| seller 서로 다름 또는 일부 source를 확인할 수 없음 | store/branch field 모두 생략 |
+
+이 비교는 하나의 snapshot으로 표현할 수 있는지 확인할 뿐 이름을 authority로 승격하지 않는다.
+RestaurantLocation을 포함한 공개 dining-out authority는 기존 server-issued UUID와 exact line 결과에만
+의존한다. branch 문자열이 있어도 location UUID가 없거나 ambiguity가 있으면 publication은 fail-closed다.
+구매 사실만으로 consumption/Meal을 생성하지 않는 규칙도 유지한다.
+
+V2 `branch_name`, V4/V5 `seller_branch_name`의 null/non-null round-trip과 typed review 편집을 유지한다.
+지점 편집은 기존 canonical fingerprint와 revision을 변경하고 이전 verification을 무효화한다.
+실제 payload와 checkpoint는 공통 `RestaurantSourceSnapshot`을 사용한다. effective branch가 바뀌면
+Nutrition artifact verification과 Nutrition/Meal payload fingerprint 및 projection revision도 갱신된다.
+seller override 때문에 record branch가 사용되지 않는 항목의 Nutrition verification은 유지된다.
+null branch의 기존 Nutrition dependency와 legacy publication-only fingerprint는 유지한다.
+legacy canonical recovery는 owner audit와 정확한 server identity를 사용하며 restaurant/branch
+이름으로 authority를 재판정하지 않는다. 이전 import의 source 문자열을 이 수정이 소급 변경하지는 않는다.
+
+현재 PriceTrace purchase-price.v4는 `seller.branch_name`, Fitness Nutrition은 JSON `provenance`,
+verified-meal.v1은 `p_source.store_name/branch_name`을 이미 지원하므로 새 migration은 필요하지 않다.
+원격 RPC/RLS 및 실제 기기/GUI 검증은 로컬 회귀 테스트와 별개다.
+
+### Source branch 회귀 범위
+
+- `RestaurantBranchSourceTest`: V4/V5 canonical과 PriceTrace payload, V2/V4/V5 null branch,
+  exact local resolver, seller override, review 및 Nutrition/Meal checkpoint fingerprint/revision/verification,
+  이름에 dependency 구분자가 포함되어도 지점 제거가 검증 무효화를 우회하지 못함.
+- `YeonsikOcrV5Test`: branch가 알려져도 RestaurantLocation UUID 없이는 exact authority가 되지 않음.
+- `FitnessCanonicalProjectionSubmitterTest`: V5 private provenance, V2 receipt/receipt-free branch,
+  V3 restaurant menu branch, override/null branch, 기존 exact server location publication.
+- `FitnessMealProjectionSubmitterTest`: V2 receipt/receipt-free snapshot, V5 단일/공통 source,
+  서로 다른 seller/branch, 미상 branch, override, consumed local link, 구매만 있는 경우의 Meal 차단.
+- `NutritionCanonicalModelsTest`: meal component fallback과 별도 reference의 지점 격리.
+- `FitnessCanonicalRecoveryTest`: merchant/branch 수정 후에도 기존 server audit와 location ID 사용.
+
+실행 명령(Windows):
+
+```powershell
+.\gradlew.bat :core:test :app:test :desktop-app:test :receipt-scanner:test lint assembleDebug :desktop-app:jar --no-daemon
+```
+
+2026-10-11 로컬 실행 결과: `BUILD SUCCESSFUL`. 새 테스트 19개와 기존 회귀 검증을 포함한다.
+
+| 검증 | 결과 |
+| --- | --- |
+| Core | 257 passed, 0 failed |
+| Android app | 130 passed, 0 failed |
+| receipt-scanner | 172 passed, 0 failed |
+| Desktop | 42 passed, 0 failed, 기존 2 skipped |
+| 합계 | 601 passed, 0 failed, 2 skipped |
+| lint | app 0 errors / 47 warnings, receipt-scanner 0 errors / 0 warnings |
+| Android/ Desktop 빌드 | `assembleDebug`, `:desktop-app:jar` 성공 |
+
+위 명령은 repository CI의 Core/App/Desktop 테스트를 포함한다. 원격 RPC/RLS, 기기 설치와
+Desktop GUI 실행은 수행하지 않았다. 기존 immutable import에 지점을 소급 입력하는 backfill도 하지 않는다.
+
+### 2026-10-11 지점 보존 변경 파일
+
+이번 수정은 다음 18개 파일이다.
+
+| 구분 | 파일 |
+| --- | --- |
+| source resolver | `core/src/main/java/com/pricetrace/receiptscanner/ingestion/PurchaseNutritionIdentity.kt`, `RestaurantSourceSnapshot.kt` (같은 디렉터리, 신규) |
+| verification/checkpoint | `core/src/main/java/com/pricetrace/receiptscanner/ingestion/IngestionOrchestrator.kt` |
+| Fitness payload | `core/src/main/java/com/pricetrace/receiptocr/fitness/NutritionCanonicalModels.kt`, `FitnessCanonicalProjectionSubmitter.kt`, `FitnessMealProjectionSubmitter.kt` (같은 디렉터리) |
+| Core 테스트 | `core/src/test/java/com/pricetrace/receiptscanner/ingestion/RestaurantBranchSourceTest.kt` (신규), `YeonsikOcrV5Test.kt` (같은 디렉터리), `core/src/test/java/com/pricetrace/receiptocr/fitness/FitnessCanonicalRecoveryTest.kt` |
+| App 테스트 | `app/src/test/java/com/pricetrace/receiptocr/fitness/FitnessCanonicalProjectionSubmitterTest.kt`, `FitnessMealProjectionSubmitterTest.kt`, `NutritionCanonicalModelsTest.kt` (같은 디렉터리) |
+| 문서 | `docs/YEONSIK_OCR_INGESTION_V2.md`, `docs/YEONSIK_OCR_V4_PURCHASE_EVIDENCE.md`, `docs/YEONSIK_OCR_V5_RESTAURANT_PURCHASE.md` |
+| 예제 | `examples/yeonsik-ocr.v2.restaurant-food-photo.example.json`, `examples/yeonsik-ocr.v4.purchase.example.json`, `examples/yeonsik-ocr.v5.restaurant-purchase.example.json` |
+
 ## 변경 파일
 
 다음 31개 파일은 초기 V5 구현 범위다. 기존 README, launcher icons, desktop build 설정, untracked Supabase/package 작업은 포함하지 않았다.

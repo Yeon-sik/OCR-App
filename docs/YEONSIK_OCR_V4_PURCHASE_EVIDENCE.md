@@ -78,6 +78,20 @@ routing용으로 파생하되 원본 timestamp는 보존한다. 모르는 금액
 `review.status=conflict`와 `purchase_evidence_conflict:<client_key>:<field>`로
 검수를 차단한다.
 
+### Seller branch source fact 보존
+
+기존 nullable `purchase_records[].seller_branch_name`은 canonical decode/encode 후에도 보존되며,
+PriceTrace의 기존 purchase-price.v4 payload `seller.branch_name`으로 그대로 전달한다.
+line에 `seller_override`가 없으면 receiver가 record seller의 name/branch/source facts를 상속한다.
+override가 있으면 line seller의 branch는 null이며 record 지점을 자동 상속하지 않는다.
+
+이 mapping은 V5가 같은 구매 payload를 사용할 때도 유지된다. 지점이 없는 V4 파일도 계속 유효하다.
+`seller_branch_name`의 review 편집은 기존 canonical fingerprint/revision 경로를 사용하며
+검증된 이전 revision을 무효화한다. source branch는 server-issued Location UUID의 대체 값이 아니다.
+새 key/schema나 PriceTrace/Fitness migration은 추가하지 않는다.
+[구매 예제](../examples/yeonsik-ocr.v4.purchase.example.json)는 source evidence의 `영등포점`을 포함하고,
+[text-only 예제](../examples/yeonsik-ocr.v4.purchase.text-only.example.json)는 nullable branch 호환성을 유지한다.
+
 ## routing
 
 | 조건 | projection | 동작 |

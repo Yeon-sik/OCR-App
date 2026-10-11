@@ -77,9 +77,24 @@ object PurchaseNutritionIdentity {
         identity
     }.getOrNull()
 
-    fun sellerName(envelope: YeonsikOcrEnvelope, nutritionClientKey: String): String? {
+    fun sellerName(envelope: YeonsikOcrEnvelope, nutritionClientKey: String): String? =
+        linkedPurchaseLine(envelope, nutritionClientKey)?.let { (record, line) ->
+            line.sellerOverride ?: record.seller
+        }
+
+    /** An explicit line seller has no branch fact and cannot inherit the record's branch. */
+    fun sellerBranchName(envelope: YeonsikOcrEnvelope, nutritionClientKey: String): String? =
+        linkedPurchaseLine(envelope, nutritionClientKey)?.let { (record, line) ->
+            record.sellerBranchName.takeIf { line.sellerOverride == null }
+        }
+
+    private fun linkedPurchaseLine(
+        envelope: YeonsikOcrEnvelope,
+        nutritionClientKey: String,
+    ): Pair<PurchaseRecord, PurchaseRecordLine>? {
         val link = envelope.purchaseNutritionLinks.singleOrNull { it.nutritionClientKey == nutritionClientKey } ?: return null
         val record = envelope.purchaseRecords.singleOrNull { it.clientKey == link.purchaseRecordClientKey } ?: return null
-        return record.lineItems.singleOrNull { it.lineKey == link.purchaseLineKey }?.sellerOverride ?: record.seller
+        val line = record.lineItems.singleOrNull { it.lineKey == link.purchaseLineKey } ?: return null
+        return record to line
     }
 }

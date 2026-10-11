@@ -8,6 +8,7 @@ import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.ingestion.PriceTraceRestaurantMenuIdentity
+import com.pricetrace.receiptscanner.ingestion.RestaurantSourceSnapshot
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V3_SCHEMA
 import com.pricetrace.receiptscanner.nutrition.NutritionContract
 import kotlinx.coroutines.CancellationException
@@ -92,13 +93,11 @@ class FitnessCanonicalProjectionSubmitter(
                         useV3Contract = useV3Contract,
                     )
                     is IngestionNutrition.RestaurantEstimate -> {
-                        val restaurantName = envelope.receipt?.merchant?.name
-                            ?: envelope.merchantCandidate?.name
-                            ?: com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.sellerName(envelope, item.clientKey)
-                            ?: return ProjectionSubmission.Failure(
-                                "restaurant_name_missing",
-                                retryable = false,
-                            )
+                        val (sourceName, branchName) = RestaurantSourceSnapshot.forNutrition(envelope, item.clientKey)
+                        val restaurantName = sourceName ?: return ProjectionSubmission.Failure(
+                            "restaurant_name_missing",
+                            retryable = false,
+                        )
                         identityRequiredForPublication = true
                         publicationIdentity = if (envelope.receipt != null) {
                             resolvedReceiptIdentity?.let { identity -> item.lineId?.let { sourceLineId ->
@@ -118,6 +117,7 @@ class FitnessCanonicalProjectionSubmitter(
                             revisionSeq = request.revisionSeq,
                             idempotencyKey = itemKey,
                             restaurantName = restaurantName,
+                            branchName = branchName,
                             item = item,
                             useV3Contract = useV3Contract,
                             // Private import facts stay identical when authority is later recovered.
@@ -132,8 +132,8 @@ class FitnessCanonicalProjectionSubmitter(
                         }
                     }
                     is IngestionNutrition.RestaurantMenuEstimate -> {
-                        val restaurantName = envelope.receipt?.merchant?.name
-                            ?: envelope.merchantCandidate?.name
+                        val (sourceName, branchName) = RestaurantSourceSnapshot.forNutrition(envelope, item.clientKey)
+                        val restaurantName = sourceName
                             ?: return ProjectionSubmission.Failure("restaurant_name_missing", retryable = false)
                         identityRequiredForPublication = true
                         publicationIdentity = standaloneIdentityFor(
@@ -146,14 +146,15 @@ class FitnessCanonicalProjectionSubmitter(
                             revisionSeq = request.revisionSeq,
                             idempotencyKey = itemKey,
                             restaurantName = restaurantName,
+                            branchName = branchName,
                             item = item,
                             useV3Contract = useV3Contract,
                         )
                     }
                     is IngestionNutrition.MealComponentEstimate -> {
+                        val (sourceName, branchName) = RestaurantSourceSnapshot.forNutrition(envelope, item.clientKey)
                         val restaurantName = item.reference?.restaurantName
-                            ?: envelope.receipt?.merchant?.name
-                            ?: envelope.merchantCandidate?.name
+                            ?: sourceName
                             ?: return ProjectionSubmission.Failure(
                                 "restaurant_name_missing",
                                 retryable = false,
@@ -163,6 +164,7 @@ class FitnessCanonicalProjectionSubmitter(
                             revisionSeq = request.revisionSeq,
                             idempotencyKey = itemKey,
                             restaurantName = restaurantName,
+                            branchName = branchName,
                             item = item,
                         )
                     }

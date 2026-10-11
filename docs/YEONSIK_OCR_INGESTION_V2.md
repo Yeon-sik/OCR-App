@@ -106,6 +106,25 @@ receipt line을 만들지 않는다.
 artifact를 text로 통과시켜도 full-envelope 검증에서는 `restaurant_estimate`의
 `FOOD_PHOTO` 검사를 별도로 수행한다.
 
+## Restaurant/store branch source snapshot
+
+식당 영양 추정의 `restaurant_name`과 nullable `branch_name`은 같은 canonical source에서 함께 읽는다.
+receipt가 있으면 `receipt.merchant.name/branch_name`, receipt-free restaurant이면
+`merchant_candidate.name/branch_name`을 Fitness의 기존 `p_provenance`로 전달한다.
+receipt의 branch가 null일 때 다른 merchant candidate의 지점을 섞지 않는다.
+V3 `restaurant_menu_estimate`도 같은 receipt/merchant source 규칙을 사용한다.
+
+Meal은 기존 explicit item-level consumption이 사용자 검증된 경우에만 생성된다.
+`p_source.store_name/branch_name`에는 receipt merchant를 사용하고, receipt-free restaurant에서는
+merchant candidate를 사용한다. branch가 없으면 Nutrition provenance에서는 JSON null,
+Meal source에서는 해당 field 생략으로 표현한다. Product Nutrition 동작은 바뀌지 않는다.
+
+이 문자열은 source snapshot이며 PriceTrace/Fitness의 Restaurant/Location/Menu/Catalog UUID를
+대신하지 않는다. 지점 판별을 위한 이름 분리나 문자열 heuristic은 runtime에 없다.
+새 schema/version/key, downstream migration은 필요하지 않다.
+receipt의 지점 보존은 [V2 receipt 예제](../examples/yeonsik-ocr.v2.restaurant.example.json),
+merchant candidate의 지점 보존은 [receipt-free 음식 사진 예제](../examples/yeonsik-ocr.v2.restaurant-food-photo.example.json)에서 확인할 수 있다.
+
 ## Side dish / meal component
 
 Nutrition kind `meal_component_estimate`는 음식 사진으로 추정한 무료 반찬처럼 receipt에
@@ -117,6 +136,10 @@ Nutrition kind `meal_component_estimate`는 음식 사진으로 추정한 무료
 이 항목은 Fitness의 별도 `import_meal_component_estimate_v1` 경계와 Meal projection으로만
 전송한다. PriceTrace RestaurantMenu projection에는 보내지 않으며, `links`에도 포함하지
 않는다. `restaurant_menu_id`는 GPT/OCR 입력에서 확정하지 않는다.
+
+reference가 없으면 component 영양에도 위 receipt/merchant branch를 전달한다.
+reference에 별도 restaurant name이 있으면 그 reference의 branch만 사용하며,
+branch가 없다는 이유로 다른 source의 지점을 상속하지 않는다.
 
 ## Product ↔ Nutrition dependency
 

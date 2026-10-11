@@ -117,6 +117,12 @@ class YeonsikOcrV5Test {
         assertNull(PurchaseNutritionIdentity.exact(value, "food-1", metadata(line.replace("line-1", "line-2"))))
         assertNull(PurchaseNutritionIdentity.exact(value, "food-1", metadata(line.replace("\"exact\"", "\"ambiguous\""))))
         assertNull(PurchaseNutritionIdentity.exact(value, "food-1", metadata("$line,$line")))
+        assertEquals("영등포점", PurchaseNutritionIdentity.sellerBranchName(value, "food-1"))
+        val exactLine = Json.parseToJsonElement(line).jsonObject
+        val withoutLocationId = JsonObject(exactLine + ("authoritativeIds" to
+            JsonObject(exactLine.getValue("authoritativeIds").jsonObject - "restaurantLocationId")))
+        // A known source branch cannot replace the server-issued RestaurantLocation UUID.
+        assertNull(PurchaseNutritionIdentity.exact(value, "food-1", metadata(withoutLocationId.toString())))
     }
 
     @Test fun sameBundleReplayDoesNotResubmitSuccessfulSiblings() = runBlocking {

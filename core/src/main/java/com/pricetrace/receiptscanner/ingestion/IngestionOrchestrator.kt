@@ -1484,7 +1484,7 @@ class IngestionOrchestrator(
     /**
      * Keep this dependency list aligned with the data used by
      * FitnessCanonicalProjectionSubmitter. In particular, a restaurant estimate uses the
-     * receipt merchant name (or merchant candidate when there is no receipt).
+     * receipt merchant name/branch (or merchant candidate when there is no receipt).
      */
     private fun nutritionPayloadDependency(
         envelope: YeonsikOcrEnvelope,
@@ -1513,7 +1513,8 @@ class IngestionOrchestrator(
             if (envelope.schemaVersion == YEONSIK_OCR_V5_SCHEMA) {
                 val link = envelope.purchaseNutritionLinks.single { it.nutritionClientKey == item.clientKey }
                 "restaurant-purchase-estimate|" + YeonsikOcrV2Json.nutritionJson(item, true) +
-                    "|link=" + link + "|seller=" + PurchaseNutritionIdentity.sellerName(envelope, item.clientKey)
+                    "|link=" + link + restaurantBranchPayloadDependency(envelope, item, includeRestaurantSourceName) +
+                    "|seller=" + PurchaseNutritionIdentity.sellerName(envelope, item.clientKey)
             } else {
                 val artifactEnvelope = YeonsikOcrEnvelope(
                     mode = IngestionMode.RESTAURANT,
@@ -1522,6 +1523,7 @@ class IngestionOrchestrator(
                     schemaVersion = envelope.schemaVersion,
                 )
                 "restaurant_estimate|client_key=" + item.clientKey +
+                    restaurantBranchPayloadDependency(envelope, item, includeRestaurantSourceName) +
                     "|restaurant_name=" + ((if (includeRestaurantSourceName) fitnessRestaurantName(envelope) else null) ?: "<null>") +
                     "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
             }
@@ -1540,6 +1542,7 @@ class IngestionOrchestrator(
                         it.clientKey == item.priceObservationClientKey
                     }?.let(::standalonePriceObservationDependency) ?: "<missing>"
                 ) +
+                restaurantBranchPayloadDependency(envelope, item, includeRestaurantSourceName) +
                 "|restaurant_name=" + ((if (includeRestaurantSourceName) fitnessRestaurantName(envelope) else null) ?: "<null>") +
                 "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
         }
@@ -1551,6 +1554,8 @@ class IngestionOrchestrator(
                 schemaVersion = envelope.schemaVersion,
             )
             "meal_component_estimate|client_key=" + item.clientKey +
+                restaurantBranchPayloadDependency(envelope, item,
+                    includeRestaurantSourceName && item.reference?.restaurantName == null && item.reference?.branchName == null) +
                 "|restaurant_name=" + (item.reference?.restaurantName ?: fitnessRestaurantName(envelope) ?: "<null>") +
                 "|branch_name=" + (item.reference?.branchName ?: "<null>") +
                 "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
@@ -1566,6 +1571,28 @@ class IngestionOrchestrator(
 
     private fun fitnessRestaurantName(envelope: YeonsikOcrEnvelope): String? =
         envelope.receipt?.merchant?.name ?: envelope.merchantCandidate?.name
+
+    private fun restaurantBranchPayloadDependency(
+        envelope: YeonsikOcrEnvelope,
+        item: IngestionNutrition,
+        includeSource: Boolean,
+    ): String = if (!includeSource) "" else {
+        // Place this before the raw name so delimiters in a name cannot impersonate a branch.
+        // Preserve the old dependency for null branches and the legacy publication-only path.
+        RestaurantSourceSnapshot.forNutrition(envelope, item.clientKey).branchName
+            ?.let { "|branch_name=" + JsonPrimitive(it) }.orEmpty()
+    }
+
+    private fun mealSourcePayloadDependency(envelope: YeonsikOcrEnvelope): String {
+        val source = RestaurantSourceSnapshot.forMeal(envelope)
+        if (source.branchName == null && envelope.schemaVersion != YEONSIK_OCR_V5_SCHEMA &&
+            (envelope.receipt != null || envelope.mode != IngestionMode.RESTAURANT)
+        ) return ""
+        return "|source=" + buildJsonObject {
+            source.name?.let { put("store_name", JsonPrimitive(it)) }
+            source.branchName?.let { put("branch_name", JsonPrimitive(it)) }
+        }
+    }
 
     /**
      * A legacy private import is immutable. Merchant identity corrections belong to the
@@ -1636,7 +1663,7 @@ class IngestionOrchestrator(
                             envelope.schemaVersion == YEONSIK_OCR_V3_SCHEMA,
                         includeAuthorityStatus = envelope.schemaVersion == YEONSIK_OCR_V2_SCHEMA,
                     )
-                }
+                } + mealSourcePayloadDependency(envelope)
             IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE ->
                 "pricetrace-product-candidate|" + envelope.productCandidates
                     .sortedBy(ProductCandidate::clientKey)

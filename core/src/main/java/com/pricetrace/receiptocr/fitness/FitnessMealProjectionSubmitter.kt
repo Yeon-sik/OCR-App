@@ -8,6 +8,7 @@ import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
+import com.pricetrace.receiptscanner.ingestion.RestaurantSourceSnapshot
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -20,7 +21,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.time.OffsetDateTime
 
-/** Routes only v2 item-level consumption to Fitness's canonical Meal RPC. */
+/** Routes only explicit v2/v5 item-level consumption to Fitness's canonical Meal RPC. */
 class FitnessMealProjectionSubmitter(
     private val gateway: NutritionSupabaseGateway,
 ) : IngestionProjectionSubmitter {
@@ -115,6 +116,7 @@ class FitnessMealProjectionSubmitter(
             return ProjectionSubmission.Failure(error.message ?: "fitness_meal_payload_invalid", retryable = false)
         }
 
+        val (storeName, branchName) = RestaurantSourceSnapshot.forMeal(envelope)
         val source = buildJsonObject {
             put("source_app", JsonPrimitive("ocr-app"))
             put("schema_version", JsonPrimitive(if (isV5) envelope.schemaVersion else YEONSIK_OCR_V2_SCHEMA))
@@ -122,8 +124,8 @@ class FitnessMealProjectionSubmitter(
             put("menu", JsonPrimitive(mealTitle(envelope)))
             put("source_document_ref", JsonPrimitive(localDocumentId))
             put("consumed_at", JsonPrimitive(eatenAt))
-            envelope.receipt?.merchant?.name?.let { put("store_name", JsonPrimitive(it)) }
-            envelope.receipt?.merchant?.branchName?.let { put("branch_name", JsonPrimitive(it)) }
+            storeName?.let { put("store_name", JsonPrimitive(it)) }
+            branchName?.let { put("branch_name", JsonPrimitive(it)) }
         }
         val payload = try {
             val paidOrReceiptBackedItem = envelope.consumption

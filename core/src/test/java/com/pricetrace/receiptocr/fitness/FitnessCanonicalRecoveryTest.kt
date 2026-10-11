@@ -29,19 +29,22 @@ class FitnessCanonicalRecoveryTest {
     }
 
     @Test
-    fun legacyKeyUsesExactServerAuditAndOriginalKeyForPublicationAfterMerchantCorrection() = runTest {
+    fun legacyKeyUsesExactServerAuditAndOriginalKeyAfterMerchantAndBranchCorrection() = runTest {
         val original = standaloneRequest()
         val audit = audit(original, key = "legacy-import-key", revision = 1)
         val corrected = original.copy(
             revisionSeq = 9,
             previousMetadataJson = cachedIds(IMPORT_ID),
-            envelope = original.envelope!!.copy(merchantCandidate = original.envelope.merchantCandidate!!.copy(name = "Corrected Merchant")),
+            envelope = original.envelope!!.copy(merchantCandidate = original.envelope.merchantCandidate!!.copy(
+                name = "Corrected Merchant", branchName = "영등포점",
+            )),
         )
         val transport = RecoveryTransport(listOf(audit))
 
         assertTrue(submitter(transport).submit(corrected) is ProjectionSubmission.Success)
         assertEquals(0, transport.canonicalPosts.size)
         assertEquals(StableIds.sha256("legacy-import-key|publication"), transport.publicationPosts.single()["p_idempotency_key"]!!.jsonPrimitive.content)
+        assertEquals(JsonPrimitive("location-1"), transport.publicationPosts.single()["p_restaurant_location_id"])
         assertEquals(2, transport.requests.count { it.method == "GET" })
         assertTrue(transport.requests[1].url.contains("id=in.($IMPORT_ID)"))
     }

@@ -31,8 +31,8 @@
       "client_key": "purchase-1",
       "platform": "예시 주문 플랫폼",
       "platform_code": null,
-      "seller": "예시 식당",
-      "seller_branch_name": null,
+      "seller": "맛단-맛있는 다이어트식단",
+      "seller_branch_name": "영등포점",
       "seller_source_namespace": null,
       "seller_source_code": null,
       "seller_business_kind": "food_service",
@@ -75,6 +75,20 @@
         }
       ],
       "evidence": [
+        {
+          "source_type": "order_history",
+          "source_attachment_ids": ["order-history-1"],
+          "source_ref": "order-seller",
+          "field": "seller",
+          "observed_value": "맛단-맛있는 다이어트식단"
+        },
+        {
+          "source_type": "order_history",
+          "source_attachment_ids": ["order-history-1"],
+          "source_ref": "order-branch",
+          "field": "seller_branch_name",
+          "observed_value": "영등포점"
+        },
         {
           "source_type": "order_history",
           "source_attachment_ids": [

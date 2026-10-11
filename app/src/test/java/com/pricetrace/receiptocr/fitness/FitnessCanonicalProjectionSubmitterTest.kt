@@ -52,6 +52,9 @@ class FitnessCanonicalProjectionSubmitterTest {
         assertTrue(transport.requests.single().url.endsWith("/import_canonical_nutrition_v3"))
         val body = Json.parseToJsonElement(transport.requests.single().body!!).jsonObject
         val provenance = body.getValue("p_provenance").jsonObject
+        assertEquals("맛단-맛있는 다이어트식단", provenance.getValue("restaurant_name").jsonPrimitive.content)
+        assertEquals("영등포점", provenance.getValue("branch_name").jsonPrimitive.content)
+        assertEquals(JsonNull, body["p_pricetrace_identity"])
         assertEquals("purchase-1", provenance.getValue("purchase_record_client_key").jsonPrimitive.content)
         assertEquals("line-1", provenance.getValue("purchase_line_key").jsonPrimitive.content)
         assertEquals("food-1", provenance.getValue("nutrition_client_key").jsonPrimitive.content)
@@ -88,16 +91,82 @@ class FitnessCanonicalProjectionSubmitterTest {
         assertTrue(transport.requests[0].url.endsWith("/import_canonical_nutrition_v3"))
         val importBody = Json.parseToJsonElement(transport.requests[0].body!!).jsonObject
         assertEquals(JsonNull, importBody["p_pricetrace_identity"])
+        assertEquals("영등포점", importBody.getValue("p_provenance").jsonObject.getValue("branch_name").jsonPrimitive.content)
         listOf("p_manufacturer_name", "p_brand_name", "p_sub_brand_name", "p_product_name").forEach {
             assertEquals(JsonNull, importBody[it])
         }
         assertTrue(transport.requests[1].body!!.contains(identity.restaurantMenuId))
+        assertEquals(identity.restaurantLocationId, Json.parseToJsonElement(transport.requests[1].body!!)
+            .jsonObject.getValue("p_restaurant_location_id").jsonPrimitive.content)
         assertTrue(transport.requests[1].url.endsWith("/publish_verified_ocr_dining_out_nutrition_v1"))
     }
 
     private fun v5Envelope() = com.pricetrace.receiptscanner.ingestion.YeonsikOcrV5Json.decode(
         java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5-document",
     )
+
+    @Test
+    fun v5PrivateNutritionDoesNotInventUnknownOrOverriddenSellerBranches() = runTest {
+        val original = v5Envelope()
+        val record = original.purchaseRecords.single()
+        val cases = listOf(
+            record.copy(sellerBranchName = null),
+            record.copy(lineItems = record.lineItems.map { it.copy(sellerOverride = "별도 식당 강남점") }),
+            record.copy(lineItems = record.lineItems.map { it.copy(sellerOverride = record.seller) }),
+        )
+        cases.forEach { revisedRecord ->
+            val transport = QueueTransport(response("canonical-v5", "food-v5"))
+            val result = FitnessCanonicalProjectionSubmitter(NutritionSupabaseGateway(FakeStore(signedIn()), transport))
+                .submit(v5Request(original.copy(purchaseRecords = listOf(revisedRecord)), "{}"))
+                as ProjectionSubmission.Failure
+            assertTrue(result.requiresReview)
+            val body = Json.parseToJsonElement(transport.requests.single().body!!).jsonObject
+            val provenance = body.getValue("p_provenance").jsonObject
+            assertEquals(revisedRecord.lineItems.single().sellerOverride ?: revisedRecord.seller,
+                provenance.getValue("restaurant_name").jsonPrimitive.content)
+            assertEquals(JsonNull, provenance["branch_name"])
+            assertEquals(JsonNull, body["p_pricetrace_identity"])
+        }
+    }
+
+    @Test
+    fun v2ReceiptNutritionKeepsNameAndBranchOnTheReceiptSourceEvenWhenCandidateDiffers() = runTest {
+        val original = com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec.decode(
+            java.io.File("../examples/yeonsik-ocr.v2.restaurant.example.json").readText(), "v2-branch-document",
+        )
+        val item = original.nutrition.filterIsInstance<IngestionNutrition.RestaurantEstimate>().single()
+        val identity = PriceTraceIdentity(
+            receiptId = "receipt-1", storeId = "store-1", restaurantId = "restaurant-1",
+            restaurantLocationId = "location-1", merchantResolutionStatus = "exact",
+            lines = listOf(PriceTraceLineIdentity(
+                sourceLineId = item.lineId!!, resolutionStatus = "resolved", receiptItemId = "receipt-item-1",
+                productId = "product-1", storeProductId = "store-product-1", catalogProductId = "catalog-1",
+                restaurantMenuId = "menu-1",
+            )),
+        )
+        listOf("영등포점", null).forEach { branch ->
+            val envelope = original.copy(
+                receipt = original.receipt!!.let { it.copy(merchant = it.merchant.copy(
+                    name = "맛단-맛있는 다이어트식단", branchName = branch,
+                )) },
+                merchantCandidate = original.merchantCandidate!!.copy(name = "다른 후보", branchName = "강남점"),
+                nutrition = listOf(item),
+            )
+            val transport = QueueTransport(response("canonical-v2", "food-v2"), publicationResponse(
+                "canonical-v2", "food-v2", PriceTraceRestaurantMenuIdentity("restaurant-1", "location-1", "menu-1", "catalog-1"),
+            ))
+            val result = FitnessCanonicalProjectionSubmitter(NutritionSupabaseGateway(FakeStore(signedIn()), transport)).submit(
+                ProjectionRequest(ingestionId = "v2-branch", projection = IngestionProjection.FITNESS_NUTRITION,
+                    canonicalPayload = "{}", idempotencyKey = "v2-branch-key", envelope = envelope,
+                    localDocumentId = "v2-branch-document", revisionSeq = 1, resolvedIdentity = ProjectionIdentity(identity)),
+            )
+            assertTrue(result is ProjectionSubmission.Success)
+            assertTrue(transport.requests.first().url.endsWith("/import_canonical_nutrition_v2"))
+            val provenance = Json.parseToJsonElement(transport.requests.first().body!!).jsonObject.getValue("p_provenance").jsonObject
+            assertEquals("맛단-맛있는 다이어트식단", provenance.getValue("restaurant_name").jsonPrimitive.content)
+            assertEquals(branch?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: JsonNull, provenance["branch_name"])
+        }
+    }
 
     private fun v5Request(envelope: YeonsikOcrEnvelope, metadata: String) = ProjectionRequest(
         ingestionId = "v5-ingestion", projection = IngestionProjection.FITNESS_NUTRITION,
@@ -128,7 +197,7 @@ class FitnessCanonicalProjectionSubmitterTest {
                 envelope = YeonsikOcrEnvelope(
                     mode = com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT,
                     source = IngestionSource(producer = "chatgpt", sourceFiles = emptyList()),
-                    merchantCandidate = MerchantCandidate(name = "Test Restaurant"),
+                    merchantCandidate = MerchantCandidate(name = "Test Restaurant", branchName = "강남점"),
                     nutrition = listOf(item),
                     schemaVersion = com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V3_SCHEMA,
                 ),
@@ -152,6 +221,7 @@ class FitnessCanonicalProjectionSubmitterTest {
         )
         val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
         assertEquals(FOOD_ESTIMATE_V1, body["p_input_contract"]?.jsonPrimitive?.content)
+        assertEquals("강남점", body.getValue("p_provenance").jsonObject.getValue("branch_name").jsonPrimitive.content)
         assertFalse(body.containsKey("p_category_hierarchy"))
         assertEquals(JsonNull, body["p_manufacturer_name"])
         assertEquals(JsonNull, body["p_brand_name"])
@@ -181,7 +251,7 @@ class FitnessCanonicalProjectionSubmitterTest {
                 producer = "chatgpt",
                 sourceFiles = listOf(SourceAttachment("food-free-1", SourceAttachmentType.FOOD_PHOTO)),
             ),
-            merchantCandidate = MerchantCandidate(name = "키키덮밥"),
+            merchantCandidate = MerchantCandidate(name = "키키덮밥", branchName = "영등포점"),
             nutrition = listOf(item),
             schemaVersion = com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA,
         )
@@ -211,6 +281,8 @@ class FitnessCanonicalProjectionSubmitterTest {
         val body = Json.parseToJsonElement(requireNotNull(request.body)).jsonObject
         assertEquals(FOOD_ESTIMATE_V1, body["p_input_contract"]?.jsonPrimitive?.content)
         assertEquals("키키덮밥", body["p_brand"]?.jsonPrimitive?.content)
+        assertEquals("키키덮밥", body.getValue("p_provenance").jsonObject.getValue("restaurant_name").jsonPrimitive.content)
+        assertEquals("영등포점", body.getValue("p_provenance").jsonObject.getValue("branch_name").jsonPrimitive.content)
         assertEquals(JsonNull, body["p_pricetrace_identity"])
         assertEquals(
             "food_image_estimate",
