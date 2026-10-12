@@ -8,11 +8,11 @@ import com.pricetrace.receiptscanner.publishing.model.PublicationGeneratedImage
 import java.io.File
 import java.util.UUID
 
-/** Generated files have their own directory. Original document/page files are never rewritten. */
+/** Temporary generated assets are OS-reclaimable; never delete them immediately after sharing. */
 class PublicationAssetStore(private val context: Context) {
     fun saveTable(bitmap: Bitmap): PublicationGeneratedImage {
         val id = UUID.randomUUID().toString()
-        val directory = File(context.filesDir, "receipt-scanner/publication-assets/" + id)
+        val directory = File(context.cacheDir, "receipt-scanner/publication-assets/" + id)
         check(directory.mkdirs()) { "Unable to create publication output directory" }
         val file = File(directory, "nutrition_table.png")
         val atomic = AtomicFile(file)

@@ -48,7 +48,7 @@ app/src/androidTest/java/com/pricetrace/receiptocr/publishing/:
 
 ## 2. 수정한 기존 파일
 
-app/src/main/java/com/pricetrace/receiptocr/ReceiptScreens.kt 하나.
+최초 V1 통합에서는 app/src/main/java/com/pricetrace/receiptocr/ReceiptScreens.kt 하나를 수정했다.
 
 일반 NutritionReviewScreen에 진입 버튼을 연결한다.
 현재 draft, 실제 pages, 기존 resolvePageFile을 신규 컴포넌트에 전달한다.
@@ -62,7 +62,8 @@ NutritionLabelModels.kt의 Draft/Field/Status/Validator,
 YeonsikOcrEnvelope*, CanonicalReviewController, AndroidCanonicalJsonValidator,
 IngestionModels/Orchestrator, canonical codec/projection/bundle writer,
 Nutrition networking, Supabase 계약 및 DB visibility/schema,
-build.gradle.kts, AndroidManifest.xml, file_paths.xml.
+build.gradle.kts, AndroidManifest.xml.
+file_paths.xml은 리뷰 보완에서 생성 cache 자산의 최소 공유 경로만 추가했다. 기존 files-path는 유지했다.
 
 기존 main 체크아웃의 아이콘 변경은 별도 worktree 사용으로 보존했다.
 
@@ -110,7 +111,7 @@ pure generator 자체는 기준량 없는 PublicationSource의 표현을 지원�
 
 1. 같은 documentId에 속한 실제 ReceiptPage만 선택
 2. evidence pageIds가 있으면 그 페이지만 선택
-3. pageIds가 없으면 같은 문서의 실제 페이지를 pageIndex 순으로 선택
+3. pageIds가 비어 있거나 공백 값뿐이면 원본 이미지 없이 안내만 반환. 문서 전체·첫 페이지 자동 선택 없음
 4. canonical 경로가 filesDir/receipt-scanner 내부인지 확인
 5. 파일 존재·읽기 가능·이미지 bounds·PNG/JPEG MIME·저장 SHA-256 확인
 6. 기존 FileProvider로 content URI 생성
@@ -122,7 +123,7 @@ attachmentId 매핑이 없으면 경로를 추측하지 않고 제외 안내를 
 원본은 읽기만 한다. 생성 표는 별도 저장한다.
 
 - 원본: filesDir/receipt-scanner/<documentId>/pages/...
-- 생성 표: filesDir/receipt-scanner/publication-assets/<UUID>/nutrition_table.png
+- 생성 표: cacheDir/receipt-scanner/publication-assets/<UUID>/nutrition_table.png
 
 ## 8. Evidence 실제 연결 성공 여부
 
@@ -177,6 +178,8 @@ Publication 생성·복사·공유 자체는 네트워크나 Supabase 로그인�
 
 ## 12. 테스트 결과
 
+아래는 최초 V1 구현 검증 이력이다. 리뷰 보완의 최종 HEAD 검증 결과는 해당 작업 완료 보고를 참조한다.
+
 중단 지시 전에 수행한 결과:
 
 - core 테스트 15개 통과: adapter 5, generator 10
@@ -188,6 +191,8 @@ Publication 생성·복사·공유 자체는 네트워크나 Supabase 로그인�
 최종 화면 연결은 코드 검토만 수행했다.
 
 ## 13. 빌드 결과
+
+아래는 최초 V1 구현 검증 이력이다. 리뷰 보완 요청으로 최종 HEAD 빌드·테스트를 별도 재실행한다.
 
 중단 지시 전에 시작한 작업:
 
@@ -222,7 +227,7 @@ main 병합과 원격 push는 이번 구현 작업에서 수행하지 않았다.
 
 ## 16. 기술 부채
 
-- 생성 PNG 보존 기간·정리 정책 미구현; 수신 완료 전 삭제하지 않음
+- 생성 PNG는 OS가 회수할 수 있는 cacheDir에 저장. 공유 직후 삭제하지 않으며 고정 보존 기간을 보장하지 않음
 - dialog 생성물은 런타임 상태; 회전·프로세스 재시작 후 재생성 필요
 - attachmentId-to-file 계약이 생기면 resolver 확장 필요
 - 일반 검수 확정과 Fitness 전송 분리는 별도 작업
@@ -237,3 +242,15 @@ OCR·사용자 검증값 자체의 사실 정확성, 삭제·손상 원본 복�
 다른 브랜치 병합 후 UI 의미·저장 계약 유지 여부는 보장할 수 없다.
 
 공유 성공은 공유 창을 연 것을 뜻한다. 게시 완료 상태를 기록하지 않는다.
+
+## 리뷰 보완: 생성 자산과 원본 provenance
+
+- 새 생성 표를 filesDir 영속 자산에서 cacheDir 임시 자산으로 변경했다.
+- 기존 FileProvider에 publication_assets cache-path만 추가했다. 기존 files-path와 authority는 유지했다.
+- 공유 직후 삭제 또는 원본 삭제 로직은 추가하지 않았다. cache 회수 시점은 Android가 관리한다.
+- 구버전 filesDir에 이미 저장된 생성 자산의 일괄 삭제는 이번 수정에서 수행하지 않는다.
+- pageIds가 없으면 명시적 provenance가 없다는 안내와 이미지 0개를 반환한다.
+- 유효한 요청 pageId만 같은 문서의 실제 ReceiptPage로 resolve하며 중복 제거·SHA·파일 검증을 유지한다.
+- 회귀 테스트를 보완했다: provenance 없음, 요청 ID 부분집합, 다른 문서·누락 ID, SHA·읽기·저장소 밖 경로,
+  cache 위치·FileProvider URI·PNG signature·원본 바이트 보존, 렌더링·저장 실패 시 텍스트 유지.
+- Nutrition domain, adapter/generator 구조, ReceiptScreens/ViewModel, canonical/.yeonsik 코드는 추가 수정하지 않았다.

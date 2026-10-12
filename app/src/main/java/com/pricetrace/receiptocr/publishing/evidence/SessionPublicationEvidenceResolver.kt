@@ -28,9 +28,12 @@ class SessionPublicationEvidenceResolver(
         if (attachmentIds.isNotEmpty()) {
             notices += "첨부 식별자와 원본 이미지의 연결 정보가 없어 해당 이미지는 제외했습니다."
         }
+        val ids = pageIds.filter(String::isNotBlank).distinct()
+        if (ids.isEmpty()) {
+            notices += "영양정보와 연결된 원본 페이지를 특정할 수 없어 원본 이미지를 자동 포함하지 않았습니다."
+            return@withContext PublicationEvidenceResolution(notices = notices.distinct())
+        }
         val documentPages = pages.filter { it.documentId == documentId }.distinctBy { it.id }
-        // When field provenance is absent, the document's actual stored pages are still originals.
-        val ids = pageIds.distinct().ifEmpty { documentPages.sortedBy { it.pageIndex }.map { it.id } }
         val images = ids.mapNotNull { id ->
             val page = documentPages.firstOrNull { it.id == id }
             if (page == null) {
