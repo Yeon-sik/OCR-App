@@ -75,7 +75,8 @@ object YeonsikOcrEnvelopeJson {
         val hints = decodeHints(root.objectValue("classification_hints"))
         validateMode(mode, merchant, receipt, nutrition, consumption, links)
         validateTargets(merchant, targets, receipt, nutrition, consumption)
-        // External review state is descriptive only. A local user must perform verification again.
+        // External imports require local review; trusted snapshots retain the local confirmation.
+        val review = root.objectValue("review")
         return YeonsikOcrEnvelope(
             mode = mode,
             source = source,
@@ -87,9 +88,12 @@ object YeonsikOcrEnvelopeJson {
             links = links,
             targets = targets,
             review = IngestionReview(
-                status = IngestionReviewStatus.NEEDS_REVIEW,
-                blockingIssues = emptyList(),
-                warnings = root.objectValue("review").arrayValue("warnings").strings(),
+                status = if (preservePersistedVerification) {
+                    IngestionReviewStatus.entries.firstOrNull { it.wireValue == review.string("status") }
+                        ?: error("Unsupported review status")
+                } else IngestionReviewStatus.NEEDS_REVIEW,
+                blockingIssues = if (preservePersistedVerification) review.arrayValue("blocking_issues").strings() else emptyList(),
+                warnings = review.arrayValue("warnings").strings(),
             ),
         )
     }

@@ -17,6 +17,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -46,7 +47,6 @@ class FitnessCanonicalProjectionSubmitter(
                 requiresReview = true,
             )
         }
-        val priceTraceIdentity = resolvedReceiptIdentity?.let(PriceTraceIdentityJson::encode)
         // external-reference.v1 is implemented by Fitness's hierarchy-aware v3 RPC. Keep
         // product_label_ocr V2 calls on the legacy v2 boundary for backward compatibility.
         val useV3Contract = envelope.schemaVersion in setOf(
@@ -78,7 +78,7 @@ class FitnessCanonicalProjectionSubmitter(
                         draft = item.draft,
                         // submitProjection() verifies the persisted envelope fingerprint first.
                         envelopeVerified = false,
-                        priceTraceIdentity = priceTraceIdentity,
+                        priceTraceIdentity = productLabelIdentity(request, item),
                         productCandidate = (item.productClientKey
                             ?: envelope.productCandidates.singleOrNull { candidate ->
                                 candidate.clientKey == item.clientKey
@@ -98,7 +98,7 @@ class FitnessCanonicalProjectionSubmitter(
                             "restaurant_name_missing",
                             retryable = false,
                         )
-                        identityRequiredForPublication = true
+                        identityRequiredForPublication = envelope.receipt != null || envelope.purchaseNutritionLinks.any { it.nutritionClientKey == item.clientKey }
                         publicationIdentity = if (envelope.receipt != null) {
                             resolvedReceiptIdentity?.let { identity -> item.lineId?.let { sourceLineId ->
                                 PriceTraceIdentityJson.exactRestaurantMenuForSourceLine(identity, sourceLineId)
@@ -212,7 +212,7 @@ class FitnessCanonicalProjectionSubmitter(
                         gateway.importCanonical(payload)
                     }) {
                         is NutritionCanonicalImportOutcome.Success -> {
-                            if (envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA) {
+                            if (item is IngestionNutrition.ProductLabel || envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA) {
                                 responses += v5NutritionMetadata(result.rawResponse, item.clientKey)
                             } else if (recoveredImport == null) responses += result.rawResponse
                             lastFoodId = result.response.nutritionFoodId
@@ -267,6 +267,25 @@ class FitnessCanonicalProjectionSubmitter(
             failure(error.message ?: "nutrition_contract_invalid", retryable = false, responses)
         } catch (error: Exception) {
             failure(error.message ?: "nutrition_projection_failed", retryable = true, responses)
+        }
+    }
+
+    private fun productLabelIdentity(request: ProjectionRequest, item: IngestionNutrition.ProductLabel): JsonObject? {
+        val envelope = requireNotNull(request.envelope)
+        val candidateKey = item.productClientKey ?: envelope.productCandidates
+            .singleOrNull { it.clientKey == item.clientKey }?.clientKey
+        val candidateId = candidateKey?.let { request.resolvedIdentity?.productCandidates?.get(it)?.catalogProductId }
+        val receiptIdentity = request.resolvedIdentity?.priceTrace
+            ?: request.dependencyMetadataJson[IngestionProjection.PRICETRACE_RECEIPT]?.let(PriceTraceIdentityJson::tryDecode)
+        val lineId = item.lineId?.let { receiptIdentity?.lineFor(it) }
+            ?.takeIf { it.resolutionStatus == "resolved" }?.catalogProductId
+        require(candidateId == null || lineId == null || candidateId == lineId) {
+            "product_catalog_identity_conflict:${item.clientKey}"
+        }
+        val catalogId = (candidateId ?: lineId)?.takeIf(String::isNotBlank) ?: return null
+        return buildJsonObject {
+            put("namespace", JsonPrimitive("pricetrace"))
+            put("catalog_product_id", JsonPrimitive(catalogId))
         }
     }
 

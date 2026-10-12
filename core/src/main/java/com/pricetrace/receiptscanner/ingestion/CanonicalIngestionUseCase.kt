@@ -4,6 +4,7 @@ import com.pricetrace.receiptscanner.importer.ExternalJsonImportError
 import com.pricetrace.receiptscanner.importer.ExternalJsonImportOutcome
 import com.pricetrace.receiptscanner.importer.ExternalJsonImporter
 import com.pricetrace.receiptscanner.input.InputOrigin
+import com.pricetrace.receiptscanner.domain.TranscriptionStatus
 import java.time.OffsetDateTime
 
 sealed interface CanonicalImportResult {
@@ -175,6 +176,11 @@ class CanonicalIngestionUseCase(
         }
         val confirmedAt = now()
         val promoted = envelope.copy(
+            receipt = envelope.receipt?.let { receipt ->
+                receipt.copy(document = receipt.document.copy(
+                    source = receipt.document.source.copy(transcriptionStatus = TranscriptionStatus.USER_VERIFIED),
+                ))
+            },
             nutrition = envelope.nutrition.map { item ->
                 when (item) {
                     is IngestionNutrition.ProductLabel -> item.copy(

@@ -14,6 +14,8 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.JsonElement
 
 data class ProductRevisionReadResult(
     val revision: String,
@@ -29,8 +31,7 @@ fun interface PriceTraceProductRevisionReader {
 }
 
 /**
- * Creates a retryable Fitness-owned link proposal only after PriceTrace has resolved a product
- * identity and its exact product-read revision, and Fitness has created NutritionFood.
+ * Links reviewed receipt products directly; catalogue-only proposals retain their revision gate.
  */
 class FitnessProductNutritionLinkProjectionSubmitter(
     private val nutritionGateway: NutritionSupabaseGateway,
@@ -42,6 +43,7 @@ class FitnessProductNutritionLinkProjectionSubmitter(
         }
         val envelope = request.envelope
             ?: return ProjectionSubmission.Failure("canonical_envelope_missing", retryable = false)
+        if (envelope.receipt != null) return submitReceiptProductLinks(request)
         val resolvedProducts = request.resolvedIdentity?.productCandidates.orEmpty()
         if (resolvedProducts.isEmpty()) {
             return ProjectionSubmission.Failure("pricetrace_product_identity_missing", retryable = true)
@@ -145,6 +147,37 @@ class FitnessProductNutritionLinkProjectionSubmitter(
                 ?: throw IllegalArgumentException("nutrition_food_id_missing:${nutrition.clientKey}")
             Triple(candidate, nutritionFoodId, identity)
         }
+    }
+
+    private suspend fun submitReceiptProductLinks(request: ProjectionRequest): ProjectionSubmission {
+        if (!request.receiptUserVerified) return ProjectionSubmission.Failure("receipt_ocr_review_required", false, requiresReview = true)
+        val items = request.envelope!!.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>()
+        val metadata = request.dependencyMetadataJson[IngestionProjection.FITNESS_NUTRITION]
+            ?: return ProjectionSubmission.Failure("fitness_nutrition_metadata_missing", true)
+        val responses = mutableListOf<JsonElement>()
+        var lastId: String? = null
+        try {
+            val rows = Json.parseToJsonElement(metadata).jsonArray.map { it.jsonObject }
+                .filter { it["input_contract"]?.jsonPrimitive?.content in setOf("nutrition-label.v1", "external-reference.v1") }
+            for (item in items) {
+                val row = rows.singleOrNull { it["nutrition_client_key"]?.jsonPrimitive?.content == item.clientKey }
+                    ?: rows.singleOrNull()?.takeIf { items.size == 1 }
+                    ?: return ProjectionSubmission.Failure("receipt_nutrition_import_mapping_missing:${item.clientKey}", false, requiresReview = true)
+                val payload = VerifiedReceiptProductNutritionPayload(
+                    canonicalImportId = row.getValue("canonical_import_id").jsonPrimitive.content,
+                    nutritionFoodId = row.getValue("nutrition_food_id").jsonPrimitive.content,
+                    identity = VerifiedReceiptProductNutrition.identity(request, item),
+                )
+                when (val result = nutritionGateway.attachVerifiedReceiptProductNutrition(payload)) {
+                    is VerifiedReceiptProductNutritionOutcome.Success -> { lastId = result.id; responses += Json.parseToJsonElement(result.rawResponse) }
+                    is VerifiedReceiptProductNutritionOutcome.Failure -> return ProjectionSubmission.Failure(
+                        result.message ?: result.reason.name, result.reason.isRetryable(), metadataJson = JsonArray(responses).toString())
+                }
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (error: Exception) { return ProjectionSubmission.Failure(error.message ?: "receipt_product_nutrition_invalid", false, requiresReview = true) }
+        return lastId?.let { ProjectionSubmission.Success(it, JsonArray(responses).toString()) }
+            ?: ProjectionSubmission.Failure("nutrition_artifact_missing", false)
     }
 
     private fun NutritionGatewayFailure.isRetryable(): Boolean = when (this) {

@@ -170,6 +170,88 @@ class YeonsikOcrV5Test {
         assertEquals(1, imports)
     }
 
+    @Test fun reviewedPurchaseRecoveryResumesFitnessAndPreservesCashAndPrivateImportCheckpoint() = runBlocking {
+        val store = InMemoryIngestionSessionStore()
+        val pending = sourceOnlyAuthority().replace("\"authoritativeIds\":null", "\"reasonCode\":\"restaurant_source_identity_missing\",\"authoritativeIds\":null")
+        val ids = """{"restaurantId":"11111111-1111-4111-8111-111111111111","restaurantLocationId":"22222222-2222-4222-8222-222222222222","restaurantMenuId":"33333333-3333-4333-8333-333333333333","catalogProductId":"44444444-4444-4444-8444-444444444444"}"""
+        val source = Json.parseToJsonElement(pending).jsonObject["sources"]!!.jsonArray.single().jsonObject
+        val line = source["lineResults"]!!.jsonArray.single().jsonObject
+        val observation = JsonPrimitive("66666666-6666-4666-8666-666666666666")
+        val exactLine = JsonObject(line + mapOf("reasonCode" to JsonNull, "observationCreated" to JsonPrimitive(true),
+            "observationStatus" to JsonPrimitive("created"), "authorityStatus" to JsonPrimitive("exact"),
+            "merchantResolutionStatus" to JsonPrimitive("exact"), "menuResolutionStatus" to JsonPrimitive("exact"),
+            "observationType" to JsonPrimitive("restaurant_menu_manual_observation"), "observationId" to observation,
+            "authoritativeIds" to Json.parseToJsonElement(ids)))
+        val exactSource = JsonObject(source + mapOf("lineResults" to JsonArray(listOf(exactLine)),
+            "observationIds" to JsonArray(listOf(observation))))
+        val exact = JsonObject(mapOf("sources" to JsonArray(listOf(exactSource)),
+            "observationCreated" to JsonPrimitive(true))).toString()
+        var ingests = 0; var resolves = 0; var cashCalls = 0
+        val fitnessRequests = mutableListOf<ProjectionRequest>()
+        val purchase = object : IngestionProjectionSubmitter, OcrPurchaseIdentityResolutionSubmitter {
+            override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                ingests++
+                return ProjectionSubmission.Success("55555555-5555-4555-8555-555555555555", pending,
+                    primaryUploaded = false, primaryPendingReason = "restaurant_source_identity_missing", requiresReview = true)
+            }
+            override suspend fun resolvePurchaseMenuIdentity(request: OcrPurchaseMenuResolutionRequest): ProjectionSubmission {
+                resolves++
+                assertEquals("purchase-1", request.purchaseRecordClientKey)
+                assertEquals("line-1", request.lineKey)
+                assertEquals("55555555-5555-4555-8555-555555555555", request.purchaseSourceId)
+                assertEquals("coupang_eats", request.sourceNamespace)
+                assertEquals("verified-source-store-code", request.sourceLocationCode)
+                return ProjectionSubmission.Success(request.purchaseSourceId, exact)
+            }
+        }
+        val useCase = CanonicalIngestionUseCase(store, mapOf(
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION to purchase,
+            IngestionProjection.CASHOS_TRANSACTION to object : IngestionProjectionSubmitter {
+                override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                    cashCalls++; return ProjectionSubmission.Success("saved-cash")
+                }
+            },
+            IngestionProjection.FITNESS_NUTRITION to object : IngestionProjectionSubmitter {
+                override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
+                    fitnessRequests += request
+                    return if (fitnessRequests.size == 1) ProjectionSubmission.Failure("identity_pending", false,
+                        requiresReview = true, metadataJson = "[{\"canonical_import_id\":\"saved-private-import\"}]")
+                    else {
+                        assertTrue(request.previousMetadataJson!!.contains("saved-private-import"))
+                        assertNotNull(PurchaseNutritionIdentity.exact(request.envelope!!, "food-1",
+                            request.dependencyMetadataJson[IngestionProjection.PRICETRACE_PRICE_OBSERVATION]))
+                        ProjectionSubmission.Success("saved-private-import", "[]")
+                    }
+                }
+            },
+        ))
+        val imported = useCase.importJson(example(), "v5-document", "purchase-resume", evidence()) as CanonicalImportResult.Success
+        val verified = useCase.confirm("purchase-resume", imported.envelope, evidence())
+        useCase.submitSelected("purchase-resume", verified.envelope, expected)
+        assertEquals(0, resolves)
+        val oldCash = store.get("purchase-resume")!!.projections.single { it.projection == IngestionProjection.CASHOS_TRANSACTION }
+        val amended = verified.envelope.copy(purchaseRecords = verified.envelope.purchaseRecords.map {
+            it.copy(sellerSourceNamespace = "coupang_eats", sellerSourceCode = "verified-source-store-code")
+        })
+        val guards = IngestionOrchestrator(store, submitters = emptyMap())
+        val financialEdit = amended.copy(purchaseRecords = amended.purchaseRecords.map {
+            it.copy(orderReference = "different-order")
+        })
+        val rejected = guards.reviseCanonicalDraft("purchase-resume", financialEdit) as IngestionStartResult.Failure
+        assertEquals(listOf("accepted_purchase_source_revision_conflict"), rejected.issues)
+        assertTrue(guards.reviseCanonicalDraft("purchase-resume", amended) is IngestionStartResult.Success)
+        val keptCash = store.get("purchase-resume")!!.projections.single { it.projection == IngestionProjection.CASHOS_TRANSACTION }
+        assertEquals(oldCash.idempotencyKey, keptCash.idempotencyKey)
+        assertEquals(oldCash.remoteId, keptCash.remoteId)
+        assertEquals(ProjectionStatus.UPLOADED, keptCash.status)
+        val result = useCase.confirm("purchase-resume", amended, evidence())
+        assertTrue("${result.result}", result.result is IngestionStartResult.Success)
+        assertEquals(1, resolves); assertEquals(1, ingests); assertEquals(1, cashCalls)
+        assertEquals(2, fitnessRequests.size)
+        assertEquals(fitnessRequests[0].idempotencyKey, fitnessRequests[1].idempotencyKey)
+        assertFalse(YeonsikOcrEnvelopeCodec.encode(result.envelope).contains("55555555-5555-4555-8555-555555555555"))
+    }
+
     @Test fun selectingFitnessRecoversLegacyPurchaseCheckpointBeforePrivateImportAndNeverReingests() = runBlocking {
         val calls = mutableListOf<String>()
         val legacy = """{"sources":[{"purchaseRecordClientKey":"purchase-1","purchaseSourceId":"55555555-5555-4555-8555-555555555555","lineResults":[{"lineKey":"line-1"}]}]}"""
