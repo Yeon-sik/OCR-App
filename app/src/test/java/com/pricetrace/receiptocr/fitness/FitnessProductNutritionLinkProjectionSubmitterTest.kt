@@ -28,6 +28,52 @@ import org.junit.Test
 
 class FitnessProductNutritionLinkProjectionSubmitterTest {
     @Test
+    fun receiptLinksExistingNutritionToRawProductWithoutCatalogueAndRequiresOcrApproval() = runTest {
+        val receipt = com.pricetrace.receiptscanner.export.ReceiptV2Json.decode(
+            java.io.File("../examples/receipt.v2.example.json").readText())
+        val lineId = receipt.lineItems.first().id
+        val identity = com.pricetrace.receiptscanner.ingestion.PriceTraceIdentity("receipt-1", "store-1", lines = listOf(
+            com.pricetrace.receiptscanner.ingestion.PriceTraceLineIdentity(sourceLineId = lineId,
+                receiptItemId = "receipt-item-1", productId = "product-raw-1", storeProductId = "store-product-1")))
+        val verified = request(ProjectionIdentity(priceTrace = identity),
+            """[{"nutrition_food_id":"food-1","canonical_import_id":"import-1","input_contract":"nutrition-label.v1"}]""")
+            .copy(envelope = envelope().copy(receipt = receipt), receiptUserVerified = true)
+        val transport = QueueTransport(NutritionHttpResponse(200,
+            """{"id":"link-1","canonical_import_id":"import-1","nutrition_food_id":"food-1","store_product_id":"store-product-1","product_id":"product-raw-1","status":"linked"}"""))
+        val submitter = FitnessProductNutritionLinkProjectionSubmitter(NutritionSupabaseGateway(FakeStore(signedIn()), transport),
+            PriceTraceProductRevisionReader { error("Raw receipt product must not read catalogue") })
+        val unverified = submitter.submit(verified.copy(receiptUserVerified = false)) as ProjectionSubmission.Failure
+        assertTrue(unverified.requiresReview)
+        assertTrue(transport.requests.isEmpty())
+        assertEquals("link-1", (submitter.submit(verified) as ProjectionSubmission.Success).remoteId)
+        assertEquals(1, transport.requests.size)
+        val sent = Json.parseToJsonElement(transport.requests.single().body!!).jsonObject
+        val source = sent["p_pricetrace_identity"]!!.jsonObject
+        assertEquals("store-product-1", source["store_product_id"]!!.jsonPrimitive.content)
+        assertEquals("single_verified_product", source["binding_basis"]!!.jsonPrimitive.content)
+        assertFalse(source.containsKey("catalog_product_id"))
+        assertTrue(transport.requests.single().url.endsWith("/attach_verified_receipt_product_nutrition_v1"))
+        val ambiguousReceipt = receipt.copy(lineItems = receipt.lineItems + receipt.lineItems.first().copy(id = "second-product"))
+        val ambiguous = submitter.submit(verified.copy(envelope = verified.envelope!!.copy(receipt = ambiguousReceipt))) as ProjectionSubmission.Failure
+        assertTrue(ambiguous.message.contains("receipt_nutrition_binding_requires_ocr_review"))
+        assertEquals(1, transport.requests.size)
+        val explicit = (verified.envelope!!.nutrition.single() as IngestionNutrition.ProductLabel).copy(lineId = lineId)
+        assertEquals("explicit_line", VerifiedReceiptProductNutrition.identity(verified.copy(
+            envelope = verified.envelope!!.copy(receipt = ambiguousReceipt, nutrition = listOf(explicit))), explicit)["binding_basis"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun receiptNutritionResponseCannotSubstituteProductIdentity() = runTest {
+        val identity = kotlinx.serialization.json.buildJsonObject { put("store_product_id", kotlinx.serialization.json.JsonPrimitive("store-product-1")); put("product_id", kotlinx.serialization.json.JsonPrimitive("product-1")) }
+        val transport = QueueTransport(NutritionHttpResponse(200,
+            """{"id":"link-1","canonical_import_id":"import-1","nutrition_food_id":"food-1","store_product_id":"store-product-1","product_id":"different-product","status":"linked"}"""))
+        val result = NutritionSupabaseGateway(FakeStore(signedIn()), transport).attachVerifiedReceiptProductNutrition(
+            VerifiedReceiptProductNutritionPayload("import-1", "food-1", identity)) as VerifiedReceiptProductNutritionOutcome.Failure
+        assertEquals(NutritionGatewayFailure.CONTRACT, result.reason)
+        assertEquals(1, transport.requests.size)
+    }
+
+    @Test
     fun resolvedProductAndNutritionFoodProduceARevisionBoundLinkProposal() = runTest {
         val revision = "sha256:" + "b".repeat(64)
         val readIds = mutableListOf<String>()

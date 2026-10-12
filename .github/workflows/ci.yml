@@ -23,7 +23,7 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
       - name: Prepare non-secret build configuration
-        run: cp .env.example .env
+        run: python3 .github/prepare-ci-env.py
       - name: Run core tests
         run: ./gradlew :core:test --stacktrace
 
@@ -42,7 +42,7 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
       - name: Prepare non-secret build configuration
-        run: cp .env.example .env
+        run: python3 .github/prepare-ci-env.py
       - name: Run app unit tests
         run: ./gradlew :app:testDebugUnitTest --stacktrace
 
@@ -61,6 +61,8 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
       - name: Prepare non-secret build configuration
-        run: cp .env.example .env
+        run: python3 .github/prepare-ci-env.py
+      - name: Set up virtual display
+        run: sudo apt-get update && sudo apt-get install -y xvfb
       - name: Run desktop tests
-        run: ./gradlew :desktop-app:test --stacktrace
+        run: xvfb-run -a ./gradlew :desktop-app:test --stacktrace

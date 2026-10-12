@@ -97,6 +97,7 @@ class YeonsikOcrIngestionTest {
                 IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
                 IngestionProjection.FITNESS_NUTRITION,
                 IngestionProjection.CASHOS_RECEIPT,
+                IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK,
             ),
             started.session.projections
                 .filter { it.status != ProjectionStatus.DISABLED }

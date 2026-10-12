@@ -55,6 +55,8 @@ import com.pricetrace.receiptscanner.review.CanonicalReviewController
 import com.pricetrace.receiptscanner.review.PurchaseOptionListMutation
 import com.pricetrace.receiptscanner.review.ReviewDestinationBadge
 import com.pricetrace.receiptscanner.review.ReviewDestinationStatus
+import com.pricetrace.receiptscanner.ingestion.destination
+import com.pricetrace.receiptscanner.ingestion.contentLabel
 import com.pricetrace.receiptscanner.review.ReviewRow
 import com.pricetrace.receiptscanner.review.ReviewViewModel
 import com.pricetrace.receiptscanner.ingestion.LocalEvidence
@@ -130,10 +132,9 @@ fun ReviewWorkspace(
                 selectedProjections = selectedProjections,
             )
         }
-        val canVerify = !busy && state.session != null &&
-            (state.bundleMetadata == null || state.bundleMetadata.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED) &&
-            revisionReady && state.reviewFieldErrors.isEmpty()
-        val canSubmit = !busy && state.session != null &&
+        val confirmationBlocker = reviewConfirmationBlocker(state, busy, revisionReady)
+        val canVerify = confirmationBlocker == null
+        val canSubmit = confirmationBlocker == null && state.session != null &&
             state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint &&
             (state.bundleMetadata == null ||
                 state.bundleMetadata.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED &&
@@ -216,6 +217,7 @@ fun ReviewWorkspace(
                     busy = busy,
                     canVerify = canVerify,
                     canSubmit = canSubmit,
+                    confirmationBlocker = confirmationBlocker,
                     verificationBasis = verificationBasis,
                     selectedProjections = selectedProjections,
                     submitConfirmationOpen = submitConfirmationOpen,
@@ -224,6 +226,8 @@ fun ReviewWorkspace(
                     onOpenSubmitConfirmation = onOpenSubmitConfirmation,
                     onDismissSubmitConfirmation = onDismissSubmitConfirmation,
                     onConfirmSubmit = onConfirmSubmit,
+                    onRetryArchive = onRetryArchive,
+                    onRetryRevision = onRetryRevision,
                 )
             }
         }
@@ -809,7 +813,7 @@ private fun EnumOption(
 }
 
 @Composable
-private fun DestinationSection(
+internal fun DestinationSection(
     state: DesktopUiState,
     destinations: List<ReviewDestinationBadge>,
     selectedProjections: Set<IngestionProjection>,
@@ -822,12 +826,15 @@ private fun DestinationSection(
                 destinations.forEach { DestinationStatus(it) }
             }
         }
-        val projections = state.session?.projections.orEmpty().filterNot { it.status == ProjectionStatus.DISABLED }
-        Text(deliveryProgressLabel(projections.map { it.status }), style = MaterialTheme.typography.bodyMedium)
+        val projections = deliveryStates(state)
+        val groups = projections.groupBy { it.projection.destination() }
+        val completed = groups.values.count { group -> group.all { it.status == ProjectionStatus.UPLOADED } }
+        Text("전송 완료 $completed/${groups.size}곳", style = MaterialTheme.typography.bodyMedium)
         if (projections.isEmpty()) {
             Text("활성 전송 대상이 없습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         } else {
-            projections.forEach { projection ->
+            groups.forEach { (destination, group) ->
+                val keys = group.map { it.projection }.toSet()
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = CollectorTokens.panelShape,
@@ -840,21 +847,19 @@ private fun DestinationSection(
                         horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2),
                     ) {
                         Checkbox(
-                            checked = projection.projection in selectedProjections,
-                            onCheckedChange = { onProjectionSelected(projection.projection) },
+                            checked = keys.all { it in selectedProjections },
+                            onCheckedChange = { checked -> keys.filter { (it in selectedProjections) != checked }.forEach(onProjectionSelected) },
                             enabled = !busy,
                             modifier = Modifier.collectorFocusOutline(),
                         )
                         Column(Modifier.weight(1f)) {
-                            Text(DesktopUiLabels.projection(projection.projection), style = MaterialTheme.typography.labelLarge)
+                            Text("${destination.label} · ${destination.contentLabel(keys)}", style = MaterialTheme.typography.labelLarge)
                             Text(
-                                "${DesktopUiLabels.projectionStatus(projection.status)} · 시도 ${projection.attemptCount}회",
+                                deliveryProgressLabel(group.map { it.status }),
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.bodySmall,
                             )
-                            val dependencies = state.envelope?.let { CanonicalProjectionPlanner.plan(it).dependencies[projection.projection] }.orEmpty()
-                            if (dependencies.isNotEmpty()) Text("먼저 처리: ${dependencies.joinToString { DesktopUiLabels.projection(it) }}", style = MaterialTheme.typography.bodySmall)
-                            projection.lastError?.let { ValidationMessage(it, CollectorStatusKind.ERROR, compact = true) }
+                            group.mapNotNull { it.lastError }.distinct().forEach { ValidationMessage(it, CollectorStatusKind.ERROR, compact = true) }
                         }
                     }
                 }
@@ -864,11 +869,12 @@ private fun DestinationSection(
 }
 
 @Composable
-private fun ConfirmAndSubmitSection(
+internal fun ConfirmAndSubmitSection(
     state: DesktopUiState,
     busy: Boolean,
     canVerify: Boolean,
     canSubmit: Boolean,
+    confirmationBlocker: String?,
     verificationBasis: VerificationBasis,
     selectedProjections: Set<IngestionProjection>,
     submitConfirmationOpen: Boolean,
@@ -877,8 +883,21 @@ private fun ConfirmAndSubmitSection(
     onOpenSubmitConfirmation: () -> Unit,
     onDismissSubmitConfirmation: () -> Unit,
     onConfirmSubmit: () -> Unit,
+    onRetryArchive: () -> Unit,
+    onRetryRevision: () -> Unit,
 ) {
-    CollectorSection("확정 및 전송", "검수 확정 후에만 선택한 대상에 전송합니다.") {
+    val verified = state.session?.let { it.verifiedCanonicalFingerprint == it.canonicalFingerprint } == true
+    val verificationRecorded = state.bundleMetadata?.verificationEventRecorded != false
+    CollectorSection("검수 확정", if (verified) "검수한 내용이 확정됐습니다. 전송할 대상을 확인하세요." else "원본과 값을 모두 확인했다면 검수를 확정하세요.") {
+        confirmationBlocker?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+        if (!busy && state.bundleMetadata != null && state.bundleMetadata.archiveStatus != DesktopEvidenceArchiveStatus.ARCHIVED) {
+            CollectorButton("원본 보관 다시 시도", onRetryArchive, modifier = Modifier.fillMaxWidth())
+        } else if (!busy && (state.bundleMetadata?.pendingRevision != null ||
+                state.bundleMetadata?.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.FAILED)) {
+            CollectorButton("수정본 보관 다시 시도", onRetryRevision, modifier = Modifier.fillMaxWidth())
+        }
         if (state.bundleMetadata == null) {
             Text("검수 기준", style = MaterialTheme.typography.labelLarge)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
@@ -895,21 +914,26 @@ private fun ConfirmAndSubmitSection(
         } else {
             Text("검수 기준: 원본 자료와 대조", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
             CollectorButton(
-                label = "검수 확정",
+                label = when {
+                    verified && !verificationRecorded -> "검수 기록 다시 저장"
+                    verified -> "검수 확정 완료"
+                    else -> "검수 완료 · 확정하기"
+                },
                 onClick = onVerify,
-                enabled = canVerify,
-                modifier = Modifier.weight(1f),
-                contentDescription = "검수 확정. 현재 수정과 증거를 다시 검증합니다.",
+                enabled = canVerify && (!verified || !verificationRecorded),
+                modifier = Modifier.fillMaxWidth(),
+                emphasized = !verified || !verificationRecorded,
+                contentDescription = if (verified && verificationRecorded) "검수 확정 완료" else "검수 완료 · 확정하기. 원본과 값을 확인했음을 기록합니다. 아직 전송하지 않습니다.",
             )
             CollectorButton(
                 label = if (state.session?.projections?.any { it.projection in selectedProjections && it.status == ProjectionStatus.FAILED } == true) "선택한 실패 항목 다시 보내기" else "선택한 곳에 보내기",
                 onClick = onOpenSubmitConfirmation,
                 enabled = canSubmit,
-                emphasized = false,
-                modifier = Modifier.weight(1f),
-                contentDescription = "전송 확인을 엽니다. 선택한 ${selectedProjections.size}개 대상에 전송합니다.",
+                emphasized = verified && verificationRecorded,
+                modifier = Modifier.fillMaxWidth(),
+                contentDescription = "전송 확인을 엽니다. 선택한 ${selectedProjections.map { it.destination() }.distinct().size}곳에 전송합니다.",
             )
         }
         if (submitConfirmationOpen) {
@@ -925,11 +949,8 @@ private fun ConfirmAndSubmitSection(
                         "선택한 곳에 검수된 자료를 보냅니다. 필요한 선행 작업은 기존 처리 순서를 따르며, 이미 성공한 대상은 다시 보내지 않습니다.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
-                    selectedProjections.forEach { projection ->
-                        Text(DesktopUiLabels.projection(projection), style = MaterialTheme.typography.labelLarge)
-                        state.envelope?.let { CanonicalProjectionPlanner.plan(it).dependencies[projection] }?.takeIf { it.isNotEmpty() }?.let { dependencies ->
-                            Text("먼저 처리: ${dependencies.joinToString { DesktopUiLabels.projection(it) }}", style = MaterialTheme.typography.bodySmall)
-                        }
+                    selectedProjections.groupBy { it.destination() }.forEach { (destination, projections) ->
+                        Text("${destination.label} · ${destination.contentLabel(projections.toSet())}", style = MaterialTheme.typography.labelLarge)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
                         CollectorButton("전송 취소", onDismissSubmitConfirmation, emphasized = false, modifier = Modifier.weight(1f))
@@ -972,6 +993,7 @@ fun ValidationMessage(
     recoveryHint: String? = suggestedRecovery(message),
 ) {
     val colors = MaterialTheme.colorScheme
+    val displayMessage = DesktopUiLabels.ingestionError(message)
     val (container, content, border) = when (kind) {
         CollectorStatusKind.ERROR -> Triple(colors.errorContainer, colors.onErrorContainer, colors.error)
         CollectorStatusKind.REVIEW -> Triple(colors.tertiaryContainer, colors.onTertiaryContainer, colors.tertiary)
@@ -980,7 +1002,7 @@ fun ValidationMessage(
         CollectorStatusKind.NEUTRAL -> Triple(colors.surfaceVariant, colors.onSurfaceVariant, colors.outline)
     }
     Surface(
-        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "${kind.label}: $message${recoveryHint?.let { ". 수정 방법: $it" }.orEmpty()}" },
+        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "${kind.label}: $displayMessage${recoveryHint?.let { ". 수정 방법: $it" }.orEmpty()}" },
         shape = CollectorTokens.panelShape,
         color = container,
         contentColor = content,
@@ -990,7 +1012,7 @@ fun ValidationMessage(
             Text(kind.icon, fontWeight = FontWeight.Bold)
             Column(verticalArrangement = Arrangement.spacedBy(CollectorTokens.space1)) {
                 Text(kind.label, style = MaterialTheme.typography.labelLarge)
-                Text(message, style = if (compact) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium)
+                Text(displayMessage, style = if (compact) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium)
                 recoveryHint?.let { Text("수정 방법: $it", style = MaterialTheme.typography.bodySmall) }
             }
         }
@@ -1058,11 +1080,14 @@ private fun reviewTitle(state: DesktopUiState, rows: List<ReviewRow>): String =
         ?: rows.firstOrNull()?.value
         ?: "검토 항목"
 
+private fun deliveryStates(state: DesktopUiState) = state.session?.projections.orEmpty().filter {
+    it.projection in state.envelope?.let(CanonicalProjectionPlanner::deliveryProjections).orEmpty()
+}
+
 private fun overallStatusKind(state: DesktopUiState): CollectorStatusKind = when {
     state.error != null -> CollectorStatusKind.ERROR
     state.busy -> CollectorStatusKind.PROCESSING
-    state.session?.projections?.filterNot { it.status == ProjectionStatus.DISABLED }?.isNotEmpty() == true &&
-        state.session.projections.filterNot { it.status == ProjectionStatus.DISABLED }.all { it.status == ProjectionStatus.UPLOADED } -> CollectorStatusKind.COMPLETE
+    deliveryStates(state).isNotEmpty() && deliveryStates(state).all { it.status == ProjectionStatus.UPLOADED } -> CollectorStatusKind.COMPLETE
     else -> CollectorStatusKind.REVIEW
 }
 
@@ -1075,6 +1100,14 @@ private fun overallStatusLabel(state: DesktopUiState, kind: CollectorStatusKind)
 }
 
 private fun suggestedRecovery(message: String): String = when {
+    message == "pricetrace_product_identity_missing" ->
+        "PriceTrace 상품 검수 결과를 확인하세요. 영양 기록은 저장된 상태이며, 상품 ID가 확정된 뒤 연결을 진행할 수 있습니다."
+    message == "restaurant_source_identity_missing" || message == "restaurant_source_identity_insufficient" ->
+        "매장 링크에서 확인한 매장 출처 namespace·코드를 구매 검수에 보완하고 수정본을 보관한 뒤 검수를 확정하세요. 주문번호는 매장 코드로 사용할 수 없습니다."
+    message.startsWith("pricetrace_purchase_line_identity_metadata_missing") ->
+        "PriceTrace의 매장 식별 정보를 확인한 뒤 검수를 확정하세요. 연결이 완료되면 기존 영양 기록으로 전송을 이어갑니다."
+    message == "accepted_purchase_source_revision_conflict" ->
+        "매장 출처 namespace·코드만 보완하세요. 구매 원본 사실을 수정해야 한다면 새 검수 작업으로 가져오세요."
     message.contains("required", ignoreCase = true) || message.contains("증거", ignoreCase = true) ->
         "원본 패널에서 필요한 원본을 첨부하고 다시 검수하세요."
     message.contains("revision", ignoreCase = true) ->

@@ -49,6 +49,83 @@ import java.util.zip.ZipOutputStream
 
 class DesktopIngestionRegressionTest {
     @Test
+    fun v2ConfirmedBundleKeepsItsApprovalAfterReopeningTheSavedCanonicalJson() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("desktop-v2-confirmed-restore"))
+        val bundle = DesktopProjectionBundle(
+            DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")),
+            evidenceArchivePortOverride = SuccessfulArchivePort(),
+        )
+        val controller = DesktopIngestionController(store, bundle)
+        controller.importBundle(writeMerchantBundle(store.directory, "confirmed-bundle", "원본과 대조한 상점"))
+        controller.verify()
+        val confirmed = requireNotNull(controller.state.value.session)
+        assertTrue(controller.state.value.error.orEmpty(), controller.state.value.bundleMetadata!!.verificationEventRecorded)
+        assertEquals(confirmed.canonicalFingerprint, confirmed.verifiedCanonicalFingerprint)
+        controller.load(confirmed.ingestionId)
+        val restored = controller.state.value
+        assertEquals(IngestionReviewStatus.READY, restored.envelope!!.review.status)
+        assertEquals(confirmed.verifiedCanonicalFingerprint, restored.session!!.verifiedCanonicalFingerprint)
+        assertEquals(confirmed.verifiedArtifactFingerprints, restored.session.verifiedArtifactFingerprints)
+    }
+
+    @Test
+    fun newBundleDoesNotInheritPreviousDocumentsEditsOrFieldErrors() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("desktop-isolated-edits"))
+        val bundle = DesktopProjectionBundle(
+            DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")),
+            evidenceArchivePortOverride = SuccessfulArchivePort(),
+        )
+        val controller = DesktopIngestionController(store, bundle)
+        controller.importJson(readExample("yeonsik-ocr.v4.purchase.example.json"))
+        controller.reviseStructuredReview {
+            it.mutatePurchaseOptions("purchase-1", "0", com.pricetrace.receiptscanner.review.PurchaseOptionListMutation.Add("이전 문서 옵션"))
+        }
+        controller.reviseStructuredReview { it.updateField("purchase_records[purchase-1].line_items[0].option_items[option-1].amount_krw", "-1") }
+        val previousId = requireNotNull(controller.state.value.ingestionId)
+        val previousEdits = controller.state.value.reviewEdits
+        assertTrue(previousEdits.isNotEmpty())
+        assertTrue(controller.state.value.reviewFieldErrors.isNotEmpty())
+
+        controller.importBundle(writeMerchantBundle(store.directory, "fresh-bundle", "새 자료"))
+        val fresh = controller.state.value
+        assertTrue(fresh.reviewEdits.isEmpty())
+        assertTrue(fresh.reviewFieldErrors.isEmpty())
+        assertTrue(store.loadRecord(requireNotNull(fresh.ingestionId))!!.reviewEdits.isEmpty())
+        assertEquals(previousEdits, store.loadRecord(previousId)!!.reviewEdits)
+        assertEquals(null, reviewConfirmationBlocker(fresh, busy = false, revisionReady = true))
+    }
+
+    @Test
+    fun unchangedBaseBundleRecoversInheritedEditsButPreservesRealRevisions() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("desktop-legacy-edits"))
+        val bundle = DesktopProjectionBundle(
+            DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")),
+            evidenceArchivePortOverride = SuccessfulArchivePort(),
+        )
+        val controller = DesktopIngestionController(store, bundle)
+        controller.importBundle(writeMerchantBundle(store.directory, "legacy-bundle", "원본 자료"))
+        val id = requireNotNull(controller.state.value.ingestionId)
+        val base = requireNotNull(store.loadRecord(id))
+        val foreign = com.pricetrace.receiptscanner.review.CanonicalReviewEdit(
+            "foreign-edit", "purchase_records[other].line_items[other].option_items", "[]", "[]", "{}", "2026-10-11T12:00:00Z",
+        )
+        store.saveRecord(base.copy(reviewEdits = listOf(foreign)))
+        controller.load(id)
+        assertTrue(controller.state.value.reviewEdits.isEmpty())
+        assertTrue(store.loadRecord(id)!!.reviewEdits.isEmpty())
+        assertEquals(base.canonicalJson, controller.state.value.canonicalJson)
+        assertEquals(base.bundle, controller.state.value.bundleMetadata)
+
+        controller.reviseStructuredReview { it.updateField("merchant_candidate.name", "현재 문서 수정") }
+        val revised = requireNotNull(store.loadRecord(id))
+        assertTrue(controller.state.value.error.orEmpty(), revised.reviewEdits.isNotEmpty())
+        assertEquals(DesktopCanonicalRevisionArchiveStatus.ARCHIVED, revised.bundle!!.revisionArchiveStatus)
+        assertEquals(revised, removeInheritedBundleEdits(revised))
+        // Missing archive metadata must not erase changed facts or their audit log.
+        assertEquals(revised.copy(bundle = base.bundle), removeInheritedBundleEdits(revised.copy(bundle = base.bundle)))
+    }
+
+    @Test
     fun invalidV2ModeDiagnosticReachesDesktopJsonAndBundleErrorsWithoutRepair() = runBlocking {
         val root = kotlinx.serialization.json.Json.parseToJsonElement(readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json")).jsonObject
         val invalid = kotlinx.serialization.json.JsonObject(root + ("mode" to kotlinx.serialization.json.JsonPrimitive("merchant"))).toString()

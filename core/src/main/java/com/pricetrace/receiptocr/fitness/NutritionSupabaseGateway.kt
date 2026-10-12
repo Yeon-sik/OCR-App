@@ -6,6 +6,8 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.IOException
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -29,6 +31,49 @@ class NutritionSupabaseGateway(
     private val store: NutritionSupabaseStore,
     private val transport: NutritionHttpTransport = HttpsNutritionHttpTransport(),
 ) {
+    suspend fun attachVerifiedReceiptProductNutrition(payload: VerifiedReceiptProductNutritionPayload): VerifiedReceiptProductNutritionOutcome {
+        val initial = store.read()
+        if (!initial.isSignedIn) return VerifiedReceiptProductNutritionOutcome.Failure(NutritionGatewayFailure.NOT_CONFIGURED)
+        val first = attachVerifiedReceiptProductNutritionOnce(payload, initial)
+        if (first !is VerifiedReceiptProductNutritionOutcome.Failure || first.reason != NutritionGatewayFailure.AUTHENTICATION) return first
+        val refreshed = refresh(initial) ?: return first
+        return attachVerifiedReceiptProductNutritionOnce(payload, refreshed)
+    }
+
+    private suspend fun attachVerifiedReceiptProductNutritionOnce(
+        payload: VerifiedReceiptProductNutritionPayload, config: NutritionSupabaseConfig,
+    ): VerifiedReceiptProductNutritionOutcome = try {
+        val response = transport.execute(request(config = config, method = "POST",
+            path = "/rest/v1/rpc/attach_verified_receipt_product_nutrition_v1", body = payload.toRpcJson()))
+        val reason = when (response.statusCode) {
+            401, 403 -> NutritionGatewayFailure.AUTHENTICATION
+            409 -> NutritionGatewayFailure.CONFLICT
+            429 -> NutritionGatewayFailure.RATE_LIMITED
+            in 500..599 -> NutritionGatewayFailure.SERVER
+            in 200..299 -> null
+            else -> NutritionGatewayFailure.CONTRACT
+        }
+        if (reason != null) VerifiedReceiptProductNutritionOutcome.Failure(reason, response.body)
+        else {
+            val decoded = Json.parseToJsonElement(response.body)
+            val row = if (decoded is kotlinx.serialization.json.JsonArray) decoded.single().jsonObject else decoded.jsonObject
+            require(row["nutrition_food_id"]?.jsonPrimitive?.content == payload.nutritionFoodId &&
+                row["canonical_import_id"]?.jsonPrimitive?.content == payload.canonicalImportId &&
+                row["store_product_id"]?.jsonPrimitive?.content == payload.identity["store_product_id"]?.jsonPrimitive?.content &&
+                row["product_id"]?.jsonPrimitive?.content == payload.identity["product_id"]?.jsonPrimitive?.content &&
+                row["status"]?.jsonPrimitive?.content == "linked") {
+                "receipt_product_nutrition_response_mismatch"
+            }
+            VerifiedReceiptProductNutritionOutcome.Success(row.getValue("id").jsonPrimitive.content, response.body)
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: IOException) {
+        VerifiedReceiptProductNutritionOutcome.Failure(NutritionGatewayFailure.NETWORK)
+    } catch (error: Exception) {
+        VerifiedReceiptProductNutritionOutcome.Failure(NutritionGatewayFailure.CONTRACT, error.message)
+    }
+
     suspend fun findCanonicalImports(idempotencyKey: String): NutritionCanonicalAuditOutcome =
         readCanonicalImports("idempotency_key=eq.${queryValue(idempotencyKey)}")
 
