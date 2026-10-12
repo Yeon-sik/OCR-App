@@ -37,6 +37,7 @@ object YeonsikOcrEnvelopeCodec {
                 localDocumentId = localDocumentId,
                 preservePersistedVerification = preservePersistedVerification,
             )
+            YEONSIK_OCR_V5_SCHEMA -> YeonsikOcrV5Json.decode(value, localDocumentId, preservePersistedVerification)
             else -> error("Unsupported yeonsik OCR schema: $schema")
         }
     }
@@ -46,6 +47,7 @@ object YeonsikOcrEnvelopeCodec {
         YEONSIK_OCR_V2_SCHEMA -> YeonsikOcrV2Json.encode(envelope, canonicalIds)
         YEONSIK_OCR_V3_SCHEMA -> YeonsikOcrV3Json.encodeDraft(envelope, canonicalIds)
         YEONSIK_OCR_V4_SCHEMA -> YeonsikOcrV4Json.encodeDraft(envelope, canonicalIds)
+        YEONSIK_OCR_V5_SCHEMA -> YeonsikOcrV5Json.encodeDraft(envelope, canonicalIds)
         else -> error("Unsupported yeonsik OCR schema: ${envelope.schemaVersion}")
     }
 
@@ -55,6 +57,7 @@ object YeonsikOcrEnvelopeCodec {
         YEONSIK_OCR_V2_SCHEMA -> YeonsikOcrV2Json.encode(envelope, canonicalIds)
         YEONSIK_OCR_V3_SCHEMA -> YeonsikOcrV3Json.encodePersisted(envelope, canonicalIds)
         YEONSIK_OCR_V4_SCHEMA -> YeonsikOcrV4Json.encodePersisted(envelope, canonicalIds)
+        YEONSIK_OCR_V5_SCHEMA -> YeonsikOcrV5Json.encodePersisted(envelope, canonicalIds)
         else -> error("Unsupported yeonsik OCR schema: ${envelope.schemaVersion}")
     }
 
@@ -63,6 +66,7 @@ object YeonsikOcrEnvelopeCodec {
         YEONSIK_OCR_V2_SCHEMA -> YeonsikOcrV2Json.canonicalize(envelope)
         YEONSIK_OCR_V3_SCHEMA -> YeonsikOcrV3Json.canonicalize(envelope)
         YEONSIK_OCR_V4_SCHEMA -> YeonsikOcrV4Json.canonicalize(envelope)
+        YEONSIK_OCR_V5_SCHEMA -> YeonsikOcrV5Json.canonicalize(envelope)
         else -> error("Unsupported yeonsik OCR schema: ${envelope.schemaVersion}")
     }
 }

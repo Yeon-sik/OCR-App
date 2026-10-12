@@ -11,6 +11,7 @@ const val YEONSIK_OCR_SCHEMA = "yeonsik-ocr.v1"
 const val YEONSIK_OCR_V2_SCHEMA = "yeonsik-ocr.v2"
 const val YEONSIK_OCR_V3_SCHEMA = "yeonsik-ocr.v3"
 const val YEONSIK_OCR_V4_SCHEMA = "yeonsik-ocr.v4"
+const val YEONSIK_OCR_V5_SCHEMA = "yeonsik-ocr.v5"
 
 /** PriceTrace purchase-price v4 uses PostgreSQL integer fields for these values. */
 const val PRICETRACE_V4_MAX_INTEGER = 2_147_483_647L
@@ -24,6 +25,8 @@ object PriceTraceV4SubmissionReason {
     const val LINE_AMOUNT_INTEGER_RANGE_REQUIRED = "pricetrace_v4_line_amount_int32_range_required"
     const val PAYMENT_AMOUNT_NON_NEGATIVE_INTEGER_REQUIRED = "pricetrace_v4_payment_amount_non_negative_integer_required"
     const val PAYMENT_AMOUNT_INTEGER_RANGE_REQUIRED = "pricetrace_v4_payment_amount_int32_range_required"
+    const val OPTION_TEXT_LENGTH_REQUIRED = "pricetrace_v4_option_text_max_500_characters_required"
+    const val OPTION_TEXT_UNREPRESENTABLE = "pricetrace_v4_option_text_unrepresentable"
 }
 
 private val CANONICAL_EVIDENCE_SOURCE_TYPES = setOf(
@@ -103,6 +106,7 @@ enum class IngestionMode(val wireValue: String) {
     RESTAURANT("restaurant"),
     PACKAGED_PRODUCT("packaged_product"),
     PURCHASE("purchase"),
+    RESTAURANT_PURCHASE("restaurant_purchase"),
     ;
 
     companion object {
@@ -576,6 +580,25 @@ data class PurchaseRecordTotals(
         get() = paidAmountKrw ?: grandTotalAmountKrw
 }
 
+/** Source facts subordinate to one purchase line; optionKey is a local key, never authority. */
+data class PurchaseOption(
+    val optionKey: String,
+    val description: String,
+    val quantity: Double? = null,
+    val amountKrw: Long? = null,
+) {
+    init {
+        require(optionKey.isNotBlank()) { "purchase option option_key must be non-blank" }
+        require(description.isNotBlank()) { "purchase option description must be non-blank" }
+        require(quantity == null || quantity.isFinite() && quantity > 0.0) {
+            "purchase option quantity must be a positive finite number or null"
+        }
+        require(amountKrw == null || amountKrw >= 0L) {
+            "purchase option amount_krw must be a non-negative integer or null"
+        }
+    }
+}
+
 data class PurchaseRecordLine(
     val lineKey: String? = null,
     val productClientKey: String? = null,
@@ -589,6 +612,7 @@ data class PurchaseRecordLine(
     val grossAmountKrw: Long? = null,
     val discountAmountKrw: Long? = null,
     val netAmountKrw: Long? = null,
+    val optionItems: List<PurchaseOption> = emptyList(),
 ) {
     init {
         require(lineKey == null || lineKey.isNotBlank())
@@ -602,7 +626,12 @@ data class PurchaseRecordLine(
         require(sellerOverride == null || sellerOverride.isNotBlank())
         require(sellerOverride == null || sellerOverride.length <= 500)
         require(optionText == null || optionText.isNotBlank())
-        require(optionText == null || optionText.length <= 500)
+        require(optionItems.map { it.optionKey }.distinct().size == optionItems.size) {
+            "purchase line option_key values must be unique within the parent line"
+        }
+        require(optionItems.isEmpty() || optionText == null) {
+            "purchase line with option_items requires option_text=null"
+        }
         require(priceStatus in setOf("itemized", "ambiguous", "unknown")) {
             "purchase line price_status is invalid"
         }
@@ -721,6 +750,11 @@ object PriceTraceV4SubmissionCompatibility {
     fun evaluate(record: PurchaseRecord): PriceTraceSubmissionCompatibility {
         if (!record.priceTraceSourceEligible) {
             return PriceTraceSubmissionCompatibility(eligible = false)
+        }
+
+        record.lineItems.forEach { line ->
+            val reason = PriceTracePurchaseOptions.incompatibilityReason(line)
+            if (reason != null) return PriceTraceSubmissionCompatibility(eligible = false, reasonCode = reason)
         }
 
         record.lineItems.forEach { line ->
@@ -1039,6 +1073,17 @@ data class IngestionLink(
     val nutritionClientKey: String,
 )
 
+/** V5 correlation uses local keys only; downstream identities remain server-owned. */
+data class PurchaseNutritionLink(
+    val purchaseRecordClientKey: String,
+    val purchaseLineKey: String,
+    val nutritionClientKey: String,
+) {
+    init {
+        require(purchaseRecordClientKey.isNotBlank() && purchaseLineKey.isNotBlank() && nutritionClientKey.isNotBlank())
+    }
+}
+
 enum class ConsumptionVerificationStatus(val wireValue: String) {
     UNVERIFIED("unverified"),
     USER_VERIFIED("user_verified"),
@@ -1132,6 +1177,7 @@ data class YeonsikOcrEnvelope(
     val schemaVersion: String = YEONSIK_OCR_SCHEMA,
     val priceObservations: List<StandalonePriceObservation> = emptyList(),
     val purchaseRecords: List<PurchaseRecord> = emptyList(),
+    val purchaseNutritionLinks: List<PurchaseNutritionLink> = emptyList(),
 ) {
     init {
         require(priceObservations.map { it.clientKey }.distinct().size == priceObservations.size) {
@@ -1146,10 +1192,12 @@ data class YeonsikOcrEnvelope(
         require(purchaseRecords.map { it.clientKey }.distinct().size == purchaseRecords.size) {
             "purchase record client_key values must be unique"
         }
-        require(purchaseRecords.isEmpty() || schemaVersion == YEONSIK_OCR_V4_SCHEMA) {
-            "purchase records require yeonsik-ocr.v4"
+        require(purchaseRecords.isEmpty() || schemaVersion in setOf(YEONSIK_OCR_V4_SCHEMA, YEONSIK_OCR_V5_SCHEMA)) {
+            "purchase records require yeonsik-ocr.v4 or v5"
         }
-        require(purchaseRecords.isEmpty() || mode == IngestionMode.PURCHASE) {
+        require(purchaseRecords.isEmpty() ||
+            (schemaVersion == YEONSIK_OCR_V4_SCHEMA && mode == IngestionMode.PURCHASE) ||
+            (schemaVersion == YEONSIK_OCR_V5_SCHEMA && mode == IngestionMode.RESTAURANT_PURCHASE)) {
             "purchase records require purchase mode"
         }
         require(purchaseRecords.isEmpty() || receipt == null) {
@@ -1157,6 +1205,9 @@ data class YeonsikOcrEnvelope(
         }
         require(purchaseRecords.isEmpty() || priceObservations.isEmpty()) {
             "purchase records cannot be combined with legacy price observations"
+        }
+        require(purchaseNutritionLinks.isEmpty() || schemaVersion == YEONSIK_OCR_V5_SCHEMA) {
+            "purchase nutrition links require yeonsik-ocr.v5"
         }
     }
 }

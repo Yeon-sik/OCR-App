@@ -361,7 +361,7 @@ object YeonsikOcrEnvelopeJson {
                     nutrition.all { it is IngestionNutrition.ProductLabel } &&
                     links.isEmpty(),
             )
-            IngestionMode.PURCHASE -> error("purchase mode requires yeonsik-ocr.v4")
+            IngestionMode.PURCHASE, IngestionMode.RESTAURANT_PURCHASE -> error("purchase mode requires yeonsik-ocr.v4")
         }
     }
     private fun validateTargets(

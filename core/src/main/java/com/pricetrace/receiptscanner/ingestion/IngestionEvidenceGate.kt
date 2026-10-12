@@ -45,6 +45,29 @@ object IngestionEvidenceGate {
         if (purchaseConflictIssues.isNotEmpty()) {
             return IngestionEvidenceResult(false, purchaseConflictIssues)
         }
+        if (envelope.schemaVersion == YEONSIK_OCR_V5_SCHEMA) {
+            // Neither a purchase screenshot nor manual review substitutes for bound food bytes.
+            val purchaseRefs = envelope.purchaseRecords.filter { artifactKeys == null || IngestionArtifactKeys.purchaseRecord(it.clientKey) in artifactKeys }
+                .flatMap { it.evidence }.flatMap { it.sourceAttachmentIds }.distinct()
+            val wrongTypes = purchaseRefs.filter { id ->
+                val declared = envelope.source.sourceFiles.singleOrNull { it.id == id }
+                evidence.singleOrNull { it.attachmentId == id }?.type != declared?.type
+            }
+            if (wrongTypes.isNotEmpty()) return IngestionEvidenceResult(false, wrongTypes.map { "purchase_evidence_type_mismatch:$it" })
+            val purchaseResult = evaluatePurchaseEvidence(envelope, evidence, artifactKeys)
+            if (purchaseResult?.isAllowed == false) return purchaseResult
+            val selected = envelope.nutrition.filterIsInstance<IngestionNutrition.RestaurantEstimate>()
+                .filter { artifactKeys == null || IngestionArtifactKeys.nutrition(it.clientKey) in artifactKeys }
+            val localById = evidence.groupBy(LocalEvidence::attachmentId)
+            val missing = selected.flatMap { YeonsikOcrV5Json.foodEvidenceIds(it) }.distinct().filter { id ->
+                localById[id]?.singleOrNull()?.let { it.fileReadable && it.type == SourceAttachmentType.FOOD_PHOTO } != true
+            }
+            if (missing.isNotEmpty()) return IngestionEvidenceResult(false, missing.map { "food_photo_evidence_required:$it" })
+            if (verificationBasis == VerificationBasis.MANUAL_CANONICAL_REVIEW && !explicitUserConfirmation) {
+                return IngestionEvidenceResult(false, listOf("manual_canonical_confirmation_required"))
+            }
+            return IngestionEvidenceResult(true)
+        }
         val selectedProductCandidates = envelope.productCandidates.filter { candidate ->
             artifactKeys == null ||
                 IngestionArtifactKeys.productCandidate(candidate.clientKey) in artifactKeys

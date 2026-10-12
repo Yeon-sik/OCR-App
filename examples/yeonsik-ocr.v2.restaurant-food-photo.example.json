@@ -6,12 +6,12 @@
     "source_files": [
       {"id": "food-photo-1", "type": "food_photo", "label": "육회비빔밥 음식 사진"}
     ],
-    "user_text": "가게: 키키덮밥 / 메뉴: 육회비빔밥"
+    "user_text": "가게: 키키덮밥 / 지점: 영등포점 / 메뉴: 육회비빔밥"
   },
   "merchant_candidate": {
     "name": "키키덮밥",
     "business_kind": "food_service",
-    "branch_name": null,
+    "branch_name": "영등포점",
     "address": null,
     "phone": null,
     "business_registration_number": null,

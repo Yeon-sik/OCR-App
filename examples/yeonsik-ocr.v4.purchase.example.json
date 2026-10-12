@@ -53,7 +53,7 @@
       "platform": "쿠팡",
       "platform_code": "coupang",
       "seller": "공식 판매자",
-      "seller_branch_name": null,
+      "seller_branch_name": "영등포점",
       "seller_source_namespace": null,
       "seller_source_code": null,
       "seller_business_kind": "retail",
@@ -86,6 +86,7 @@
           "description": "생수",
           "seller_override": null,
           "option_text": null,
+          "option_items": [],
           "price_status": "itemized",
           "merchant_sku": null,
           "quantity": 2,
@@ -96,6 +97,13 @@
         }
       ],
       "evidence": [
+        {
+          "source_type": "order_history",
+          "source_attachment_ids": ["order-history-1"],
+          "source_ref": "seller-branch",
+          "field": "seller_branch_name",
+          "observed_value": "영등포점"
+        },
         {
           "source_type": "order_history",
           "source_attachment_ids": ["order-history-1"],

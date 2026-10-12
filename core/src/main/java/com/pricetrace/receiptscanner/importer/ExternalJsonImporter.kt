@@ -27,6 +27,8 @@ import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_SCHEMA
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V3_SCHEMA
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA
+import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV5Json
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeJson
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV2Json
@@ -163,6 +165,7 @@ class ExternalJsonImporter(
                 YEONSIK_OCR_V2_SCHEMA -> importEnvelopeV2(value, localDocumentId, workflowType)
                 YEONSIK_OCR_V3_SCHEMA -> importEnvelopeV3(value, localDocumentId, workflowType)
                 YEONSIK_OCR_V4_SCHEMA -> importEnvelopeV4(value, localDocumentId, workflowType)
+                YEONSIK_OCR_V5_SCHEMA -> importEnvelopeV5(value, localDocumentId, workflowType)
                 else -> ExternalJsonImportOutcome.Failure(
                     ExternalJsonImportError(
                         ExternalJsonImportErrorCode.UNSUPPORTED_SCHEMA,
@@ -275,6 +278,27 @@ class ExternalJsonImporter(
         }
         val fingerprint = StableIds.sha256(
             "external-json|${YEONSIK_OCR_V4_SCHEMA}|${YeonsikOcrV4Json.canonicalize(envelope)}",
+        )
+        return ExternalJsonImportOutcome.Success(ExternalJsonImportResult(
+            draft = CanonicalDraft.Envelope(envelope),
+            workflowType = expectedWorkflow,
+            localDocumentId = localDocumentId,
+            upstreamDocumentId = "envelope-${fingerprint.take(24)}",
+            importFingerprint = fingerprint,
+        ))
+    }
+    private fun importEnvelopeV5(
+        value: String,
+        localDocumentId: String,
+        workflowType: OcrWorkflowType?,
+    ): ExternalJsonImportOutcome {
+        val envelope = YeonsikOcrV5Json.decode(value, localDocumentId)
+        val expectedWorkflow = OcrWorkflowType.PRICE_TRACE_PRICE_OBSERVATION
+        if (workflowType != null && workflowType != expectedWorkflow) {
+            return workflowMismatch(YEONSIK_OCR_V5_SCHEMA, workflowType)
+        }
+        val fingerprint = StableIds.sha256(
+            "external-json|${YEONSIK_OCR_V5_SCHEMA}|${YeonsikOcrV5Json.canonicalize(envelope)}",
         )
         return ExternalJsonImportOutcome.Success(ExternalJsonImportResult(
             draft = CanonicalDraft.Envelope(envelope),

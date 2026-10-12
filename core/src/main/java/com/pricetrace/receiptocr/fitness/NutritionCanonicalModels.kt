@@ -628,12 +628,13 @@ object CanonicalNutritionPayloadFactory {
         item: IngestionNutrition.RestaurantEstimate,
         priceTraceIdentity: JsonObject? = null,
         @Suppress("UNUSED_PARAMETER") useV3Contract: Boolean = false,
+        branchName: String? = null,
     ): CanonicalNutritionImportPayload = fromEstimate(
         localDocumentId = localDocumentId,
         revisionSeq = revisionSeq,
         idempotencyKey = idempotencyKey,
         restaurantName = restaurantName,
-        branchName = null,
+        branchName = branchName,
         artifactKey = item.clientKey,
         foodName = item.menuName,
         estimate = item.estimate,
@@ -649,12 +650,13 @@ object CanonicalNutritionPayloadFactory {
         item: IngestionNutrition.RestaurantMenuEstimate,
         priceTraceIdentity: JsonObject? = null,
         @Suppress("UNUSED_PARAMETER") useV3Contract: Boolean = false,
+        branchName: String? = null,
     ): CanonicalNutritionImportPayload = fromEstimate(
         localDocumentId = localDocumentId,
         revisionSeq = revisionSeq,
         idempotencyKey = idempotencyKey,
         restaurantName = restaurantName,
-        branchName = null,
+        branchName = branchName,
         artifactKey = item.clientKey,
         foodName = item.menuName,
         estimate = item.estimate,
@@ -669,12 +671,17 @@ object CanonicalNutritionPayloadFactory {
         idempotencyKey: String,
         restaurantName: String,
         item: IngestionNutrition.MealComponentEstimate,
+        branchName: String? = null,
     ): CanonicalNutritionImportPayload = fromEstimate(
         localDocumentId = localDocumentId,
         revisionSeq = revisionSeq,
         idempotencyKey = idempotencyKey,
         restaurantName = item.reference?.restaurantName ?: restaurantName,
-        branchName = item.reference?.branchName,
+        branchName = if (item.reference?.restaurantName != null) {
+            item.reference.branchName
+        } else {
+            item.reference?.branchName ?: branchName
+        },
         artifactKey = item.clientKey,
         foodName = item.menuName,
         estimate = item.estimate,

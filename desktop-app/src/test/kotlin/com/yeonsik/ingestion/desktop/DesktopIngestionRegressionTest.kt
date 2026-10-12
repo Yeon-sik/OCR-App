@@ -34,6 +34,7 @@ import com.pricetrace.receiptscanner.review.ReviewDestination
 import com.pricetrace.receiptscanner.review.ReviewDestinationStatus
 import com.pricetrace.receiptscanner.review.ReviewViewModel
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -47,6 +48,74 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 class DesktopIngestionRegressionTest {
+    @Test
+    fun invalidV2ModeDiagnosticReachesDesktopJsonAndBundleErrorsWithoutRepair() = runBlocking {
+        val root = kotlinx.serialization.json.Json.parseToJsonElement(readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json")).jsonObject
+        val invalid = kotlinx.serialization.json.JsonObject(root + ("mode" to kotlinx.serialization.json.JsonPrimitive("merchant"))).toString()
+        val store = DesktopSessionStore(Files.createTempDirectory("desktop-mode-diagnostic"))
+        val controller = DesktopIngestionController(store, DesktopProjectionBundle(DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env"))))
+        val expected = "V2 merchant mode requires product_candidates=[]; packaged product artifacts require mode=packaged_product."
+        controller.importJson(invalid)
+        assertTrue(controller.state.value.error.orEmpty(), controller.state.value.error.orEmpty().contains(expected))
+        assertFalse(controller.state.value.error.orEmpty().contains("Failed requirement."))
+        assertEquals(null, controller.state.value.envelope)
+        assertEquals(invalid, controller.state.value.rawJson)
+        controller.importBundle(writeCanonicalBundle(store.directory, "bad-mode", invalid))
+        assertTrue(controller.state.value.error.orEmpty(), controller.state.value.error.orEmpty().contains(expected))
+        assertEquals(DesktopBundleValidationStatus.INVALID, controller.state.value.bundleValidationStatus)
+        assertEquals(null, controller.state.value.session)
+    }
+
+    @Test
+    fun desktopOptionMutationsPersistAndInvalidEditsBlockVerification() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("desktop-options"))
+        val bundle = DesktopProjectionBundle(DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")))
+        val controller = DesktopIngestionController(store, bundle)
+        controller.importJson(readExample("yeonsik-ocr.v4.purchase.example.json"))
+        controller.reviseStructuredReview { it.mutatePurchaseOptions("purchase-1", "0", com.pricetrace.receiptscanner.review.PurchaseOptionListMutation.Add("선택")) }
+        val before = controller.state.value
+        controller.reviseStructuredReview { it.updateField("purchase_records[purchase-1].line_items[0].option_items[option-1].amount_krw", "-1") }
+        assertEquals(before.canonicalJson, controller.state.value.canonicalJson)
+        assertEquals(before.reviewEdits, controller.state.value.reviewEdits)
+        assertTrue(controller.state.value.reviewFieldErrors.isNotEmpty())
+        controller.reviseStructuredReview { it.updateField("purchase_records[purchase-1].line_items[0].option_items[option-1].description", "다른 정상 편집") }
+        assertTrue(controller.state.value.reviewFieldErrors.isNotEmpty())
+        controller.reviseStructuredReview { it.updateField("purchase_records[purchase-1].line_items[0].option_items[option-1].quantity", null) }
+        assertTrue(controller.state.value.reviewFieldErrors.isNotEmpty())
+        controller.verify(VerificationBasis.MANUAL_CANONICAL_REVIEW)
+        assertTrue(controller.state.value.error.orEmpty().contains("편집 오류"))
+        assertEquals(null, controller.state.value.session!!.verifiedCanonicalFingerprint)
+        controller.reviseStructuredReview { it.updateField("purchase_records[purchase-1].line_items[0].option_items[option-1].amount_krw", "0") }
+        controller.verify(VerificationBasis.MANUAL_CANONICAL_REVIEW)
+        assertEquals(IngestionReviewStatus.READY, controller.state.value.session!!.reviewStatus)
+        val restored = DesktopIngestionController(store, bundle)
+        restored.loadLatest()
+        assertEquals(controller.state.value.envelope!!.purchaseRecords, restored.state.value.envelope!!.purchaseRecords)
+        assertEquals(controller.state.value.reviewEdits, restored.state.value.reviewEdits)
+    }
+
+    @Test
+    fun v5ReviewBindsBothArtifactKindsAndRestoresExactLinks() = runBlocking {
+        val store = DesktopSessionStore(Files.createTempDirectory("yeonsik-console-v5"))
+        val bundle = DesktopProjectionBundle(DesktopRuntimeConfig.load(emptyMap(), store.directory.resolve("external.env")))
+        val controller = DesktopIngestionController(store = store, bundle = bundle)
+        controller.importJson(readExample("yeonsik-ocr.v5.restaurant-purchase.example.json"))
+        assertEquals("yeonsik-ocr.v5", controller.state.value.schema)
+        listOf(SourceAttachmentType.ORDER_HISTORY, SourceAttachmentType.PAYMENT_HISTORY, SourceAttachmentType.FOOD_PHOTO).forEach { type ->
+            val source = store.directory.resolve("${type.wireValue}.jpg").also { Files.writeString(it, "${type.wireValue} bytes") }
+            controller.attachEvidence(listOf(source), type)
+        }
+        assertEquals(setOf("order-history-1", "payment-history-1", "food-photo-1"), controller.state.value.evidence.map { it.attachmentId }.toSet())
+        controller.verify(VerificationBasis.SOURCE_EVIDENCE)
+        assertEquals(IngestionReviewStatus.READY, controller.state.value.session?.reviewStatus)
+        assertTrue(controller.state.value.artifacts.all { it.evidenceReady })
+        assertEquals(3, controller.state.value.session!!.projections.count { it.status != com.pricetrace.receiptscanner.ingestion.ProjectionStatus.DISABLED })
+        val restored = DesktopIngestionController(store = store, bundle = bundle)
+        restored.loadLatest()
+        assertEquals(controller.state.value.envelope!!.purchaseNutritionLinks, restored.state.value.envelope!!.purchaseNutritionLinks)
+        assertTrue(com.pricetrace.receiptscanner.review.ReviewViewModel.fromCanonical(restored.state.value.envelope!!).rows.any { it.section == "구매 행과 영양 연결" })
+    }
+
     @Test
     fun `failure diagnostic JSON reports status reason and recognized details safely`() {
         val directory = Files.createTempDirectory("yeonsik-diagnostic-json")

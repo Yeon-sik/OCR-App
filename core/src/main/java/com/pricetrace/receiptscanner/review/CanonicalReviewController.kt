@@ -22,6 +22,8 @@ import com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus
 import com.pricetrace.receiptscanner.ingestion.PurchaseKind
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecord
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecordLine
+import com.pricetrace.receiptscanner.ingestion.PurchaseOption
+import com.pricetrace.receiptscanner.ingestion.YeonsikOcrV4Json
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecordPayment
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecordStatus
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecordTotals
@@ -37,6 +39,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.time.OffsetDateTime
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /** Canonical, auditable edit record shared by Android and Desktop structured review. */
 data class CanonicalReviewEdit(
@@ -80,8 +86,9 @@ class CanonicalReviewController(
     private val nutritionPath = Regex("""nutrition\[([^]]+)]\.(.+)""")
     private val consumptionPath = Regex("""consumption\[([^]]+)]\.(.+)""")
     private val consumptionItemPath = Regex("""items\[([^]]+)]\.(.+)""")
-    private val purchasePath = Regex("""purchase_records\[([^]]+)]\.(.+)""")
-    private val purchaseLinePath = Regex("""line_items\[([^]]+)]\.(.+)""")
+    private val purchasePath = Regex("""purchase_records\[([^]]+)]\.(.+)""", RegexOption.DOT_MATCHES_ALL)
+    private val purchaseLinePath = Regex("""line_items\[([^]]+)]\.(.+)""", RegexOption.DOT_MATCHES_ALL)
+    private val purchaseOptionPath = Regex("""option_items\[([\s\S]+)]\.(description|quantity|amount_krw)""")
 
     private val mutableState = MutableStateFlow(
         stateFor(initialEnvelope, initialEdits),
@@ -103,6 +110,86 @@ class CanonicalReviewController(
     private val undoStack = ArrayDeque<Checkpoint>()
     private val redoStack = ArrayDeque<Checkpoint>()
     private var editSequence: Int = initialEdits.size
+    private val reservedOptionKeys = mutableMapOf<String, MutableSet<String>>()
+
+    constructor(
+        initialEnvelope: YeonsikOcrEnvelope,
+        initialEdits: List<CanonicalReviewEdit>,
+        initialFieldErrors: Map<String, String>,
+        now: () -> String = { OffsetDateTime.now().toString() },
+    ) : this(initialEnvelope, initialEdits, now) {
+        mutableState.value = mutableState.value.copy(
+            fieldErrors = initialFieldErrors.toMap(),
+            error = initialFieldErrors.values.distinct().joinToString(", ").takeIf { it.isNotEmpty() },
+        )
+    }
+
+    /** Adds/deletes/reorders subordinate options without changing evidence, links or consumption. */
+    fun mutatePurchaseOptions(
+        purchaseRecordKey: String,
+        purchaseLineKey: String,
+        mutation: PurchaseOptionListMutation,
+    ): Boolean {
+        val envelope = mutableState.value.envelope
+        var path = "purchase_records[$purchaseRecordKey].line_items[$purchaseLineKey].option_items"
+        val nextEnvelope = runCatching {
+            require(envelope.schemaVersion in setOf(YEONSIK_OCR_V4_SCHEMA, com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA)) {
+                "purchase options require yeonsik-ocr.v4 or v5"
+            }
+            val record = envelope.purchaseRecords.singleOrNull { it.clientKey == purchaseRecordKey }
+                ?: error("purchase record을 찾을 수 없습니다.")
+            val line = record.lineItems.findByKey(purchaseLineKey) ?: error("purchase line을 찾을 수 없습니다.")
+            val canonicalLineKey = line.lineKey ?: record.lineItems.indexOf(line).toString()
+            path = "purchase_records[$purchaseRecordKey].line_items[$canonicalLineKey].option_items"
+            val options = when (mutation) {
+                is PurchaseOptionListMutation.Add -> {
+                    require(line.optionText == null) { "구조화 옵션을 추가하려면 기존 옵션 텍스트를 먼저 지우세요." }
+                    val reserved = reservedOptionKeys.getOrPut(path) {
+                        line.optionItems.mapTo(mutableSetOf()) { it.optionKey }.also { keys ->
+                            // Retain deleted keys across persisted revisions, undo and controller recreation.
+                            mutableState.value.edits.filter { it.fieldPath == path }.forEach { edit ->
+                                listOfNotNull(edit.previousValue, edit.newValue).forEach { value ->
+                                    runCatching { Json.parseToJsonElement(value) as JsonArray }.getOrNull()?.forEach {
+                                        keys += it.jsonObject.getValue("option_key").jsonPrimitive.content
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    reserved += line.optionItems.map { it.optionKey }
+                    var sequence = 1L
+                    while ("option-$sequence" in reserved) sequence++
+                    val option = PurchaseOption("option-$sequence", mutation.description, mutation.quantity, mutation.amountKrw)
+                    reserved += option.optionKey
+                    line.optionItems + option
+                }
+                is PurchaseOptionListMutation.Delete -> {
+                    require(line.optionItems.count { it.optionKey == mutation.optionKey } == 1) { "삭제할 옵션을 찾을 수 없습니다." }
+                    line.optionItems.filterNot { it.optionKey == mutation.optionKey }
+                }
+                is PurchaseOptionListMutation.Reorder -> {
+                    require(mutation.optionKeys.size == line.optionItems.size &&
+                        mutation.optionKeys.toSet().size == mutation.optionKeys.size &&
+                        mutation.optionKeys.toSet() == line.optionItems.map { it.optionKey }.toSet()) {
+                        "option reorder must contain every existing option_key exactly once"
+                    }
+                    val byKey = line.optionItems.associateBy { it.optionKey }
+                    mutation.optionKeys.map { byKey.getValue(it) }
+                }
+            }
+            val nextLine = line.copy(optionItems = options)
+            envelope.copy(purchaseRecords = envelope.purchaseRecords.map { candidate ->
+                if (candidate !== record) candidate else record.copy(lineItems = record.lineItems.map { if (it === line) nextLine else it })
+            })
+        }.getOrElse { return failField(path, it.message ?: "옵션 목록을 변경할 수 없습니다.") }
+        val oldRecord = envelope.purchaseRecords.single { it.clientKey == purchaseRecordKey }
+        val newRecord = nextEnvelope.purchaseRecords.single { it.clientKey == purchaseRecordKey }
+        return commitEnvelope(nextEnvelope, listOf(FieldChange(
+            fieldPath = path,
+            previousValue = YeonsikOcrV4Json.optionItemsJson(oldRecord.lineItems.findByKey(purchaseLineKey)!!.optionItems).toString(),
+            newValue = YeonsikOcrV4Json.optionItemsJson(newRecord.lineItems.findByKey(purchaseLineKey)!!.optionItems).toString(),
+        )))
+    }
 
     fun updateMerchantName(value: String?): Boolean = updateMerchant(
         fieldPath = "receipt.merchant.name",
@@ -416,11 +503,14 @@ class CanonicalReviewController(
             mutableState.value = current.copy(
                 validationIssues = issues,
                 error = message,
-                fieldErrors = changes.map { it.fieldPath }.distinct().associateWith { message },
+                fieldErrors = current.fieldErrors + changes.map { it.fieldPath }.distinct().associateWith { message },
             )
             return false
         }
-        if (current.envelope == envelope) return true
+        if (current.envelope == envelope) {
+            clearResolvedFieldErrors(envelope, changes.map { it.fieldPath }.toSet())
+            return true
+        }
         undoStack.addLast(Checkpoint(current.envelope, changes))
         while (undoStack.size > MAX_UNDO_DEPTH) undoStack.removeFirst()
         redoStack.clear()
@@ -443,6 +533,7 @@ class CanonicalReviewController(
         val documentId = revisedEnvelope.receipt?.document?.localDocumentId
             ?: revisedEnvelope.receipt?.document?.id
             ?: current.canonicalFingerprint
+        val remainingErrors = unresolvedFieldErrors(revisedEnvelope, changes.map { it.fieldPath }.toSet())
         mutableState.value = stateFor(
             envelope = revisedEnvelope,
             edits = current.edits + changes.map { change ->
@@ -457,8 +548,8 @@ class CanonicalReviewController(
                 )
             },
         ).copy(
-            error = null,
-            fieldErrors = emptyMap(),
+            error = remainingErrors.values.distinct().joinToString(", ").takeIf { it.isNotEmpty() },
+            fieldErrors = remainingErrors,
             canUndo = undoStack.isNotEmpty(),
             canRedo = redoStack.isNotEmpty(),
         )
@@ -481,11 +572,7 @@ class CanonicalReviewController(
         val descriptorPrevious = CanonicalFieldRegistry.value(envelope, canonicalPath)
         val previousValue = normalizeCurrentValue(descriptor, descriptorPrevious)
         if (previousValue == parsed.canonicalValue) {
-            mutableState.value = mutableState.value.copy(
-                validationIssues = emptyList(),
-                error = null,
-                fieldErrors = emptyMap(),
-            )
+            clearResolvedFieldErrors(envelope, setOf(canonicalPath))
             return true
         }
         val appliedEnvelope = runCatching { applyTypedField(envelope, canonicalPath, parsed) }.getOrElse { error ->
@@ -702,6 +789,18 @@ class CanonicalReviewController(
         path.startsWith("nutrition[") -> applyNutritionField(envelope, path, parsed)
         path.startsWith("consumption[") -> applyConsumptionField(envelope, path, parsed)
         path.startsWith("purchase_records[") -> applyPurchaseField(envelope, path, parsed)
+        path.startsWith("links[") -> {
+            val match = Regex("""links\[([^]]+)]\.(.+)""").matchEntire(path) ?: error("invalid purchase link path")
+            val key = match.groupValues[1]
+            val value = parsed.value as? String ?: error("link key is required")
+            envelope.copy(purchaseNutritionLinks = envelope.purchaseNutritionLinks.map { link ->
+                if (link.nutritionClientKey != key) link else when (match.groupValues[2]) {
+                    "purchase_record_client_key" -> link.copy(purchaseRecordClientKey = value)
+                    "purchase_line_key" -> link.copy(purchaseLineKey = value)
+                    else -> error("link field is not editable")
+                }
+            })
+        }
         else -> error("이 필드는 편집할 수 없습니다.")
     }
 
@@ -1009,7 +1108,18 @@ class CanonicalReviewController(
         val match = purchaseLinePath.matchEntire(field) ?: error("purchase line path is invalid")
         val line = record.lineItems.findByKey(match.groupValues[1]) ?: error("purchase line을 찾을 수 없습니다.")
         val value = parsed.value
-        val nextLine = when (match.groupValues[2]) {
+        val optionMatch = purchaseOptionPath.matchEntire(match.groupValues[2])
+        val nextLine = if (optionMatch != null) {
+            val option = line.optionItems.singleOrNull { it.optionKey == optionMatch.groupValues[1] }
+                ?: error("purchase option을 찾을 수 없습니다.")
+            val nextOption = when (optionMatch.groupValues[2]) {
+                "description" -> option.copy(description = (value as? String) ?: error("옵션 설명은 필수입니다."))
+                "quantity" -> option.copy(quantity = value as Double?)
+                "amount_krw" -> option.copy(amountKrw = value as Long?)
+                else -> error("purchase option field is not editable")
+            }
+            line.copy(optionItems = line.optionItems.map { if (it === option) nextOption else it })
+        } else when (match.groupValues[2]) {
             "description" -> line.copy(description = (value as? String) ?: error("구매 행 설명은 필수입니다."))
             "seller_override" -> line.copy(sellerOverride = value as String?)
             "option_text" -> line.copy(optionText = value as String?)
@@ -1046,9 +1156,30 @@ class CanonicalReviewController(
         mutableState.value = mutableState.value.copy(
             error = "$path: $message",
             validationIssues = emptyList(),
-            fieldErrors = mapOf(path to message),
+            fieldErrors = mutableState.value.fieldErrors + (path to message),
         )
         return false
+    }
+
+    /** A successful edit resolves its own draft error; other invalid fields still block review. */
+    private fun unresolvedFieldErrors(envelope: YeonsikOcrEnvelope, resolvedPaths: Set<String>): Map<String, String> {
+        val editablePaths = CanonicalFieldRegistry.fields(envelope).mapTo(mutableSetOf()) { it.path }
+        envelope.purchaseRecords.forEach { record ->
+            record.lineItems.forEachIndexed { index, line ->
+                editablePaths += "purchase_records[${record.clientKey}].line_items[${line.lineKey ?: index.toString()}].option_items"
+            }
+        }
+        // Deleted option fields and paths that were never editable cannot retain an invisible error.
+        return mutableState.value.fieldErrors.filterKeys { it !in resolvedPaths && it in editablePaths }
+    }
+
+    private fun clearResolvedFieldErrors(envelope: YeonsikOcrEnvelope, resolvedPaths: Set<String>) {
+        val remainingErrors = unresolvedFieldErrors(envelope, resolvedPaths)
+        mutableState.value = mutableState.value.copy(
+            validationIssues = emptyList(),
+            error = remainingErrors.values.distinct().joinToString(", ").takeIf { it.isNotEmpty() },
+            fieldErrors = remainingErrors,
+        )
     }
 
     private fun currentReceipt(): ReceiptV2? = mutableState.value.envelope.receipt
@@ -1088,7 +1219,6 @@ class CanonicalReviewController(
         mutableState.value = mutableState.value.copy(
             error = message,
             validationIssues = emptyList(),
-            fieldErrors = emptyMap(),
         )
         return false
     }

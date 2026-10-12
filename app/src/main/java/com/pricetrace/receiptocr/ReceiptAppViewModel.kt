@@ -838,6 +838,12 @@ class ReceiptAppViewModel(
     fun updateCanonicalField(fieldPath: String, value: String?) =
         runCanonicalStructuredEdit { it.updateField(fieldPath, value) }
 
+    fun mutateCanonicalPurchaseOptions(
+        purchaseRecordKey: String,
+        purchaseLineKey: String,
+        mutation: com.pricetrace.receiptscanner.review.PurchaseOptionListMutation,
+    ) = runCanonicalStructuredEdit { it.mutatePurchaseOptions(purchaseRecordKey, purchaseLineKey, mutation) }
+
     fun updateCanonicalLineDescription(lineId: String, value: String) =
         runCanonicalStructuredEdit { it.updateLineDescription(lineId, value) }
 
@@ -3184,7 +3190,7 @@ class ReceiptAppViewModel(
             val sourceAttachment = envelope.source.sourceFiles.getOrNull(index)
             val type = sourceAttachment?.type ?: fallbackEvidenceType(envelope, index)
             val logicalAttachmentId = sourceAttachment?.id.takeIf {
-                envelope.schemaVersion == YEONSIK_OCR_V4_SCHEMA
+                envelope.schemaVersion in setOf(YEONSIK_OCR_V4_SCHEMA, com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA)
             }
             val readable = try {
                 fileStore.readBytes(page.storageKey).isNotEmpty()
@@ -3346,7 +3352,7 @@ class ReceiptAppViewModel(
             ?: return VerifiedDraftGateResult(false, VerifiedDraftGateFailure.SOURCE_IMAGE_REQUIRED)
         val artifactKeys = when (projection) {
             IngestionProjection.PRICETRACE_RECEIPT -> setOf(IngestionArtifactKeys.RECEIPT)
-            IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> if (envelope.schemaVersion == YEONSIK_OCR_V4_SCHEMA) {
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION -> if (envelope.schemaVersion in setOf(YEONSIK_OCR_V4_SCHEMA, com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA)) {
                 buildSet {
                     addAll(envelope.purchaseRecords.map { IngestionArtifactKeys.purchaseRecord(it.clientKey) })
                     addAll(

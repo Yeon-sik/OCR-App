@@ -2,6 +2,7 @@ package com.pricetrace.receiptscanner.publisher
 
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecord
 import com.pricetrace.receiptscanner.ingestion.PurchaseRecordLine
+import com.pricetrace.receiptscanner.ingestion.PriceTracePurchaseOptions
 import com.pricetrace.receiptscanner.ingestion.PurchaseKind
 import com.pricetrace.receiptscanner.ingestion.MAX_PURCHASE_RECORD_LINES
 import com.pricetrace.receiptscanner.ingestion.VerificationBasis
@@ -185,14 +186,17 @@ object PriceTracePurchaseObservationV4Json {
                 put("product_name", JsonPrimitive(productName))
                 put("merchant_sku", line.merchantSku?.let(::JsonPrimitive) ?: JsonNull)
             })
-            put("option_text", line.optionText?.let(::JsonPrimitive) ?: JsonNull)
+            put("option_text", PriceTracePurchaseOptions.flatten(line)?.let(::JsonPrimitive) ?: JsonNull)
             put("price_status", JsonPrimitive(line.priceStatus))
             put("quantity", quantity)
             put("unit_price", line.unitPriceAmountKrw?.let(::JsonPrimitive) ?: JsonNull)
             put("gross_price", line.grossAmountKrw?.let(::JsonPrimitive) ?: JsonNull)
             put("discount", line.discountAmountKrw?.let(::JsonPrimitive) ?: JsonNull)
             put("net_price", line.netAmountKrw?.let(::JsonPrimitive) ?: JsonNull)
-            put("seller", lineSeller ?: JsonNull)
+            // Omission inherits the record's verified seller facts; null means unknown.
+            if (line.sellerOverride != null || record.seller == null) {
+                put("seller", lineSeller ?: JsonNull)
+            }
         }
     }
 

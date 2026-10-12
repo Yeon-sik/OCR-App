@@ -21,6 +21,31 @@ OCR-App은 외부 JSON을 검증하고, 원본 증거를 로컬에 연결하고,
 
 ## Product
 
+### mode validation과 producer 오류
+
+`merchant`는 top-level `merchant_candidate`가 필수이고 `nutrition`, `product_candidates`,
+`consumption`, `links`는 빈 배열이어야 한다. receipt가 있으면 non-food-service여야 한다.
+상품 후보 또는 product_label이 있는 producer 입력은 `packaged_product` mode를 사용해야 한다.
+runtime은 잘못된 mode를 자동 변경하거나 후보를 삭제해 수리하지 않는다.
+
+`packaged_product`에서는 top-level `merchant_candidate=null`이어야 한다. non-food-service
+receipt는 함께 보존할 수 있으며 `receipt.merchant`는 지울 필요가 없다. product candidate나
+ProductLabel nutrition 중 하나 이상이 있어야 하고 nutrition은 모두 ProductLabel, links는
+빈 배열이어야 한다. restaurant의 기존 의미는 유지한다.
+
+모든 조건은 충돌 field와 mode를 포함한 diagnostic으로 실패한다. 예:
+
+```text
+V2 merchant mode requires product_candidates=[]; packaged product artifacts require mode=packaged_product.
+V2 merchant mode requires nutrition=[]; product_label nutrition requires mode=packaged_product.
+V2 packaged_product requires merchant_candidate=null; receipt.merchant may remain.
+```
+
+Desktop/Android JSON 및 bundle import는 이 core detail을 사용자 오류에 그대로 전달한다.
+Bundle v1의 hash/type/binding 규칙은 그대로다. producer가 canonical bytes를 수정했다면
+최종 bytes로 `manifest.canonical_sha256`을 다시 계산해야 한다. runtime은 mismatch를
+자동 보정하지 않는다. 동일 exact evidence bytes의 여러 logical source binding도 유지한다.
+
 source attachment type에 `product_photo` (`PRODUCT_PHOTO`)를 추가했다. `product_candidates`
 항목은 다음 관측 사실과 evidence만 가질 수 있다.
 
@@ -106,6 +131,25 @@ receipt line을 만들지 않는다.
 artifact를 text로 통과시켜도 full-envelope 검증에서는 `restaurant_estimate`의
 `FOOD_PHOTO` 검사를 별도로 수행한다.
 
+## Restaurant/store branch source snapshot
+
+식당 영양 추정의 `restaurant_name`과 nullable `branch_name`은 같은 canonical source에서 함께 읽는다.
+receipt가 있으면 `receipt.merchant.name/branch_name`, receipt-free restaurant이면
+`merchant_candidate.name/branch_name`을 Fitness의 기존 `p_provenance`로 전달한다.
+receipt의 branch가 null일 때 다른 merchant candidate의 지점을 섞지 않는다.
+V3 `restaurant_menu_estimate`도 같은 receipt/merchant source 규칙을 사용한다.
+
+Meal은 기존 explicit item-level consumption이 사용자 검증된 경우에만 생성된다.
+`p_source.store_name/branch_name`에는 receipt merchant를 사용하고, receipt-free restaurant에서는
+merchant candidate를 사용한다. branch가 없으면 Nutrition provenance에서는 JSON null,
+Meal source에서는 해당 field 생략으로 표현한다. Product Nutrition 동작은 바뀌지 않는다.
+
+이 문자열은 source snapshot이며 PriceTrace/Fitness의 Restaurant/Location/Menu/Catalog UUID를
+대신하지 않는다. 지점 판별을 위한 이름 분리나 문자열 heuristic은 runtime에 없다.
+새 schema/version/key, downstream migration은 필요하지 않다.
+receipt의 지점 보존은 [V2 receipt 예제](../examples/yeonsik-ocr.v2.restaurant.example.json),
+merchant candidate의 지점 보존은 [receipt-free 음식 사진 예제](../examples/yeonsik-ocr.v2.restaurant-food-photo.example.json)에서 확인할 수 있다.
+
 ## Side dish / meal component
 
 Nutrition kind `meal_component_estimate`는 음식 사진으로 추정한 무료 반찬처럼 receipt에
@@ -117,6 +161,10 @@ Nutrition kind `meal_component_estimate`는 음식 사진으로 추정한 무료
 이 항목은 Fitness의 별도 `import_meal_component_estimate_v1` 경계와 Meal projection으로만
 전송한다. PriceTrace RestaurantMenu projection에는 보내지 않으며, `links`에도 포함하지
 않는다. `restaurant_menu_id`는 GPT/OCR 입력에서 확정하지 않는다.
+
+reference가 없으면 component 영양에도 위 receipt/merchant branch를 전달한다.
+reference에 별도 restaurant name이 있으면 그 reference의 branch만 사용하며,
+branch가 없다는 이유로 다른 source의 지점을 상속하지 않는다.
 
 ## Product ↔ Nutrition dependency
 

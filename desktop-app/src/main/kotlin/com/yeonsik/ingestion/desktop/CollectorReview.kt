@@ -52,6 +52,7 @@ import com.pricetrace.receiptscanner.review.CanonicalEditableField
 import com.pricetrace.receiptscanner.review.CanonicalFieldRegistry
 import com.pricetrace.receiptscanner.review.CanonicalFieldType
 import com.pricetrace.receiptscanner.review.CanonicalReviewController
+import com.pricetrace.receiptscanner.review.PurchaseOptionListMutation
 import com.pricetrace.receiptscanner.review.ReviewDestinationBadge
 import com.pricetrace.receiptscanner.review.ReviewDestinationStatus
 import com.pricetrace.receiptscanner.review.ReviewRow
@@ -131,13 +132,13 @@ fun ReviewWorkspace(
         }
         val canVerify = !busy && state.session != null &&
             (state.bundleMetadata == null || state.bundleMetadata.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED) &&
-            revisionReady
+            revisionReady && state.reviewFieldErrors.isEmpty()
         val canSubmit = !busy && state.session != null &&
             state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint &&
             (state.bundleMetadata == null ||
                 state.bundleMetadata.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED &&
                 state.bundleMetadata.verificationEventRecorded) &&
-            revisionReady && selectedProjections.isNotEmpty()
+            revisionReady && selectedProjections.isNotEmpty() && state.reviewFieldErrors.isEmpty()
 
         Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             ReviewHeader(
@@ -575,7 +576,8 @@ private fun EditableCanonicalSection(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             ) {
                 Column(Modifier.padding(CollectorTokens.space3), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space4)) {
-                    visibleFields.sortedBy { if (it.path in fieldErrors) 0 else 1 }.forEach { field ->
+                    PurchaseOptionEditor(envelope, edits, fieldErrors, busy, onEdit)
+                    visibleFields.filterNot { ".option_items[" in it.path }.sortedBy { if (it.path in fieldErrors) 0 else 1 }.forEach { field ->
                         AccessibleField(
                             field = field,
                             modified = CanonicalFieldRegistry.isModified(field, edits),
@@ -596,7 +598,7 @@ private fun EditableCanonicalSection(
                         )
                     }
                     if (showEmptyOptionalFields) {
-                        emptyOptionalFields.forEach { field ->
+                        emptyOptionalFields.filterNot { ".option_items[" in it.path }.forEach { field ->
                             AccessibleField(
                                 field = field,
                                 modified = CanonicalFieldRegistry.isModified(field, edits),
@@ -605,6 +607,62 @@ private fun EditableCanonicalSection(
                                 busy = busy,
                                 onApply = { value -> onEdit { it.updateField(field.path, value) } },
                             )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun PurchaseOptionEditor(
+    envelope: YeonsikOcrEnvelope,
+    edits: List<com.pricetrace.receiptscanner.review.CanonicalReviewEdit>,
+    fieldErrors: Map<String, String>,
+    busy: Boolean,
+    onEdit: ((CanonicalReviewController) -> Boolean) -> Unit,
+) {
+    val fields = CanonicalFieldRegistry.fields(envelope)
+    envelope.purchaseRecords.forEach { record ->
+        record.lineItems.forEachIndexed { lineIndex, line ->
+            val lineKey = line.lineKey ?: lineIndex.toString()
+            val path = "purchase_records[${record.clientKey}].line_items[$lineKey].option_items"
+            var description by rememberSaveable(path) { mutableStateOf("") }
+            CollectorSection("${line.description} · 구매 옵션", "수량·금액이 원본에 없으면 비워 두세요. 실제 0원은 0을 입력하세요.") {
+                if (edits.any { it.fieldPath == path }) Text("검수자가 옵션 목록을 수정했습니다.", style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("새 옵션 설명") },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                CollectorButton("옵션 추가", onClick = {
+                    onEdit { it.mutatePurchaseOptions(record.clientKey, lineKey, PurchaseOptionListMutation.Add(description)) }
+                }, enabled = !busy && description.isNotBlank() && line.optionText == null, emphasized = false)
+                if (line.optionText != null) Text("기존 옵션 텍스트를 지운 뒤 구조화 옵션을 추가할 수 있습니다.")
+                fieldErrors[path]?.let { ValidationMessage(it, CollectorStatusKind.ERROR) }
+                line.optionItems.forEachIndexed { index, option ->
+                    val prefix = "$path[${option.optionKey}]"
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("옵션 ${index + 1}", fontWeight = FontWeight.SemiBold)
+                        fields.filter { it.path.startsWith("$prefix.") }.forEach { field ->
+                            AccessibleField(field, CanonicalFieldRegistry.isModified(field, edits),
+                                edits.firstOrNull { it.fieldPath == field.path }?.previousValue, fieldErrors[field.path], busy,
+                                onApply = { value -> onEdit { it.updateField(field.path, value) } })
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            fun reorder(target: Int) {
+                                val keys = line.optionItems.map { it.optionKey }.toMutableList()
+                                keys.add(target, keys.removeAt(index))
+                                onEdit { it.mutatePurchaseOptions(record.clientKey, lineKey, PurchaseOptionListMutation.Reorder(keys)) }
+                            }
+                            CollectorButton("위로", onClick = { reorder(index - 1) }, enabled = !busy && index > 0, emphasized = false)
+                            CollectorButton("아래로", onClick = { reorder(index + 1) }, enabled = !busy && index < line.optionItems.lastIndex, emphasized = false)
+                            CollectorButton("옵션 삭제", onClick = {
+                                onEdit { it.mutatePurchaseOptions(record.clientKey, lineKey, PurchaseOptionListMutation.Delete(option.optionKey)) }
+                            }, enabled = !busy, emphasized = false)
                         }
                     }
                 }

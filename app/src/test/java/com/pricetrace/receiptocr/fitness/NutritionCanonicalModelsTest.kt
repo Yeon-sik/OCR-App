@@ -306,6 +306,27 @@ class NutritionCanonicalModelsTest {
         assertEquals(JsonNull, root["p_pricetrace_identity"])
     }
 
+    @Test
+    fun mealComponentBranchUsesMerchantFallbackWithoutCrossingReferenceIdentity() {
+        val envelope = com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec.decode(
+            File("../examples/yeonsik-ocr.v2.restaurant.example.json").readText(), "component-branch",
+        )
+        val component = envelope.nutrition.filterIsInstance<IngestionNutrition.MealComponentEstimate>().single()
+        val fallback = CanonicalNutritionPayloadFactory.fromMealComponentEstimate(
+            localDocumentId = "component-branch", revisionSeq = 1, idempotencyKey = "branch-key",
+            restaurantName = "Source restaurant", branchName = "영등포점", item = component.copy(reference = null),
+        )
+        assertEquals("Source restaurant", fallback.provenance.getValue("restaurant_name").jsonPrimitive.content)
+        assertEquals("영등포점", fallback.provenance.getValue("branch_name").jsonPrimitive.content)
+        val override = CanonicalNutritionPayloadFactory.fromMealComponentEstimate(
+            localDocumentId = "component-branch", revisionSeq = 1, idempotencyKey = "reference-key",
+            restaurantName = "Source restaurant", branchName = "영등포점",
+            item = component.copy(reference = MealComponentReference(restaurantName = "Another restaurant")),
+        )
+        assertEquals("Another restaurant", override.provenance.getValue("restaurant_name").jsonPrimitive.content)
+        assertEquals(JsonNull, override.provenance["branch_name"])
+    }
+
     private fun verifiedDraft(): NutritionLabelDraft = NutritionLabelDraft(
         documentId = "remote-label",
         parserVersion = "parser-test",

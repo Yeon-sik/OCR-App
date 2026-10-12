@@ -324,7 +324,7 @@ class DesktopIngestionController(
             }
             val controller = structuredReviewController
                 ?.takeIf { it.state.value.envelope == envelope }
-                ?: CanonicalReviewController(envelope, initialEdits = current.reviewEdits, now = now)
+                ?: CanonicalReviewController(envelope, initialEdits = current.reviewEdits, initialFieldErrors = current.reviewFieldErrors, now = now)
             structuredReviewController = controller
             if (!mutation(controller)) {
                 _state.value = current.copy(
@@ -337,8 +337,9 @@ class DesktopIngestionController(
             val edited = controller.state.value.envelope
             val editedJson = YeonsikOcrEnvelopeCodec.encodePersisted(edited)
             val newEdits = controller.state.value.edits.drop(current.reviewEdits.size)
+            val editedState = current.copy(reviewFieldErrors = controller.state.value.fieldErrors, error = controller.state.value.error)
            if (newEdits.isEmpty()) {
-                _state.value = current.copy(reviewFieldErrors = emptyMap(), error = null, notice = "변경된 canonical 필드가 없습니다.")
+                _state.value = editedState.copy(notice = "변경된 canonical 필드가 없습니다.")
                return
            }
             val bundleMetadata = current.bundleMetadata
@@ -370,15 +371,15 @@ class DesktopIngestionController(
                     validationIssues = emptyList(),
                     edits = newEdits,
                 )
-                archiveAndMaterializeRevision(current, request, edited, controller.state.value.edits)
+                archiveAndMaterializeRevision(editedState, request, edited, controller.state.value.edits)
                 return
             }
             when (val result = useCase.reviseCanonicalDraft(session.ingestionId, edited)) {
                 is IngestionStartResult.Failure -> {
                     _state.value = current.copy(error = result.issues.joinToString(", "), notice = null)
                 }
-                is IngestionStartResult.Success -> publishStructuredRevision(current, result.session, edited, null, controller.state.value.edits)
-                is IngestionStartResult.Duplicate -> publishStructuredRevision(current, result.session, edited, null, controller.state.value.edits)
+                is IngestionStartResult.Success -> publishStructuredRevision(editedState, result.session, edited, null, controller.state.value.edits)
+                is IngestionStartResult.Duplicate -> publishStructuredRevision(editedState, result.session, edited, null, controller.state.value.edits)
             }
         } catch (error: Exception) {
             _state.value = _state.value.copy(error = error.message ?: error.javaClass.simpleName, notice = null)
@@ -527,9 +528,10 @@ class DesktopIngestionController(
             canonicalJson = canonicalJson,
             evidence = previous.evidence,
             notice = "구조화 편집을 저장했습니다. 이전 검증 상태는 무효화되어 다시 확정해야 합니다.",
-            error = null,
+            error = previous.reviewFieldErrors.values.distinct().joinToString(", ").takeIf { it.isNotEmpty() },
             bundleMetadata = bundleMetadata,
             reviewEdits = reviewEdits,
+            reviewFieldErrors = previous.reviewFieldErrors,
         )
     }
 
@@ -603,7 +605,7 @@ class DesktopIngestionController(
             val current = _state.value
             val session = current.session ?: error("증거를 추가하려면 JSON을 먼저 가져오세요.")
             val envelope = currentEnvelope()
-            val isV4Purchase = envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA
+            val isV4Purchase = envelope.schemaVersion in setOf(com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V4_SCHEMA, com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA)
             val v4SourceIds = if (isV4Purchase) {
                 envelope.source.sourceFiles.filter { it.type == type }.map { it.id }
             } else {
@@ -612,16 +614,16 @@ class DesktopIngestionController(
             val usedIds = current.evidence.map { it.attachmentId }.toMutableSet()
             if (isV4Purchase) {
                 require(v4SourceIds.isNotEmpty()) {
-                    "V4 원본 파일이 ${DesktopUiLabels.sourceAttachmentType(type)} 유형으로 선언되지 않았습니다."
+                    "구매 원본 파일이 ${DesktopUiLabels.sourceAttachmentType(type)} 유형으로 선언되지 않았습니다."
                 }
                 require(paths.size <= v4SourceIds.count { it !in usedIds }) {
-                    "V4 원본 유형 ${DesktopUiLabels.sourceAttachmentType(type)}에 증거 파일이 너무 많습니다."
+                    "구매 원본 유형 ${DesktopUiLabels.sourceAttachmentType(type)}에 증거 파일이 너무 많습니다."
                 }
             }
             val added = paths.map { path ->
                 val logicalId = if (isV4Purchase) {
                     v4SourceIds.firstOrNull { it !in usedIds }
-                        ?: error("${DesktopUiLabels.sourceAttachmentType(type)} 유형에 사용할 수 있는 V4 원본 파일이 없습니다.")
+                        ?: error("${DesktopUiLabels.sourceAttachmentType(type)} 유형에 사용할 수 있는 구매 원본 파일이 없습니다.")
                 } else {
                     null
                 }
@@ -659,6 +661,7 @@ class DesktopIngestionController(
         beginBusy()
         try {
             val currentState = _state.value
+            require(currentState.reviewFieldErrors.isEmpty()) { "옵션·필드 편집 오류를 해결한 뒤 검수를 확정하세요." }
             val currentSession = currentState.session ?: error("검수하려면 JSON을 먼저 가져오세요.")
             if (currentSession.projections.any {
                 com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson.hasPendingOcrResolution(it.metadataJson)
@@ -755,6 +758,7 @@ class DesktopIngestionController(
         beginBusy()
         try {
             val currentState = _state.value
+            require(currentState.reviewFieldErrors.isEmpty()) { "옵션·필드 편집 오류를 해결한 뒤 전송하세요." }
             require(currentState.bundleValidationStatus != DesktopBundleValidationStatus.INVALID) { "번들이 유효하지 않습니다." }
             val session = currentState.session ?: error("전송하려면 JSON을 먼저 가져오세요.")
             val envelope = currentEnvelope()
@@ -948,6 +952,7 @@ class DesktopIngestionController(
         error: String?,
         bundleMetadata: DesktopBundleMetadata? = _state.value.bundleMetadata,
         reviewEdits: List<CanonicalReviewEdit> = _state.value.reviewEdits,
+        reviewFieldErrors: Map<String, String> = emptyMap(),
     ) {
         _state.value = DesktopUiState(
             rawJson = rawJson,
@@ -962,6 +967,7 @@ class DesktopIngestionController(
             bundleMetadata = bundleMetadata,
             bundleValidationStatus = bundleMetadata?.validationStatus,
             reviewEdits = reviewEdits,
+            reviewFieldErrors = reviewFieldErrors,
             error = error,
             notice = notice,
             busy = true,

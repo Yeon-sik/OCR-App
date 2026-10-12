@@ -785,7 +785,7 @@ object YeonsikOcrV3Json {
                     (nutrition.isNotEmpty() || productCandidates.isNotEmpty() || priceObservations.isNotEmpty()) &&
                     links.isEmpty(),
             )
-            IngestionMode.PURCHASE -> error("purchase mode requires yeonsik-ocr.v4")
+            IngestionMode.PURCHASE, IngestionMode.RESTAURANT_PURCHASE -> error("purchase mode requires yeonsik-ocr.v4")
         }
     }
 

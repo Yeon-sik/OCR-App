@@ -101,6 +101,7 @@ fun ReceiptOcrApp(
         onCanonicalBundleRevisionRetry = viewModel::retryCanonicalBundleRevision,
         onCanonicalReviewMerchantNameChanged = viewModel::updateCanonicalMerchantName,
         onCanonicalReviewFieldChanged = viewModel::updateCanonicalField,
+        onCanonicalPurchaseOptionsChanged = viewModel::mutateCanonicalPurchaseOptions,
         onCanonicalReviewLineDescriptionChanged = viewModel::updateCanonicalLineDescription,
         onCanonicalReviewLineTypeChanged = viewModel::updateCanonicalLineType,
         onCanonicalReviewFoodServiceRoleChanged = viewModel::updateCanonicalFoodServiceRole,

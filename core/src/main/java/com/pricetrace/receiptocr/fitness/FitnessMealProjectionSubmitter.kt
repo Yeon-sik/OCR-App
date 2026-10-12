@@ -8,6 +8,7 @@ import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
 import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import com.pricetrace.receiptscanner.ingestion.ConsumptionVerificationStatus
+import com.pricetrace.receiptscanner.ingestion.RestaurantSourceSnapshot
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V2_SCHEMA
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -20,7 +21,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.time.OffsetDateTime
 
-/** Routes only v2 item-level consumption to Fitness's canonical Meal RPC. */
+/** Routes only explicit v2/v5 item-level consumption to Fitness's canonical Meal RPC. */
 class FitnessMealProjectionSubmitter(
     private val gateway: NutritionSupabaseGateway,
 ) : IngestionProjectionSubmitter {
@@ -30,7 +31,7 @@ class FitnessMealProjectionSubmitter(
         }
         val envelope = request.envelope
             ?: return ProjectionSubmission.Failure("canonical_envelope_missing", retryable = false)
-        if (envelope.schemaVersion != YEONSIK_OCR_V2_SCHEMA) {
+        if (envelope.schemaVersion !in setOf(YEONSIK_OCR_V2_SCHEMA, com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA)) {
             return ProjectionSubmission.Failure("fitness_meal_requires_yeonsik_ocr_v2", retryable = false)
         }
         if (envelope.consumption.any { it.status != ConsumptionVerificationStatus.USER_VERIFIED }) {
@@ -55,10 +56,16 @@ class FitnessMealProjectionSubmitter(
 
         val nutritionRows = parseNutritionRows(request.dependencyMetadataJson[IngestionProjection.FITNESS_NUTRITION])
             ?: return ProjectionSubmission.Failure("fitness_nutrition_metadata_invalid", retryable = true)
-        if (nutritionRows.size != envelope.nutrition.size) {
+        val isV5 = envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA
+        if (!isV5 && nutritionRows.size != envelope.nutrition.size) {
             return ProjectionSubmission.Failure("fitness_nutrition_metadata_missing", retryable = true)
         }
-        val foodIds = envelope.nutrition.mapIndexed { index, item ->
+        val foodIds = if (isV5) envelope.nutrition.associate { item ->
+            item.clientKey to nutritionRows.filter { row ->
+                row["input_contract"]?.jsonPrimitive?.contentOrNull == FOOD_ESTIMATE_V1 &&
+                    row["nutrition_client_key"]?.jsonPrimitive?.contentOrNull == item.clientKey
+            }.distinctBy { it.nutritionFoodId() }.singleOrNull()?.nutritionFoodId()
+        } else envelope.nutrition.mapIndexed { index, item ->
             item.clientKey to nutritionRows[index].nutritionFoodId()
         }.toMap()
         if (foodIds.values.any { it == null }) {
@@ -77,6 +84,7 @@ class FitnessMealProjectionSubmitter(
                         consumedAt = eatenAt,
                         amountStatus = item.amountStatus,
                         nutrition = nutrition,
+                        schemaVersion = if (isV5) envelope.schemaVersion else YEONSIK_OCR_V2_SCHEMA,
                     )
                     val consumedAmount = item.amount
                         ?: throw IllegalArgumentException("consumption_artifact_incomplete")
@@ -89,7 +97,14 @@ class FitnessMealProjectionSubmitter(
                         consumedUnit = consumedUnit,
                         confidence = item.confidence,
                         sourceProvenance = sourceProvenance,
-                        priceTraceIdentity = if (nutrition is IngestionNutrition.MealComponentEstimate) {
+                        priceTraceIdentity = if (isV5) {
+                            com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.exact(
+                                envelope, nutrition.clientKey, request.dependencyMetadataJson[IngestionProjection.PRICETRACE_PRICE_OBSERVATION],
+                            )?.toNutritionIdentity(
+                                com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.sellerName(envelope, nutrition.clientKey) ?: "",
+                                (nutrition as IngestionNutrition.RestaurantEstimate).menuName,
+                            )
+                        } else if (nutrition is IngestionNutrition.MealComponentEstimate) {
                             null
                         } else {
                             request.resolvedIdentity?.priceTrace?.let(PriceTraceIdentityJson::encode)
@@ -101,15 +116,16 @@ class FitnessMealProjectionSubmitter(
             return ProjectionSubmission.Failure(error.message ?: "fitness_meal_payload_invalid", retryable = false)
         }
 
+        val (storeName, branchName) = RestaurantSourceSnapshot.forMeal(envelope)
         val source = buildJsonObject {
             put("source_app", JsonPrimitive("ocr-app"))
-            put("schema_version", JsonPrimitive(YEONSIK_OCR_V2_SCHEMA))
-            put("meal_kind", JsonPrimitive(if (envelope.mode == com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT) "dining_out" else "food"))
+            put("schema_version", JsonPrimitive(if (isV5) envelope.schemaVersion else YEONSIK_OCR_V2_SCHEMA))
+            put("meal_kind", JsonPrimitive(if (envelope.mode in setOf(com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT, com.pricetrace.receiptscanner.ingestion.IngestionMode.RESTAURANT_PURCHASE)) "dining_out" else "food"))
             put("menu", JsonPrimitive(mealTitle(envelope)))
             put("source_document_ref", JsonPrimitive(localDocumentId))
             put("consumed_at", JsonPrimitive(eatenAt))
-            envelope.receipt?.merchant?.name?.let { put("store_name", JsonPrimitive(it)) }
-            envelope.receipt?.merchant?.branchName?.let { put("branch_name", JsonPrimitive(it)) }
+            storeName?.let { put("store_name", JsonPrimitive(it)) }
+            branchName?.let { put("branch_name", JsonPrimitive(it)) }
         }
         val payload = try {
             val paidOrReceiptBackedItem = envelope.consumption
@@ -162,9 +178,10 @@ class FitnessMealProjectionSubmitter(
         consumedAt: String,
         amountStatus: String,
         nutrition: IngestionNutrition,
+        schemaVersion: String = YEONSIK_OCR_V2_SCHEMA,
     ): JsonObject = buildJsonObject {
         put("source_app", JsonPrimitive("ocr-app"))
-        put("schema_version", JsonPrimitive(YEONSIK_OCR_V2_SCHEMA))
+        put("schema_version", JsonPrimitive(schemaVersion))
         put("source_document_ref", JsonPrimitive(localDocumentId))
         put("consumption_client_key", JsonPrimitive(consumptionClientKey))
         put("nutrition_client_key", JsonPrimitive(nutritionClientKey))

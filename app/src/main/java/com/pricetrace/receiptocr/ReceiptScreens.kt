@@ -194,6 +194,7 @@ fun ReceiptOcrContent(
     onCanonicalBundleRevisionRetry: () -> Unit = {},
     onCanonicalReviewMerchantNameChanged: (String) -> Unit = {},
     onCanonicalReviewFieldChanged: ((String, String?) -> Unit)? = null,
+    onCanonicalPurchaseOptionsChanged: ((String, String, com.pricetrace.receiptscanner.review.PurchaseOptionListMutation) -> Unit)? = null,
     onCanonicalReviewLineDescriptionChanged: (String, String) -> Unit = { _, _ -> },
     onCanonicalReviewLineTypeChanged: (String, ReceiptLineType) -> Unit = { _, _ -> },
     onCanonicalReviewFoodServiceRoleChanged: (String, FoodServiceRole) -> Unit = { _, _ -> },
@@ -462,6 +463,7 @@ fun ReceiptOcrContent(
                     onRevisionRetry = onCanonicalBundleRevisionRetry,
                     onReviewMerchantNameChanged = onCanonicalReviewMerchantNameChanged,
                     onReviewFieldChanged = onCanonicalReviewFieldChanged,
+                    onPurchaseOptionsChanged = onCanonicalPurchaseOptionsChanged,
                     onReviewLineDescriptionChanged = onCanonicalReviewLineDescriptionChanged,
                     onReviewLineTypeChanged = onCanonicalReviewLineTypeChanged,
                     onReviewFoodServiceRoleChanged = onCanonicalReviewFoodServiceRoleChanged,
@@ -952,6 +954,7 @@ private fun CanonicalJsonValidatorScreen(
     onRevisionRetry: () -> Unit,
     onReviewMerchantNameChanged: (String) -> Unit,
     onReviewFieldChanged: ((String, String?) -> Unit)?,
+    onPurchaseOptionsChanged: ((String, String, com.pricetrace.receiptscanner.review.PurchaseOptionListMutation) -> Unit)?,
     onReviewLineDescriptionChanged: (String, String) -> Unit,
     onReviewLineTypeChanged: (String, ReceiptLineType) -> Unit,
     onReviewFoodServiceRoleChanged: (String, FoodServiceRole) -> Unit,
@@ -966,10 +969,10 @@ private fun CanonicalJsonValidatorScreen(
     val eligible = plan?.eligible.orEmpty().sortedBy(IngestionProjection::wireValue)
     val disabled = plan?.disabled.orEmpty().sortedBy(IngestionProjection::wireValue)
     val bundleActive = state.bundle != null || state.bundleValidationStatus != null
-    val revisionReady = state.bundle?.let { bundle ->
+    val revisionReady = state.reviewFieldErrors.isEmpty() && (state.bundle?.let { bundle ->
         bundle.pendingRevision == null &&
             (state.reviewEdits.isEmpty() || bundle.revisionArchiveStatus == AndroidCanonicalRevisionArchiveStatus.ARCHIVED)
-    } ?: true
+    } ?: true)
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("canonical_json_validator"),
         contentPadding = PaddingValues(20.dp),
@@ -1070,6 +1073,8 @@ private fun CanonicalJsonValidatorScreen(
                     fieldErrors = state.reviewFieldErrors,
                     onReviewMerchantNameChanged = onReviewMerchantNameChanged,
                    onReviewFieldChanged = onReviewFieldChanged,
+                    onPurchaseOptionsChanged = onPurchaseOptionsChanged,
+                    busy = state.busy,
                     onReviewLineDescriptionChanged = onReviewLineDescriptionChanged,
                     onReviewLineTypeChanged = onReviewLineTypeChanged,
                     onReviewFoodServiceRoleChanged = onReviewFoodServiceRoleChanged,
@@ -1327,6 +1332,8 @@ private fun AppReviewTable(
     fieldErrors: Map<String, String>,
     onReviewMerchantNameChanged: (String) -> Unit,
     onReviewFieldChanged: ((String, String?) -> Unit)?,
+    onPurchaseOptionsChanged: ((String, String, com.pricetrace.receiptscanner.review.PurchaseOptionListMutation) -> Unit)?,
+    busy: Boolean,
     onReviewLineDescriptionChanged: (String, String) -> Unit,
     onReviewLineTypeChanged: (String, ReceiptLineType) -> Unit,
     onReviewFoodServiceRoleChanged: (String, FoodServiceRole) -> Unit,
@@ -1369,6 +1376,8 @@ private fun AppReviewTable(
                 edits = reviewEdits,
                 fieldErrors = fieldErrors,
                 onFieldChanged = fieldChanged,
+                onPurchaseOptionsChanged = onPurchaseOptionsChanged,
+                busy = busy,
                 onUndo = onReviewUndo,
                 onRedo = onReviewRedo,
             )
@@ -1384,6 +1393,8 @@ private fun CanonicalTypedReviewEditor(
     edits: List<CanonicalReviewEdit>,
     fieldErrors: Map<String, String>,
     onFieldChanged: (String, String?) -> Unit,
+    onPurchaseOptionsChanged: ((String, String, com.pricetrace.receiptscanner.review.PurchaseOptionListMutation) -> Unit)?,
+    busy: Boolean,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
 ) {
@@ -1402,7 +1413,10 @@ private fun CanonicalTypedReviewEditor(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
-            fields.forEach { field ->
+            if (onPurchaseOptionsChanged != null) {
+                CanonicalPurchaseOptionEditor(envelope, edits, fieldErrors, busy, onFieldChanged, onPurchaseOptionsChanged)
+            }
+            fields.filterNot { onPurchaseOptionsChanged != null && ".option_items[" in it.path }.forEach { field ->
                 CanonicalTypedReviewField(
                     field = field,
                     modified = CanonicalFieldRegistry.isModified(field, edits),
@@ -1416,7 +1430,7 @@ private fun CanonicalTypedReviewEditor(
 }
 
 @Composable
-private fun CanonicalTypedReviewField(
+internal fun CanonicalTypedReviewField(
     field: CanonicalEditableField,
     modified: Boolean,
     initialValue: String?,

@@ -21,7 +21,11 @@ import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -31,6 +35,131 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FitnessMealProjectionSubmitterTest {
+    @Test
+    fun v5ExplicitConsumptionReusesTheExistingMealRpc() = runTest {
+        val eatenAt = "2026-10-09T12:00:00+09:00"
+        val draft = com.pricetrace.receiptscanner.ingestion.YeonsikOcrV5Json.decode(
+            java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5-meal",
+        )
+        val envelope = draft.copy(
+            source = draft.source.copy(userText = "$eatenAt 1 serving 섭취"),
+            consumption = listOf(IngestionConsumption("consumption-1", consumedAt = eatenAt, status = ConsumptionVerificationStatus.USER_VERIFIED,
+                items = listOf(com.pricetrace.receiptscanner.ingestion.IngestionConsumptionItem("food-1", 1.0, "serving", 1.0, "user_provided")))),
+        )
+        val transport = QueueTransport(NutritionHttpResponse(200,
+            """[{"meal_import_id":"meal-v5","meal_record_id":"record-v5","idempotent_replay":false,"eaten_at":"$eatenAt","record_date":"2026-10-09","item_count":1,"nutrition_food_ids":["food-v5"],"contract_version":"verified-meal.v1"}]"""))
+        val result = FitnessMealProjectionSubmitter(NutritionSupabaseGateway(FakeStore(signedIn()), transport)).submit(
+            request(envelope, """[{"nutrition_food_id":"food-v5","canonical_import_id":"nutrition-v5","input_contract":"food-estimate.v1","nutrition_client_key":"food-1","visibility":"private"},{"nutrition_food_id":"food-v5","canonical_import_id":"nutrition-v5","visibility":"public","publication_revision":1}]"""),
+        )
+        assertTrue(result is ProjectionSubmission.Success)
+        assertTrue(transport.requests.single().url.endsWith("/import_verified_meal_v1"))
+        val body = Json.parseToJsonElement(transport.requests.single().body!!).jsonObject
+        assertEquals(eatenAt, body.getValue("p_eaten_at").jsonPrimitive.content)
+        assertEquals("dining_out", body.getValue("p_source").jsonObject.getValue("meal_kind").jsonPrimitive.content)
+        assertEquals("yeonsik-ocr.v5", body.getValue("p_source").jsonObject.getValue("schema_version").jsonPrimitive.content)
+        assertEquals("맛단-맛있는 다이어트식단", body.getValue("p_source").jsonObject.getValue("store_name").jsonPrimitive.content)
+        assertEquals("영등포점", body.getValue("p_source").jsonObject.getValue("branch_name").jsonPrimitive.content)
+        assertEquals("food-1", body.getValue("p_items").jsonArray.single().jsonObject.getValue("client_key").jsonPrimitive.content)
+    }
+
+    @Test
+    fun v5MealKeepsTheSharedSellerAndBranchAcrossConsumedItems() = runTest {
+        val source = submittedSource(withSecondPurchase(v5MealEnvelope(), "맛단-맛있는 다이어트식단", "영등포점"))
+        assertEquals(JsonPrimitive("맛단-맛있는 다이어트식단"), source["store_name"])
+        assertEquals(JsonPrimitive("영등포점"), source["branch_name"])
+    }
+
+    @Test
+    fun v5MealKeepsOnlyTheSharedSellerWhenConsumedBranchesDiffer() = runTest {
+        val source = submittedSource(withSecondPurchase(v5MealEnvelope(), "맛단-맛있는 다이어트식단", "강남점"))
+        assertEquals(JsonPrimitive("맛단-맛있는 다이어트식단"), source["store_name"])
+        assertFalse(source.containsKey("branch_name"))
+    }
+
+    @Test
+    fun v5MealOmitsMixedSellersEvenWhenBranchLabelsMatch() = runTest {
+        val source = submittedSource(withSecondPurchase(v5MealEnvelope(), "별도 식당", "영등포점"))
+        assertFalse(source.containsKey("store_name"))
+        assertFalse(source.containsKey("branch_name"))
+    }
+
+    @Test
+    fun v5UnknownBranchNeverSelectsAKnownBranchFromOnlySomeConsumedItems() = runTest {
+        val original = v5MealEnvelope()
+        val unknown = original.copy(purchaseRecords = original.purchaseRecords.map { it.copy(sellerBranchName = null) })
+        listOf(unknown, withSecondPurchase(unknown, "맛단-맛있는 다이어트식단", "영등포점")).forEach { envelope ->
+            val source = submittedSource(envelope)
+            assertEquals(JsonPrimitive("맛단-맛있는 다이어트식단"), source["store_name"])
+            assertFalse(source.containsKey("branch_name"))
+        }
+    }
+
+    @Test
+    fun v5MealUsesLineSellerOverrideWithoutInheritingRecordBranch() = runTest {
+        val original = v5MealEnvelope()
+        val source = submittedSource(original.copy(purchaseRecords = original.purchaseRecords.map { record ->
+            record.copy(lineItems = record.lineItems.map { it.copy(sellerOverride = "별도 식당 강남점") })
+        }))
+        assertEquals(JsonPrimitive("별도 식당 강남점"), source["store_name"])
+        assertFalse(source.containsKey("branch_name"))
+    }
+
+    @Test
+    fun v5MealSnapshotFollowsOnlyConsumedLocalLinksInsteadOfRecordOrder() = runTest {
+        val original = v5MealEnvelope()
+        val unconsumedOther = withSecondPurchase(original, "별도 식당", "강남점", consumed = false)
+        val firstSource = submittedSource(unconsumedOther)
+        assertEquals(JsonPrimitive("맛단-맛있는 다이어트식단"), firstSource["store_name"])
+        assertEquals(JsonPrimitive("영등포점"), firstSource["branch_name"])
+        val consumedSecond = unconsumedOther.copy(consumption = original.consumption.map { consumption ->
+            consumption.copy(items = consumption.items.map { it.copy(nutritionClientKey = "food-2") })
+        })
+        val secondSource = submittedSource(consumedSecond)
+        assertEquals(JsonPrimitive("별도 식당"), secondSource["store_name"])
+        assertEquals(JsonPrimitive("강남점"), secondSource["branch_name"])
+    }
+
+    @Test
+    fun v5PurchaseWithoutExplicitConsumptionNeverCallsMealRpc() = runTest {
+        val envelope = com.pricetrace.receiptscanner.ingestion.YeonsikOcrV5Json.decode(
+            java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "no-consumption",
+        )
+        val transport = QueueTransport()
+        val result = FitnessMealProjectionSubmitter(NutritionSupabaseGateway(FakeStore(signedIn()), transport))
+            .submit(request(envelope, "[]")) as ProjectionSubmission.Failure
+        assertEquals("consumption_artifact_missing", result.message)
+        assertTrue(transport.requests.isEmpty())
+    }
+
+    @Test
+    fun v2ReceiptAndReceiptFreeRestaurantMealKeepTheirOwnSourcePair() = runTest {
+        val receipt = com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec.decode(
+            java.io.File("../examples/yeonsik-ocr.v2.restaurant.example.json").readText(), "v2-meal-branch",
+        ).let { envelope -> envelope.copy(consumption = envelope.consumption.map {
+            it.copy(status = ConsumptionVerificationStatus.USER_VERIFIED)
+        }) }
+        val sourceReceipt = requireNotNull(receipt.receipt)
+        val receiptSource = submittedSource(receipt)
+        assertEquals(JsonPrimitive(sourceReceipt.merchant.name), receiptSource["store_name"])
+        assertEquals(JsonPrimitive("강남점"), receiptSource["branch_name"])
+        val unknownBranch = submittedSource(receipt.copy(receipt = sourceReceipt.copy(
+            merchant = sourceReceipt.merchant.copy(branchName = null),
+        )))
+        assertEquals(JsonPrimitive(sourceReceipt.merchant.name), unknownBranch["store_name"])
+        assertFalse(unknownBranch.containsKey("branch_name"))
+
+        val draft = com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec.decode(
+            java.io.File("../examples/yeonsik-ocr.v2.restaurant-food-photo.example.json").readText(), "v2-free-meal",
+        )
+        val free = draft.copy(consumption = receipt.consumption.take(1).map { consumption ->
+            consumption.copy(nutritionClientKeys = emptySet(),
+                items = listOf(consumption.items.first().copy(nutritionClientKey = draft.nutrition.single().clientKey)))
+        })
+        val freeSource = submittedSource(free)
+        assertEquals(JsonPrimitive("키키덮밥"), freeSource["store_name"])
+        assertEquals(JsonPrimitive("영등포점"), freeSource["branch_name"])
+    }
+
     @Test
     fun itemLevelConsumptionUsesActualConsumedAtAndFitnessMealRpc() = runTest {
         val eatenAt = "2026-09-06T08:10:00+09:00"
@@ -169,6 +298,59 @@ class FitnessMealProjectionSubmitterTest {
         assertEquals("consumption_artifact_incomplete", failure.message)
         assertFalse(failure.retryable)
         assertTrue(transport.requests.isEmpty())
+    }
+
+    private fun v5MealEnvelope(): YeonsikOcrEnvelope {
+        val draft = com.pricetrace.receiptscanner.ingestion.YeonsikOcrV5Json.decode(
+            java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5-meal",
+        )
+        val eatenAt = "2026-10-09T12:00:00+09:00"
+        return draft.copy(
+            source = draft.source.copy(userText = "$eatenAt 1 serving 섭취"),
+            consumption = listOf(IngestionConsumption("consumption-1", consumedAt = eatenAt,
+                status = ConsumptionVerificationStatus.USER_VERIFIED,
+                items = listOf(com.pricetrace.receiptscanner.ingestion.IngestionConsumptionItem(
+                    "food-1", 1.0, "serving", 1.0, "user_provided",
+                )))),
+        )
+    }
+
+    private fun withSecondPurchase(
+        original: YeonsikOcrEnvelope,
+        seller: String,
+        branch: String?,
+        consumed: Boolean = true,
+    ): YeonsikOcrEnvelope {
+        val record = original.purchaseRecords.single()
+        val nutrition = original.nutrition.single() as IngestionNutrition.RestaurantEstimate
+        return original.copy(
+            purchaseRecords = original.purchaseRecords + record.copy(clientKey = "purchase-2", seller = seller,
+                sellerBranchName = branch, lineItems = record.lineItems.map { it.copy(lineKey = "line-2") }),
+            nutrition = original.nutrition + nutrition.copy(clientKey = "food-2"),
+            purchaseNutritionLinks = original.purchaseNutritionLinks + original.purchaseNutritionLinks.single().copy(
+                purchaseRecordClientKey = "purchase-2", purchaseLineKey = "line-2", nutritionClientKey = "food-2",
+            ),
+            consumption = if (!consumed) original.consumption else original.consumption.map {
+                it.copy(items = it.items + it.items.single().copy(nutritionClientKey = "food-2"))
+            },
+        ).also { com.pricetrace.receiptscanner.ingestion.YeonsikOcrV5Json.validate(it) }
+    }
+
+    private suspend fun submittedSource(envelope: YeonsikOcrEnvelope): JsonObject {
+        val eatenAt = envelope.consumption.first().consumedAt
+        val keys = envelope.consumption.flatMap { it.items }.map { it.nutritionClientKey }
+        val foodIds = JsonArray(keys.map { JsonPrimitive("food-$it") })
+        val transport = QueueTransport(NutritionHttpResponse(200,
+            """[{"meal_import_id":"meal-branch","meal_record_id":"record-branch","idempotent_replay":false,"eaten_at":"$eatenAt","record_date":"${eatenAt?.take(10)}","item_count":${keys.size},"nutrition_food_ids":$foodIds,"contract_version":"verified-meal.v1"}]"""))
+        val metadata = JsonArray(envelope.nutrition.map { item -> buildJsonObject {
+            put("nutrition_food_id", JsonPrimitive("food-${item.clientKey}"))
+            put("input_contract", JsonPrimitive(FOOD_ESTIMATE_V1))
+            put("nutrition_client_key", JsonPrimitive(item.clientKey))
+        } }).toString()
+        val result = FitnessMealProjectionSubmitter(NutritionSupabaseGateway(FakeStore(signedIn()), transport))
+            .submit(request(envelope, metadata))
+        assertTrue(result.toString(), result is ProjectionSubmission.Success)
+        return Json.parseToJsonElement(transport.requests.single().body!!).jsonObject.getValue("p_source").jsonObject
     }
 
     private fun request(

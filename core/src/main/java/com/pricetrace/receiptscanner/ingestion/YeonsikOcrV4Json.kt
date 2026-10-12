@@ -220,6 +220,7 @@ object YeonsikOcrV4Json {
                 put("description", line.description?.let(::JsonPrimitive) ?: JsonNull)
                 put("seller_override", line.sellerOverride?.let(::JsonPrimitive) ?: JsonNull)
                 put("option_text", line.optionText?.let(::JsonPrimitive) ?: JsonNull)
+                put("option_items", optionItemsJson(line.optionItems))
                 put("price_status", JsonPrimitive(line.priceStatus))
                 put("merchant_sku", line.merchantSku?.let(::JsonPrimitive) ?: JsonNull)
                 put("quantity", line.quantity?.let(::JsonPrimitive) ?: JsonNull)
@@ -463,7 +464,16 @@ object YeonsikOcrV4Json {
             "user-statement:sha256:" + StableIds.sha256(it)
         }
 
-    private fun decodePurchaseRecord(root: JsonObject): PurchaseRecord {
+    internal fun optionItemsJson(options: List<PurchaseOption>): JsonArray = JsonArray(options.map { option ->
+        buildJsonObject {
+            put("option_key", JsonPrimitive(option.optionKey))
+            put("description", JsonPrimitive(option.description))
+            put("quantity", option.quantity?.let(::JsonPrimitive) ?: JsonNull)
+            put("amount_krw", option.amountKrw?.let(::JsonPrimitive) ?: JsonNull)
+        }
+    })
+
+    internal fun decodePurchaseRecord(root: JsonObject): PurchaseRecord {
         requireKeysAllowingOptional(
             root,
             PURCHASE_RECORD_REQUIRED_KEYS,
@@ -495,6 +505,16 @@ object YeonsikOcrV4Json {
                 description = line.nullableString("description"),
                 sellerOverride = line.nullableString("seller_override"),
                 optionText = line.nullableString("option_text"),
+                optionItems = if ("option_items" !in line) emptyList() else line.arrayValue("option_items").map {
+                    val option = it.jsonObject
+                    requireKeys(option, OPTION_KEYS, "purchase_record.line_items.option_items")
+                    PurchaseOption(
+                        optionKey = option.string("option_key"),
+                        description = option.string("description"),
+                        quantity = option.nullableNumber("quantity"),
+                        amountKrw = option.nullableLong("amount_krw"),
+                    )
+                },
                 priceStatus = when {
                     "price_status" !in line -> "itemized"
                     line["price_status"] == JsonNull -> "unknown"
@@ -581,7 +601,7 @@ object YeonsikOcrV4Json {
         )
     }
 
-    private fun validatePurchaseEvidence(
+    internal fun validatePurchaseEvidence(
         source: IngestionSource,
         productCandidates: List<ProductCandidate>,
         records: List<PurchaseRecord>,
@@ -657,7 +677,7 @@ object YeonsikOcrV4Json {
             .mapValues { (_, value) -> value.takeUnless { it == JsonNull }?.jsonPrimitive?.contentOrNull }
     }
 
-    private fun decodeReview(
+    internal fun decodeReview(
         root: JsonObject,
         productCandidates: List<ProductCandidate>,
         records: List<PurchaseRecord>,
@@ -860,8 +880,9 @@ object YeonsikOcrV4Json {
         "unit_price_amount_krw", "gross_amount_krw", "discount_amount_krw", "net_amount_krw",
     )
     private val LINE_OPTIONAL_KEYS = setOf(
-        "line_key", "option_text", "price_status", "merchant_sku",
+        "line_key", "option_text", "option_items", "price_status", "merchant_sku",
     )
+    private val OPTION_KEYS = setOf("option_key", "description", "quantity", "amount_krw")
     private val EVIDENCE_KEYS = setOf(
         "source_type", "source_attachment_ids", "source_ref", "field", "observed_value",
     )
