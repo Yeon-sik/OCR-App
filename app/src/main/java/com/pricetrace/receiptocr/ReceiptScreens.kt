@@ -87,6 +87,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
 import com.pricetrace.receiptocr.BuildConfig
+import com.pricetrace.receiptocr.publishing.ui.NutritionPublicationEntry
 import com.pricetrace.receiptocr.pricetrace.CashOsLedgerCandidate
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -3183,6 +3184,16 @@ private fun NutritionReviewScreen(
                         draft.status.wireValue == "user_verified" -> "검수 확정하고 Fitness에 보내기"
                         else -> "검수 확정하고 Fitness에 보내기"
                     },
+                )
+            }
+        }
+        if (!isCanonicalReview) {
+            item {
+                NutritionPublicationEntry(
+                    draft = draft,
+                    pages = pages,
+                    resolvePageFile = resolvePageFile,
+                    isBusy = isPublishing || isAiLoading,
                 )
             }
         }
