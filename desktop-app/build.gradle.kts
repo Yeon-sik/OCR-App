@@ -37,6 +37,14 @@ compose.desktop {
     }
 }
 
+tasks.withType<org.gradle.api.tasks.JavaExec>().configureEach {
+    if (System.getenv("YEONSIK_INGESTION_ENV_FILE").isNullOrBlank()) {
+        rootProject.file(".env").takeIf { it.isFile }?.let { envFile ->
+            environment("YEONSIK_INGESTION_ENV_FILE", envFile.absolutePath)
+        }
+    }
+}
+
 tasks.withType<Test>().configureEach {
     useJUnit()
 }

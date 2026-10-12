@@ -260,8 +260,8 @@ class DesktopBatchCoordinator(
         duplicateOfIngestionId: String? = item.duplicateOfIngestionId,
     ): DesktopBatchWorkItem {
         val session = state.session
-        val activeProjections = session?.projections.orEmpty().filterNot {
-            it.status == ProjectionStatus.DISABLED
+        val activeProjections = session?.projections.orEmpty().filter {
+            it.projection in state.envelope?.let(com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner::deliveryProjections).orEmpty()
         }
         val archiveStatus = state.bundleMetadata?.archiveStatus
         val verified = session?.let {

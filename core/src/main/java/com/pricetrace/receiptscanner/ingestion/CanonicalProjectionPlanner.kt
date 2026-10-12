@@ -23,6 +23,22 @@ data class CanonicalProjectionPlan(
 }
 
 object CanonicalProjectionPlanner {
+    /** App delivery excludes optional catalogue proposals; required source dependencies stay internal. */
+    fun deliveryProjections(envelope: YeonsikOcrEnvelope): Set<IngestionProjection> {
+        val plan = plan(envelope)
+        val optional = setOf(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE,
+            IngestionProjection.PRICETRACE_MERCHANT_CANDIDATE) +
+            if (envelope.receipt == null) setOf(IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK) else emptySet()
+        if ((plan.eligible - optional).isEmpty() && envelope.nutrition.isEmpty()) return plan.eligible
+        return buildSet {
+            fun include(projection: IngestionProjection) {
+                if (!add(projection)) return
+                plan.dependencies[projection].orEmpty().forEach(::include)
+            }
+            (plan.eligible - optional).forEach(::include)
+        }
+    }
+
     fun plan(envelope: YeonsikOcrEnvelope): CanonicalProjectionPlan {
         val priceTraceRecordCompatibility = envelope.purchaseRecords.associate { record ->
             record.clientKey to record.priceTraceSubmissionCompatibility
@@ -82,7 +98,7 @@ object CanonicalProjectionPlanner {
                 add(IngestionProjection.FITNESS_MEAL)
             }
             if (envelope.purchaseRecords.isEmpty() &&
-                envelope.productCandidates.isNotEmpty() &&
+                (envelope.receipt != null || envelope.productCandidates.isNotEmpty()) &&
                 envelope.nutrition.any { it is IngestionNutrition.ProductLabel }
             ) {
                 add(IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK)
@@ -153,7 +169,8 @@ object CanonicalProjectionPlanner {
         }
         if (requested.contains(IngestionProjection.FITNESS_MEAL)) add(IngestionProjection.FITNESS_NUTRITION)
         if (requested.contains(IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK)) {
-            add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
+            if (envelope.receipt != null) add(IngestionProjection.PRICETRACE_RECEIPT)
+            else add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
             add(IngestionProjection.FITNESS_NUTRITION)
         }
     }
@@ -205,7 +222,8 @@ object CanonicalProjectionPlanner {
             }
             IngestionProjection.FITNESS_MEAL -> add(IngestionProjection.FITNESS_NUTRITION)
             IngestionProjection.FITNESS_PRODUCT_NUTRITION_LINK -> {
-                add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
+                if (envelope.receipt != null) add(IngestionProjection.PRICETRACE_RECEIPT)
+                else add(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
                 add(IngestionProjection.FITNESS_NUTRITION)
             }
             else -> Unit

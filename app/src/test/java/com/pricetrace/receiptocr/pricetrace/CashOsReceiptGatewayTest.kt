@@ -25,6 +25,43 @@ import org.junit.Test
 
 class CashOsReceiptGatewayTest {
     @Test
+    fun informationalVatSummaryPreservesPrintedTaxWithoutAddingToThePayableTotal() = runTest {
+        for (scenario in listOf("summary", "missing-authority", "wrong-total", "missing-product-net", "payable-tax")) {
+            val base = mapperReceipt()
+            val tax = base.lineItems.last().copy(id = "tax-summary", type = ReceiptLineType.TAX,
+                description = "VAT included 540", netAmountMinor = if (scenario == "payable-tax") 10 else null,
+                taxAmountMinor = 540)
+            val receipt = base.copy(lineItems = base.lineItems.map {
+                if (scenario == "missing-product-net" && it.type == ReceiptLineType.PRODUCT) it.copy(netAmountMinor = null) else it
+            } + tax, totals = base.totals.copy(taxAmountMinor = 540,
+                grandTotalAmountMinor = when (scenario) { "wrong-total" -> 46; "payable-tax" -> 55; else -> 45 }))
+            val transport = QueueTransport(PriceObservationHttpResponse(200,
+                """[{"ledger_entry_id":"ledger-1","receipt_id":"receipt-1","replayed":false,"item_count":5,"category_id":null,"account_id":null,"category_resolution":"unresolved","account_resolution":"unresolved","account_candidate_ids":[]}]"""))
+            val request = ProjectionRequest("summary", IngestionProjection.CASHOS_RECEIPT, "{}", "same-key",
+                resolvedIdentity = ProjectionIdentity(priceTrace = PriceTraceIdentity("pt-receipt", storeId = "store-1",
+                    lines = if (scenario == "missing-authority") emptyList() else listOf(
+                        PriceTraceLineIdentity(sourceLineId = "tax-summary", resolutionStatus = "semantic_only")))),
+                envelope = YeonsikOcrEnvelope(IngestionMode.PACKAGED_PRODUCT, IngestionSource("test", emptyList()), receipt = receipt),
+                localDocumentId = "summary-document")
+            val result = CashOsCanonicalProjectionSubmitter(CashOsReceiptGateway(FakeStore(signedIn()), transport)).submit(request)
+            if (scenario in setOf("summary", "payable-tax")) {
+                assertTrue("$scenario: $result", result is ProjectionSubmission.Success)
+                val body = Json.parseToJsonElement(transport.requests.single().body!!).jsonObject
+                val items = body.getValue("p_items").jsonArray.map { it.jsonObject }
+                assertEquals(5, items.size)
+                assertEquals(540, items.last()["tax_amount_krw"]!!.jsonPrimitive.intOrNull)
+                assertEquals(if (scenario == "summary") 0 else 10, items.last()["net_amount_krw"]!!.jsonPrimitive.intOrNull)
+                assertEquals(body["p_grand_total_amount_krw"]!!.jsonPrimitive.intOrNull,
+                    items.sumOf { it["net_amount_krw"]!!.jsonPrimitive.intOrNull!! })
+                assertEquals(if (scenario == "summary") null else 10L, receipt.lineItems.last().netAmountMinor)
+            } else {
+                assertTrue("$scenario: $result", result is ProjectionSubmission.Failure)
+                assertTrue(transport.requests.isEmpty())
+            }
+        }
+    }
+
+    @Test
     fun v5PurchaseReusesTheExistingTransactionV4Adapter() = runTest {
         val envelope = com.pricetrace.receiptscanner.ingestion.YeonsikOcrV5Json.decode(
             java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5",

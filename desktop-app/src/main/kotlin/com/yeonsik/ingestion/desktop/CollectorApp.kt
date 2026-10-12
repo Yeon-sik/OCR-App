@@ -1,5 +1,7 @@
 package com.yeonsik.ingestion.desktop
 
+import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.FocusRequester
@@ -84,6 +86,7 @@ fun YeonsikCollectorApp(
 
     val activeProjections = state.session?.projections.orEmpty()
         .filterNot { it.status == ProjectionStatus.DISABLED }
+        .filter { it.projection in state.envelope?.let(CanonicalProjectionPlanner::deliveryProjections).orEmpty() }
         .map { it.projection }
         .toSet()
     val effectiveSelectedProjections = selectedProjections?.intersect(activeProjections) ?: activeProjections
@@ -185,7 +188,7 @@ fun YeonsikCollectorApp(
                     onDropBundles = importBundles,
                     onVerificationBasisSelected = { verificationBasis = it },
                     onProjectionSelected = { projection ->
-                        val next = effectiveSelectedProjections.toMutableSet()
+                        val next = (selectedProjections ?: activeProjections).toMutableSet()
                         if (!next.add(projection)) next.remove(projection)
                         selectedProjections = next
                     },

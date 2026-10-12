@@ -1,5 +1,9 @@
 package com.pricetrace.receiptocr
 
+import com.pricetrace.receiptscanner.ingestion.destination
+import com.pricetrace.receiptscanner.ingestion.contentLabel
+import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner
+
 import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -967,7 +971,7 @@ private fun CanonicalJsonValidatorScreen(
     var technicalOpen by rememberSaveable { mutableStateOf(false) }
     var reviewTab by remember { mutableStateOf(ReviewTab.STRUCTURED) }
     val plan = state.plan
-    val eligible = plan?.eligible.orEmpty().sortedBy(IngestionProjection::wireValue)
+    val eligible = state.envelope?.let(CanonicalProjectionPlanner::deliveryProjections).orEmpty().sortedBy(IngestionProjection::wireValue)
     val disabled = plan?.disabled.orEmpty().sortedBy(IngestionProjection::wireValue)
     val bundleActive = state.bundle != null || state.bundleValidationStatus != null
     val revisionReady = state.reviewFieldErrors.isEmpty() && (state.bundle?.let { bundle ->
@@ -1145,16 +1149,16 @@ private fun CanonicalJsonValidatorScreen(
                         if (eligible.isEmpty()) {
                             Text("현재 보낼 수 있는 대상이 없습니다.", color = MaterialTheme.colorScheme.error)
                         } else {
-                            eligible.forEach { projection ->
+                            eligible.groupBy { it.destination() }.forEach { (destination, projections) ->
                                 Row(
-                                    Modifier.fillMaxWidth().testTag("canonical_projection_${projection.wireValue}"),
+                                    Modifier.fillMaxWidth().testTag("canonical_destination_${destination.name}"),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                 ) {
-                                    Text(ReceiptDeliveryLabels.projection(projection), Modifier.weight(1f))
+                                    Text("${destination.label} · ${destination.contentLabel(projections.toSet())}", Modifier.weight(1f))
                                     Checkbox(
-                                        checked = projection in state.selectedProjections,
-                                        onCheckedChange = { checked -> onProjectionSelected(projection, checked) },
+                                        checked = projections.all { it in state.selectedProjections },
+                                        onCheckedChange = { checked -> projections.forEach { onProjectionSelected(it, checked) } },
                                         enabled = !state.busy,
                                     )
                                 }
@@ -1175,14 +1179,9 @@ private fun CanonicalJsonValidatorScreen(
             }
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    state.selectedProjections.forEach { projection ->
-                        plan.dependencies[projection]?.takeIf { it.isNotEmpty() }?.let { dependencies ->
-                            Text("${ReceiptDeliveryLabels.projection(projection)} · 먼저 처리: ${dependencies.joinToString { ReceiptDeliveryLabels.projection(it) }}")
-                        }
-                    }
-                    state.session?.projections?.filterNot { it.status == ProjectionStatus.DISABLED }?.forEach { result ->
-                        Text("${ReceiptDeliveryLabels.projection(result.projection)} · ${ReceiptDeliveryLabels.projectionStatus(result.status)}")
-                        result.lastError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    state.session?.projections?.filter { it.projection in eligible }?.groupBy { it.projection.destination() }?.forEach { (destination, results) ->
+                        Text("${destination.label} · ${if (results.all { it.status == ProjectionStatus.UPLOADED }) "전송 완료" else "전송 확인 필요"}")
+                        results.mapNotNull { it.lastError }.distinct().forEach { Text(it, color = MaterialTheme.colorScheme.error) }
                     }
                     Text("이미 전송한 대상은 유지됩니다. 실패한 대상을 선택해 다시 보낼 수 있습니다.", style = MaterialTheme.typography.bodySmall)
                 }

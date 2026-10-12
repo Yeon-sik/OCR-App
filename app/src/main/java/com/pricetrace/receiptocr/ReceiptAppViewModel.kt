@@ -2107,9 +2107,10 @@ class ReceiptAppViewModel(
                 message = null,
             )
             try {
-                val projections = ingestionOrchestrator.submitAllReadyProjections(
+                val projections = ingestionOrchestrator.submitSelectedProjections(
                     ingestionId = ingestionIdFor(documentId),
                     envelope = envelope,
+                    selectedProjections = com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner.deliveryProjections(envelope),
                 )
                 projections
                     .filter { it.status != ProjectionStatus.DISABLED }

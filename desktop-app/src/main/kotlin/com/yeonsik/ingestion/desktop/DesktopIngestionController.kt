@@ -1,5 +1,7 @@
 package com.yeonsik.ingestion.desktop
 
+import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner
+
 import com.pricetrace.receiptscanner.ingestion.CanonicalImportResult
 import com.pricetrace.receiptscanner.ingestion.CanonicalIngestionUseCase
 import com.pricetrace.receiptscanner.ingestion.IngestionArtifactKeys
@@ -117,7 +119,7 @@ class DesktopIngestionController(
             hasError = record.bundle?.archiveStatus == DesktopEvidenceArchiveStatus.FAILED ||
                 record.bundle?.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.FAILED ||
                 record.session.projections.any { it.status == ProjectionStatus.FAILED },
-            completed = record.session.projections.filterNot { it.status == ProjectionStatus.DISABLED }
+            completed = record.session.projections.filter { it.projection in envelope?.let(CanonicalProjectionPlanner::deliveryProjections).orEmpty() }
                 .let { projections -> projections.isNotEmpty() && projections.all { it.status == ProjectionStatus.UPLOADED } },
         )
     }
@@ -204,7 +206,8 @@ class DesktopIngestionController(
                         archiveStatus = DesktopEvidenceArchiveStatus.NOT_STARTED,
                         )
                         val canonicalJson = YeonsikOcrEnvelopeCodec.encode(result.envelope)
-                        persistRecord(result.session, importedBundle.canonicalJson, canonicalJson, evidence, metadata)
+                        structuredReviewController = null
+                        persistRecord(result.session, importedBundle.canonicalJson, canonicalJson, evidence, metadata, emptyList())
                         publish(
                             result.session,
                             result.envelope,
@@ -214,6 +217,7 @@ class DesktopIngestionController(
                             "번들 검증 및 증거 연결이 완료되었습니다. 보관을 시작합니다.",
                             null,
                             metadata,
+                            reviewEdits = emptyList(),
                         )
                         archiveAfterImport = true
                         onPhase(DesktopBundleImportPhase.ARCHIVING)
@@ -233,6 +237,8 @@ class DesktopIngestionController(
                 notice = null,
                 bundleMetadata = null,
                 bundleValidationStatus = DesktopBundleValidationStatus.INVALID,
+                reviewEdits = emptyList(),
+                reviewFieldErrors = emptyMap(),
             )
         } finally {
             endBusy()
@@ -548,6 +554,7 @@ class DesktopIngestionController(
                 return
             }
             if (startNewIngestion) {
+                structuredReviewController = null
                 _state.value = current.copy(
                     rawJson = value,
                     canonicalJson = "",
@@ -560,6 +567,7 @@ class DesktopIngestionController(
                     bundleMetadata = null,
                     bundleValidationStatus = null,
                     reviewEdits = emptyList(),
+                    reviewFieldErrors = emptyMap(),
                     error = null,
                     notice = null,
                 )
@@ -667,7 +675,7 @@ class DesktopIngestionController(
                 com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson.hasPendingOcrResolution(it.metadataJson)
             }) {
                 val authenticationErrors = bundle.ensureAuthenticated(
-                    setOf(IngestionProjection.PRICETRACE_RECEIPT, IngestionProjection.FITNESS_NUTRITION),
+                    setOf(IngestionProjection.PRICETRACE_RECEIPT, IngestionProjection.PRICETRACE_PRICE_OBSERVATION, IngestionProjection.FITNESS_NUTRITION),
                     currentEnvelope(),
                 )
                 require(authenticationErrors.isEmpty()) { authenticationErrors.joinToString(" ") }
@@ -781,7 +789,7 @@ class DesktopIngestionController(
                 error("전송하려면 검수한 자료를 먼저 검수 완료 처리하세요.")
             }
             val plan = useCase.plan(envelope)
-            val selected = if (selectedProjections.isEmpty()) plan.eligible else {
+            val selected = if (selectedProjections.isEmpty()) CanonicalProjectionPlanner.deliveryProjections(envelope) else {
                 selectedProjections.intersect(plan.eligible)
             }
             if (selected.isEmpty()) error("전송할 수 있는 대상이 선택되지 않았습니다.")
@@ -885,7 +893,9 @@ class DesktopIngestionController(
         }
     } ?: error("파싱된 정본 자료가 없습니다.")
 
-    private suspend fun loadRecord(record: DesktopSessionRecord, notice: String) {
+    private suspend fun loadRecord(savedRecord: DesktopSessionRecord, notice: String) {
+        val record = removeInheritedBundleEdits(savedRecord)
+        structuredReviewController = null
         require(record.canonicalJson.isNotBlank()) { "저장된 세션에 정본 JSON이 없습니다." }
         val envelope = YeonsikOcrEnvelopeCodec.decode(
             value = record.canonicalJson,
@@ -906,7 +916,7 @@ class DesktopIngestionController(
         }
         val session = useCase.prepareExistingSession(record.session.ingestionId, envelope, restoredSnapshot = true)
             ?: error("저장된 수집 세션을 복구하지 못했습니다.")
-        if (session != record.session) {
+        if (session != record.session || record != savedRecord) {
             store.saveRecord(record.copy(session = session))
         }
         publish(
@@ -928,7 +938,7 @@ class DesktopIngestionController(
         canonicalJson: String,
         evidence: List<DesktopEvidenceAttachment>,
         bundleMetadata: DesktopBundleMetadata? = _state.value.bundleMetadata,
-        reviewEdits: List<CanonicalReviewEdit> = _state.value.reviewEdits,
+        reviewEdits: List<CanonicalReviewEdit> = _state.value.takeIf { it.ingestionId == session.ingestionId }?.reviewEdits.orEmpty(),
     ) {
         store.saveRecord(
             DesktopSessionRecord(
@@ -951,7 +961,7 @@ class DesktopIngestionController(
         notice: String?,
         error: String?,
         bundleMetadata: DesktopBundleMetadata? = _state.value.bundleMetadata,
-        reviewEdits: List<CanonicalReviewEdit> = _state.value.reviewEdits,
+        reviewEdits: List<CanonicalReviewEdit> = _state.value.takeIf { it.ingestionId == session.ingestionId }?.reviewEdits.orEmpty(),
         reviewFieldErrors: Map<String, String> = emptyMap(),
     ) {
         _state.value = DesktopUiState(

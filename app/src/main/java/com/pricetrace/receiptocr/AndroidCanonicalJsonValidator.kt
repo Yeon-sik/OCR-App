@@ -1,5 +1,7 @@
 package com.pricetrace.receiptocr
 
+import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner
+
 import com.pricetrace.receiptscanner.ingestion.CanonicalIngestionUseCase
 import com.pricetrace.receiptscanner.ingestion.CanonicalImportResult
 import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlan
@@ -185,7 +187,7 @@ class AndroidCanonicalJsonValidator(
                         session = result.session,
                         plan = plan,
                         evidence = evidence,
-                        selectedProjections = plan.eligible,
+                        selectedProjections = CanonicalProjectionPlanner.deliveryProjections(result.envelope),
                         verificationBasis = VerificationBasis.SOURCE_EVIDENCE,
                         bundle = AndroidBundleState(
                             sourceName = sourceName,
@@ -326,7 +328,8 @@ class AndroidCanonicalJsonValidator(
             )
             is CanonicalImportResult.Success -> {
                 val plan = useCase.plan(result.envelope)
-                val selected = base.selectedProjections.intersect(plan.eligible).ifEmpty { plan.eligible }
+                val selected = base.selectedProjections.intersect(CanonicalProjectionPlanner.deliveryProjections(result.envelope))
+                    .ifEmpty { CanonicalProjectionPlanner.deliveryProjections(result.envelope) }
                 base.copy(
                     rawJson = rawJson,
                     canonicalJson = YeonsikOcrEnvelopeCodec.encode(result.envelope),
@@ -586,7 +589,7 @@ class AndroidCanonicalJsonValidator(
             envelope = edited,
             session = session,
             plan = plan,
-            selectedProjections = state.selectedProjections.intersect(plan.eligible),
+            selectedProjections = state.selectedProjections.intersect(CanonicalProjectionPlanner.deliveryProjections(edited)),
             reviewEdits = reviewEdits,
             reviewFieldErrors = state.reviewFieldErrors,
             bundle = bundle,
@@ -650,7 +653,7 @@ class AndroidCanonicalJsonValidator(
             session = session,
             plan = plan,
             evidence = evidence,
-            selectedProjections = recovery.selectedProjections.intersect(plan.eligible),
+            selectedProjections = recovery.selectedProjections.intersect(CanonicalProjectionPlanner.deliveryProjections(envelope)),
             verificationBasis = recovery.verificationBasis,
             bundle = recoveredBundle,
             reviewEdits = recovery.reviewEdits,
@@ -784,7 +787,7 @@ class AndroidCanonicalJsonValidator(
         }
         val ingestionId = requireNotNull(state.ingestionId) { "Ingestion id is missing." }
         val plan = useCase.plan(envelope)
-        val selected = state.selectedProjections.intersect(plan.eligible)
+        val selected = state.selectedProjections.intersect(CanonicalProjectionPlanner.deliveryProjections(envelope))
         require(selected.isNotEmpty()) { "Select at least one eligible projection." }
         val projections = useCase.submitSelected(ingestionId, envelope, selected)
         val session = useCase.session(ingestionId)

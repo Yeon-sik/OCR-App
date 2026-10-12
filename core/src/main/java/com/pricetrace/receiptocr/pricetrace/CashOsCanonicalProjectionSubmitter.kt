@@ -2,6 +2,7 @@ package com.pricetrace.receiptocr.pricetrace
 
 import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.domain.ReceiptV2LineItem
+import com.pricetrace.receiptscanner.domain.ReceiptLineType
 import com.pricetrace.receiptscanner.domain.StableIds
 import com.pricetrace.receiptscanner.domain.purchaseLocalTime
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
@@ -264,6 +265,16 @@ class CashOsCanonicalProjectionSubmitter(
         val grandTotal = receipt.totals.grandTotalAmountMinor
             ?: error("cashos_grand_total_missing")
         require(grandTotal >= 0) { "cashos_grand_total_must_be_non_negative" }
+        // A printed VAT summary can have no additional payable amount. Only map its
+        // accounting contribution to zero when PT calls it semantic-only and all
+        // observed payable rows already reconcile, without changing source facts.
+        val missingNetLines = receipt.lineItems.filter { it.netAmountMinor == null }
+        val informationalTaxSummary = missingNetLines.isNotEmpty() &&
+            missingNetLines.all { it.type == ReceiptLineType.TAX &&
+                it.taxAmountMinor != null &&
+                priceTraceIdentity.lineFor(it.id)?.resolutionStatus == "semantic_only" } &&
+            missingNetLines.mapNotNull { it.taxAmountMinor }.fold(0L, Math::addExact) == receipt.totals.taxAmountMinor &&
+            receipt.lineItems.mapNotNull { it.netAmountMinor }.fold(0L, Math::addExact) == grandTotal
         return CashOsReceiptIngestV3Payload(
             idempotencyKey = request.idempotencyKey,
             documentId = localDocumentId,
@@ -284,14 +295,15 @@ class CashOsCanonicalProjectionSubmitter(
             paymentMethodHint = request.envelope?.classificationHints?.get("cashos.payment_method_hint")
                 ?: receipt.payments.firstOrNull()?.method,
             institutionHint = request.envelope?.classificationHints?.get("cashos.institution_hint"),
-            items = receipt.lineItems.map { item -> toItem(item, priceTraceIdentity) },
+            items = receipt.lineItems.map { item -> toItem(item, priceTraceIdentity, informationalTaxSummary) },
         )
     }
 
-    private fun toItem(item: ReceiptV2LineItem, priceTraceIdentity: PriceTraceIdentity): CashOsReceiptIngestV3Item {
+    private fun toItem(item: ReceiptV2LineItem, priceTraceIdentity: PriceTraceIdentity, informationalTaxSummary: Boolean): CashOsReceiptIngestV3Item {
         val description = item.description?.trim()?.takeIf(String::isNotEmpty)
             ?: error("cashos_line_description_missing:${item.id}")
-        val net = item.netAmountMinor ?: error("cashos_line_net_missing:${item.id}")
+        val net = item.netAmountMinor ?: if (informationalTaxSummary && item.type == ReceiptLineType.TAX) 0L
+            else error("cashos_line_net_missing:${item.id}")
         val lineIdentity = priceTraceIdentity.lineFor(item.id)
         return CashOsReceiptIngestV3Item(
             receiptItemId = item.id,

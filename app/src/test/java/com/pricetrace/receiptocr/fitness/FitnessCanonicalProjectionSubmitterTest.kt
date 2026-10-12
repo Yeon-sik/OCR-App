@@ -39,6 +39,47 @@ import org.junit.Test
 
 class FitnessCanonicalProjectionSubmitterTest {
     @Test
+    fun productLabelUsesOnlyItsExactCatalogIdentityAndAllowsPrivateImportWhileCandidateIsPending() = runTest {
+        val original = com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec.decode(
+            java.io.File("../examples/yeonsik-ocr.v2.packaged-product.example.json").readText(), "label")
+        val item = original.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>().single()
+        val label = item.copy(lineId = "label-line", draft = NutritionLabelDraft(
+            documentId = "label", productName = "Test cereal", basisAmount = 100.0, basisUnit = "g",
+            nutrients = NutritionField.requiredFields.associateWith { 10.0 },
+        ).asUserVerified("2026-10-12T00:00:00Z"))
+        val catalogId = "11111111-1111-4111-8111-111111111111"
+        for (scenario in listOf("pending", "candidate", "receipt-line", "unrelated-line", "conflict")) {
+            val lineCatalogId = when (scenario) { "receipt-line", "unrelated-line" -> catalogId
+                "conflict" -> "22222222-2222-4222-8222-222222222222"; else -> null }
+            val identity = ProjectionIdentity(
+                priceTrace = PriceTraceIdentity("receipt-1", storeId = "store-1", restaurantId = "restaurant-1",
+                    lines = listOf(PriceTraceLineIdentity(sourceLineId = if (scenario == "unrelated-line") "other-line" else "label-line",
+                        catalogProductId = lineCatalogId, resolutionStatus = if (lineCatalogId == null) "unresolved_catalog" else "resolved"))),
+                productCandidates = if (scenario in setOf("candidate", "conflict")) mapOf(item.clientKey to
+                    com.pricetrace.receiptscanner.ingestion.PriceTraceProductIdentity(item.clientKey, catalogId)) else emptyMap(),
+            )
+            val transport = QueueTransport(NutritionHttpResponse(200,
+                """[{"canonical_import_id":"canonical-label","idempotent_replay":false,"nutrition_food_id":"food-label","input_contract":"nutrition-label.v1","projection_source_type":"ocr_app","projection_import_id":"canonical-label-projection","catalog_product_id":null,"estimation_evidence_id":null,"visibility":"private"}]"""))
+            val result = FitnessCanonicalProjectionSubmitter(NutritionSupabaseGateway(FakeStore(signedIn()), transport)).submit(
+                ProjectionRequest("label", IngestionProjection.FITNESS_NUTRITION, "{}", "same-key", resolvedIdentity = identity,
+                    envelope = original.copy(nutrition = listOf(label)), localDocumentId = "label"))
+            if (scenario == "conflict") {
+                assertTrue("$result", result is ProjectionSubmission.Failure)
+                assertTrue(transport.requests.isEmpty())
+                continue
+            }
+            assertTrue("$scenario: $result", result is ProjectionSubmission.Success)
+            val sent = Json.parseToJsonElement(transport.requests.single().body!!).jsonObject["p_pricetrace_identity"]
+            if (scenario in setOf("pending", "unrelated-line")) assertEquals(JsonNull, sent)
+            else {
+                assertEquals(setOf("namespace", "catalog_product_id"), sent!!.jsonObject.keys)
+                assertEquals(catalogId, sent.jsonObject["catalog_product_id"]!!.jsonPrimitive.content)
+                assertEquals("pricetrace", sent.jsonObject["namespace"]!!.jsonPrimitive.content)
+            }
+        }
+    }
+
+    @Test
     fun v5ImportsPrivateNutritionAndKeepsMissingPurchaseAuthorityPending() = runTest {
         val envelope = v5Envelope()
         val transport = QueueTransport(response("canonical-v5", "food-v5"))
@@ -271,8 +312,8 @@ class FitnessCanonicalProjectionSubmitterTest {
             ),
         )
 
-        assertTrue(result is ProjectionSubmission.Failure)
-        assertTrue((result as ProjectionSubmission.Failure).requiresReview)
+        assertTrue(result is ProjectionSubmission.Success)
+        assertEquals("food-food-free-1", (result as ProjectionSubmission.Success).remoteId)
         val request = transport.requests.single()
         assertEquals(
             "https://nutrition.example.com/rest/v1/rpc/import_canonical_nutrition_v2",
