@@ -8,6 +8,18 @@ import com.pricetrace.receiptscanner.ingestion.VerificationBasis
 
 /** Korean display names for the Desktop UI. Contract values remain in the domain models. */
 object DesktopUiLabels {
+    fun ingestionError(message: String): String = when {
+        message == "pricetrace_product_identity_missing" ->
+            "PriceTrace 상품 등록 후보는 저장됐지만, 정식 상품 ID가 아직 없어 영양 정보를 연결할 수 없습니다."
+        message == "restaurant_source_identity_missing" || message == "restaurant_source_identity_insufficient" ->
+            "구매 원본은 저장됐지만 매장을 식별할 출처 정보가 부족합니다."
+        message.startsWith("pricetrace_purchase_line_identity_metadata_missing") ->
+            "영양 정보의 공개 연결을 완료하려면 PriceTrace의 매장·메뉴 확인이 필요합니다."
+        message == "accepted_purchase_source_revision_conflict" ->
+            "이미 저장된 구매의 가격·날짜·메뉴·원본 정보는 이 복구 작업에서 바꿀 수 없습니다."
+        else -> message
+    }
+
     fun batchItemStatus(value: DesktopBatchItemStatus): String = when (value) {
         DesktopBatchItemStatus.QUEUED -> "대기"
         DesktopBatchItemStatus.IMPORTING -> "가져오는 중"
