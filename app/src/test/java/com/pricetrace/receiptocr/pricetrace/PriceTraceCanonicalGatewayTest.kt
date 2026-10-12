@@ -43,6 +43,115 @@ import org.junit.Test
 
 class PriceTraceCanonicalGatewayTest {
     @Test
+    fun confirmedParsedReceiptSurvivesRestoreAndSendsVerifiedSanitizedRpcPayload() = runTest {
+        val envelope = parsedReceiptEnvelope()
+        val evidence = envelope.source.sourceFiles.map { LocalEvidence(it.id, it.type, true) }
+        val store = InMemoryIngestionSessionStore()
+        val transport = QueueTransport(PriceObservationHttpResponse(200, """{"receiptId":"receipt-1"}"""))
+        val useCase = CanonicalIngestionUseCase(store, submitters = mapOf(
+            IngestionProjection.PRICETRACE_RECEIPT to PriceTraceCanonicalProjectionSubmitter(
+                PriceTraceCanonicalGateway(FakeStore(signedIn()), transport),
+            ),
+        ))
+        val imported = useCase.importJson(YeonsikOcrEnvelopeCodec.encode(envelope), "reviewed-receipt", evidence = evidence)
+            as CanonicalImportResult.Success
+        val confirmation = useCase.confirm(imported.session.ingestionId, imported.envelope, evidence)
+        assertTrue(confirmation.result.toString(), confirmation.result is IngestionStartResult.Success)
+        assertEquals(TranscriptionStatus.PARSED, envelope.receipt!!.document.source.transcriptionStatus)
+        assertEquals(TranscriptionStatus.USER_VERIFIED, confirmation.envelope.receipt!!.document.source.transcriptionStatus)
+        val restored = useCase.strictDecode(YeonsikOcrEnvelopeCodec.encodePersisted(confirmation.envelope),
+            "reviewed-receipt", preservePersistedVerification = true)
+        val result = useCase.submitSelected(imported.session.ingestionId, restored, setOf(IngestionProjection.PRICETRACE_RECEIPT))
+        assertEquals(ProjectionStatus.UPLOADED, result.single { it.projection == IngestionProjection.PRICETRACE_RECEIPT }.status)
+        assertVerifiedSanitizedReceipt(transport.requests.single())
+        useCase.retrySelected(imported.session.ingestionId, restored, setOf(IngestionProjection.PRICETRACE_RECEIPT))
+        assertEquals(1, transport.requests.size)
+    }
+
+    @Test
+    fun legacyParsedReceiptRequiresDurableArtifactApprovalAndKeepsReplayKeyAndUploadedSibling() = runTest {
+        val envelope = parsedReceiptEnvelope().copy(review = IngestionReview(IngestionReviewStatus.READY))
+        val evidence = envelope.source.sourceFiles.map { LocalEvidence(it.id, it.type, true) }
+        val store = InMemoryIngestionSessionStore()
+        val transport = QueueTransport(PriceObservationHttpResponse(200, """{"receiptId":"receipt-1"}"""))
+        val orchestrator = IngestionOrchestrator(store, submitters = mapOf(
+            IngestionProjection.PRICETRACE_RECEIPT to PriceTraceCanonicalProjectionSubmitter(
+                PriceTraceCanonicalGateway(FakeStore(signedIn()), transport),
+            ),
+        ))
+        orchestrator.start("legacy-review", "legacy-document", envelope, evidence)
+        // Producer READY alone must never grant receipt approval.
+        val blocked = orchestrator.submitProjection("legacy-review", IngestionProjection.PRICETRACE_RECEIPT, envelope)
+        assertEquals("projection_not_reverified", blocked.lastError)
+        assertTrue(transport.requests.isEmpty())
+        val unapproved = requireNotNull(store.get("legacy-review"))
+        store.save(unapproved.copy(projections = unapproved.projections.map {
+            if (it.projection == IngestionProjection.PRICETRACE_RECEIPT) it.copy(
+                lastError = """{"code":"22023","message":"only privacy-sanitized user_verified receipt.v2 is accepted"}""",
+            ) else it
+        }))
+        orchestrator.retrySelectedProjections("legacy-review", envelope, setOf(IngestionProjection.PRICETRACE_RECEIPT))
+        assertTrue(transport.requests.isEmpty())
+        orchestrator.markReceiptVerified("legacy-review", envelope, evidence)
+        val approved = requireNotNull(store.get("legacy-review"))
+        val uploadedProduct = approved.projections.single { it.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE }
+            .copy(status = ProjectionStatus.UPLOADED, remoteId = "existing-product", attemptCount = 1)
+        store.save(approved.copy(projections = approved.projections.map {
+            when (it.projection) {
+                IngestionProjection.PRICETRACE_RECEIPT -> it.copy(status = ProjectionStatus.BLOCKED,
+                    idempotencyKey = "original-receipt-key", attemptCount = 1,
+                    lastError = """{"code":"22023","message":"only privacy-sanitized user_verified receipt.v2 is accepted"}""")
+                IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE -> uploadedProduct
+                else -> it
+            }
+        }))
+        val result = orchestrator.retrySelectedProjections("legacy-review", envelope, setOf(IngestionProjection.PRICETRACE_RECEIPT))
+            .single { it.projection == IngestionProjection.PRICETRACE_RECEIPT }
+        assertEquals(ProjectionStatus.UPLOADED, result.status)
+        assertEquals(2, result.attemptCount)
+        assertEquals("original-receipt-key", result.idempotencyKey)
+        assertEquals(uploadedProduct, store.get("legacy-review")!!.projections.single {
+            it.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE
+        })
+        assertVerifiedSanitizedReceipt(transport.requests.single())
+        assertEquals("original-receipt-key", Json.parseToJsonElement(transport.requests.single().body!!)
+            .jsonObject["p_idempotency_key"]!!.jsonPrimitive.content)
+        assertEquals(TranscriptionStatus.PARSED, envelope.receipt!!.document.source.transcriptionStatus)
+    }
+
+    @Test
+    fun gatewayRejectsParsedReceiptWithoutSendingRpc() = runTest {
+        val transport = QueueTransport()
+        val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .submitVerifiedReceipt("unreviewed", parsedReceiptEnvelope().receipt!!)
+        assertEquals("receipt_not_user_verified", (result as PriceTraceCanonicalOutcome.Failure).message)
+        assertTrue(transport.requests.isEmpty())
+    }
+
+    private fun parsedReceiptEnvelope(): YeonsikOcrEnvelope {
+        val base = YeonsikOcrEnvelopeCodec.decode(java.io.File("../examples/yeonsik-ocr.v2.packaged-product.example.json")
+            .readText(), "parsed-receipt")
+        val receipt = receipt()
+        return base.copy(
+            receipt = receipt.copy(document = receipt.document.copy(
+                source = receipt.document.source.copy(transcriptionStatus = TranscriptionStatus.PARSED),
+            )),
+            source = base.source.copy(sourceFiles = base.source.sourceFiles + SourceAttachment("receipt-photo", SourceAttachmentType.RECEIPT)),
+            consumption = emptyList(),
+            targets = base.targets - IngestionProjection.FITNESS_MEAL + IngestionProjection.PRICETRACE_RECEIPT,
+        )
+    }
+
+    private fun assertVerifiedSanitizedReceipt(request: PriceObservationHttpRequest) {
+        val receipt = Json.parseToJsonElement(request.body!!).jsonObject["p_receipt"]!!.jsonObject
+        val source = receipt["document"]!!.jsonObject["source"]!!.jsonObject
+        assertEquals("user_verified", source["transcription_status"]!!.jsonPrimitive.content)
+        assertEquals(JsonNull, source["raw_text"])
+        assertTrue(source["source_images"]!!.jsonArray.isEmpty())
+        receipt["payments"]!!.jsonArray.forEach { assertEquals(JsonNull, it.jsonObject["reference"]) }
+    }
+
+    @Test
     fun v5PurchaseUsesV4RpcAndCorrelatesServerResultsByRecordAndLineKeys() = runTest {
         val envelope = YeonsikOcrV5Json.decode(java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5")
         val transport = QueueTransport(PriceObservationHttpResponse(200,
@@ -69,7 +178,7 @@ class PriceTraceCanonicalGatewayTest {
 
     private val v5SourceId = "55555555-5555-4555-8555-555555555555"
     private fun v5AuthorityResponse(sourceId: String = v5SourceId): String = """{
-        "purchaseSourceId":"$sourceId","observationCreated":true,"observationIds":["66666666-6666-4666-8666-666666666666"],
+        "purchaseSourceId":"$sourceId","observationCreated":true,"observationCount":1,"observationIds":["66666666-6666-4666-8666-666666666666"],
         "sourceSaved":true,"sourceAcceptanceStatus":"accepted","lineAuthorityVersion":"purchase-line-authority.v1",
         "lineResults":[{"lineKey":"line-1","kind":"restaurant_purchase","sourceAcceptanceStatus":"accepted",
         "observationCreated":true,"observationStatus":"created","observationType":"restaurant_menu_manual_observation",
@@ -81,6 +190,41 @@ class PriceTraceCanonicalGatewayTest {
     private fun v5Envelope() = YeonsikOcrV5Json.decode(java.io.File("../examples/yeonsik-ocr.v5.restaurant-purchase.example.json").readText(), "v5")
     private fun v5LegacyResponse() = """{"purchaseSourceId":"$v5SourceId","observationCreated":true,"observationIds":["66666666-6666-4666-8666-666666666666"],"lineResults":[{"lineKey":"line-1","observationCreated":true}]}"""
     private fun v5CachedResponse() = """{"schemaVersion":"purchase-price-observation.v4","observationCreated":true,"sources":[${v5LegacyResponse().dropLast(1)},"purchaseRecordClientKey":"purchase-1"}]}"""
+
+    @Test
+    fun v5PendingAuthorityRefetchUpdatesRootCompletionWithoutReingesting() = runTest {
+        val pendingSource = """{"purchaseRecordClientKey":"purchase-1","purchaseSourceId":"$v5SourceId","sourceSaved":true,"sourceAcceptanceStatus":"accepted","lineAuthorityVersion":"purchase-line-authority.v1","lineResults":[{"lineKey":"line-1","kind":"restaurant_purchase","sourceAcceptanceStatus":"accepted","observationCreated":false,"observationStatus":"not_created","authorityStatus":"unresolved","merchantResolutionStatus":"unresolved","menuResolutionStatus":"unresolved","reasonCode":"restaurant_source_identity_missing","authoritativeIds":null}]}"""
+        val cached = Json.parseToJsonElement("""{"observationCreated":false,"sources":[$pendingSource]}""").jsonObject
+        val transport = QueueTransport(PriceObservationHttpResponse(200, v5AuthorityResponse()))
+        val result = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+            .readAcceptedPurchaseResponses(v5Envelope(), cached) as PriceTraceCanonicalOutcome.Success
+        assertEquals(true, result.response["observationCreated"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals(1, result.response["observationCount"]!!.jsonPrimitive.intOrNull)
+        assertEquals(1, transport.requests.size)
+        assertTrue(transport.requests.single().url.endsWith("/get_purchase_price_ingestion_response_v1"))
+    }
+
+    @Test
+    fun v5PurchaseResolutionUsesReviewedSourceSelectorsAndRejectsWrongResponse() = runTest {
+        val resolution = OcrPurchaseMenuResolutionRequest("purchase-1", v5SourceId, "line-1", "coupang_eats", "source-store")
+        val transport = QueueTransport(PriceObservationHttpResponse(200, v5AuthorityResponse()))
+        val result = PriceTraceCanonicalProjectionSubmitter(PriceTraceCanonicalGateway(FakeStore(signedIn()), transport))
+            .resolvePurchaseMenuIdentity(resolution) as ProjectionSubmission.Success
+        assertTrue(result.primaryUploaded)
+        val sent = transport.requests.single()
+        assertTrue(sent.url.endsWith("/resolve_ocr_purchase_restaurant_line_v1"))
+        assertEquals("Bearer access-token", sent.headers["Authorization"])
+        val body = Json.parseToJsonElement(sent.body!!).jsonObject
+        assertEquals(v5SourceId, body["p_purchase_source_id"]!!.jsonPrimitive.content)
+        assertEquals("line-1", body["p_line_key"]!!.jsonPrimitive.content)
+        assertEquals("source-store", body["p_merchant"]!!.jsonObject["source_location_code"]!!.jsonPrimitive.content)
+        assertFalse(body.toString().contains("restaurant_menu_id"))
+        listOf(v5AuthorityResponse("77777777-7777-4777-8777-777777777777"),
+            v5AuthorityResponse().replace("line-1", "wrong-line"), v5LegacyResponse()).forEach { response ->
+            val gateway = PriceTraceCanonicalGateway(FakeStore(signedIn()), QueueTransport(PriceObservationHttpResponse(200, response)))
+            assertTrue(gateway.resolveOcrPurchaseMenu(resolution) is PriceTraceCanonicalOutcome.Failure)
+        }
+    }
 
     @Test
     fun v5LegacyImmediateResponseRecoversOwnerAuthorityWithoutCanonicalUuid() = runTest {

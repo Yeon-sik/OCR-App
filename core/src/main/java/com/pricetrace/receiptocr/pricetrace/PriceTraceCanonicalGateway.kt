@@ -1,6 +1,7 @@
 package com.pricetrace.receiptocr.pricetrace
 
 import com.pricetrace.receiptscanner.domain.ReceiptV2
+import com.pricetrace.receiptscanner.domain.TranscriptionStatus
 import com.pricetrace.receiptscanner.domain.StableIds
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
 import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
@@ -15,6 +16,8 @@ import com.pricetrace.receiptscanner.ingestion.OcrMerchantIdentityResolutionSubm
 import com.pricetrace.receiptscanner.ingestion.OcrMenuIdentityResolutionSubmitter
 import com.pricetrace.receiptscanner.ingestion.OcrReceiptMenuResolutionRequest
 import com.pricetrace.receiptscanner.ingestion.OcrStandaloneMenuResolutionRequest
+import com.pricetrace.receiptscanner.ingestion.OcrPurchaseMenuResolutionRequest
+import com.pricetrace.receiptscanner.ingestion.OcrPurchaseIdentityResolutionSubmitter
 import com.pricetrace.receiptscanner.ingestion.ProductCandidate
 import com.pricetrace.receiptscanner.ingestion.ProductCandidateBarcode
 import com.pricetrace.receiptscanner.ingestion.ProductCandidateEvidence
@@ -135,7 +138,8 @@ class PriceTraceCanonicalGateway(
             val key = requireNotNull(source.requiredStringOrNull("purchaseRecordClientKey"))
             val record = records.getValue(key)
             PurchaseNutritionIdentity.validateLineResults(record, source)
-            if (PurchaseNutritionIdentity.hasAuthorityMetadata(source)) source else {
+            if (PurchaseNutritionIdentity.hasAuthorityMetadata(source) &&
+                PurchaseNutritionIdentity.pendingResolutions(JsonObject(mapOf("sources" to JsonArray(listOf(source)))).encode()).isEmpty()) source else {
                 val sourceId = requireNotNull(source.requiredStringOrNull("purchaseSourceId"))
                 require(java.util.UUID.fromString(sourceId).toString().equals(sourceId, ignoreCase = true)) {
                     "server-issued purchase source ID is invalid"
@@ -154,8 +158,37 @@ class PriceTraceCanonicalGateway(
                 JsonObject(saved + ("purchaseRecordClientKey" to JsonPrimitive(key)))
             }
         }
-        PriceTraceCanonicalOutcome.Success(JsonObject(cached + ("sources" to JsonArray(recovered))))
+        val ids = recovered.flatMap { (it["observationIds"] as? JsonArray).orEmpty() }
+        PriceTraceCanonicalOutcome.Success(JsonObject(cached + mapOf("sources" to JsonArray(recovered),
+            "observationIds" to JsonArray(ids), "observationCount" to JsonPrimitive(ids.size),
+            "observationCreated" to JsonPrimitive(ids.isNotEmpty()))))
     }
+
+    suspend fun resolveOcrPurchaseMenu(request: OcrPurchaseMenuResolutionRequest): PriceTraceCanonicalOutcome =
+        readAcceptedResponse { config ->
+            require(java.util.UUID.fromString(request.purchaseSourceId).toString().equals(request.purchaseSourceId, true))
+            val response = transport.execute(request(config, "POST", "/rest/v1/rpc/resolve_ocr_purchase_restaurant_line_v1",
+                body = buildJsonObject {
+                    put("p_purchase_source_id", JsonPrimitive(request.purchaseSourceId))
+                    put("p_line_key", JsonPrimitive(request.lineKey))
+                    put("p_user_verified", JsonPrimitive(true))
+                    if (request.sourceNamespace != null || request.sourceLocationCode != null) put("p_merchant", buildJsonObject {
+                        put("source_namespace", request.sourceNamespace?.let(::JsonPrimitive) ?: JsonNull)
+                        put("source_location_code", request.sourceLocationCode?.let(::JsonPrimitive) ?: JsonNull)
+                    })
+                }.encode()))
+            if (response.statusCode !in 200..299) return@readAcceptedResponse PriceTraceCanonicalOutcome.Failure(classify(response), response.body)
+            val source = PriceTracePurchaseObservationV4Json.decodeResponse(response.body).raw
+            require(source.requiredStringOrNull("purchaseSourceId") == request.purchaseSourceId)
+            require(PurchaseNutritionIdentity.hasAuthorityMetadata(source)) { "pricetrace_purchase_authority_metadata_missing" }
+            require((source["lineResults"] as? JsonArray)?.singleOrNull {
+                it.jsonObject["lineKey"]?.jsonPrimitive?.contentOrNull == request.lineKey
+            } != null) { "pricetrace_purchase_resolution_line_mismatch" }
+            val bound = JsonObject(source + ("purchaseRecordClientKey" to JsonPrimitive(request.purchaseRecordClientKey)))
+            PriceTraceCanonicalOutcome.Success(JsonObject(mapOf("sources" to JsonArray(listOf(bound)),
+                "observationCreated" to source.getValue("observationCreated"),
+                "observationIds" to source.getValue("observationIds"), "observationCount" to source.getValue("observationCount"))))
+        }
 
     private suspend fun readAcceptedResponse(
         read: suspend (PriceTraceSupabaseConfig) -> PriceTraceCanonicalOutcome,
@@ -180,6 +213,9 @@ class PriceTraceCanonicalGateway(
     }
 
     suspend fun submitVerifiedReceipt(idempotencyKey: String, receipt: ReceiptV2): PriceTraceCanonicalOutcome {
+        if (receipt.document.source.transcriptionStatus != TranscriptionStatus.USER_VERIFIED) {
+            return PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.CONTRACT, "receipt_not_user_verified")
+        }
         val initial = store.read()
         if (!initial.isSignedIn) return PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
         val first = submitReceiptOnce(idempotencyKey, receipt, initial)
@@ -1011,7 +1047,7 @@ class PriceTraceCanonicalGateway(
 
 class PriceTraceCanonicalProjectionSubmitter(
     private val gateway: PriceTraceCanonicalGateway,
-) : IngestionProjectionSubmitter, OcrMerchantIdentityResolutionSubmitter, OcrMenuIdentityResolutionSubmitter,
+) : IngestionProjectionSubmitter, OcrMerchantIdentityResolutionSubmitter, OcrMenuIdentityResolutionSubmitter, OcrPurchaseIdentityResolutionSubmitter,
     OcrProjectionResponseReader {
     override suspend fun readAcceptedProjection(request: ProjectionRequest): ProjectionSubmission {
         val cached = runCatching { Json.parseToJsonElement(request.previousMetadataJson.orEmpty()).jsonObject }.getOrNull()
@@ -1138,6 +1174,9 @@ class PriceTraceCanonicalProjectionSubmitter(
         }
     }
 
+    override suspend fun resolvePurchaseMenuIdentity(request: OcrPurchaseMenuResolutionRequest): ProjectionSubmission =
+        purchaseProjectionResult(gateway.resolveOcrPurchaseMenu(request))
+
     override suspend fun submit(request: ProjectionRequest): ProjectionSubmission {
         val envelope = request.envelope ?: return ProjectionSubmission.Failure("canonical_envelope_missing", retryable = false)
         return when (request.projection) {
@@ -1203,8 +1242,19 @@ class PriceTraceCanonicalProjectionSubmitter(
                         is PriceTraceCanonicalOutcome.Failure -> return result.toProjectionFailure(reviewAware = true)
                     }
                 }
-                val receipt = envelope.receipt
+                val sourceReceipt = envelope.receipt
                     ?: return ProjectionSubmission.Failure("receipt_artifact_missing", retryable = false)
+                // Older locally approved snapshots retained `parsed`. Core's artifact gate is
+                // the proof of review; preserve their canonical fingerprints and replay keys.
+                val receipt = if (sourceReceipt.document.source.transcriptionStatus == TranscriptionStatus.USER_VERIFIED) {
+                    sourceReceipt
+                } else if (request.receiptUserVerified) {
+                    sourceReceipt.copy(document = sourceReceipt.document.copy(
+                        source = sourceReceipt.document.source.copy(transcriptionStatus = TranscriptionStatus.USER_VERIFIED),
+                    ))
+                } else {
+                    return ProjectionSubmission.Failure("receipt_not_user_verified", retryable = false)
+                }
                 if (request.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
                     receipt.lineItems.none { it.isNormalPriceObservationCandidate() }
                 ) {
@@ -1275,8 +1325,13 @@ class PriceTraceCanonicalProjectionSubmitter(
             if (remoteId == null) ProjectionSubmission.Failure("pricetrace_purchase_source_identity_invalid", false)
             else {
                 val created = result.response["observationCreated"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() == true
+                val pending = PurchaseNutritionIdentity.pendingResolutions(result.response.encode()).isNotEmpty()
+                val reason = (result.response["sources"] as? JsonArray).orEmpty().asSequence()
+                    .flatMap { (it.jsonObject["lineResults"] as? JsonArray).orEmpty().asSequence() }
+                    .mapNotNull { (it.jsonObject["reasonCode"] as? JsonPrimitive)?.contentOrNull }.firstOrNull()
                 ProjectionSubmission.Success(remoteId, result.response.encode(), primaryUploaded = created,
-                    primaryPendingReason = if (created) null else "price_observation_not_created")
+                    requiresReview = pending,
+                    primaryPendingReason = if (created) null else reason ?: "price_observation_not_created")
             }
         }
         is PriceTraceCanonicalOutcome.Failure -> ProjectionSubmission.Failure(

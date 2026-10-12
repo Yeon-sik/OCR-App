@@ -101,8 +101,8 @@ object YeonsikOcrV2Json {
             links = links,
             targets = targets,
             review = IngestionReview(
-                status = IngestionReviewStatus.NEEDS_REVIEW,
-                blockingIssues = emptyList(),
+                status = if (preservePersistedVerification) externalReview.status else IngestionReviewStatus.NEEDS_REVIEW,
+                blockingIssues = if (preservePersistedVerification) externalReview.blockingIssues else emptyList(),
                 warnings = externalReview.warnings,
             ),
             productCandidates = productCandidates,
@@ -643,12 +643,11 @@ object YeonsikOcrV2Json {
 
     private fun decodeReview(root: JsonObject): IngestionReview {
         requireKeys(root, REVIEW_KEYS)
-        // The producer's review status is descriptive input only. It is still parsed so malformed
-        // or unknown status values cannot silently cross the validation boundary.
-        IngestionReviewStatus.entries.firstOrNull { it.wireValue == root.string("status") }
+        // The caller discards external status; trusted local restores retain the parsed state.
+        val status = IngestionReviewStatus.entries.firstOrNull { it.wireValue == root.string("status") }
             ?: error("Unsupported v2 review status")
         return IngestionReview(
-            status = IngestionReviewStatus.NEEDS_REVIEW,
+            status = status,
             blockingIssues = root.arrayValue("blocking_issues").strings(),
             warnings = root.arrayValue("warnings").strings(),
         )

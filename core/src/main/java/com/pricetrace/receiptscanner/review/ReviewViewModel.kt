@@ -92,7 +92,10 @@ data class ReviewViewModel(
             selectedProjections: Set<IngestionProjection>? = null,
         ): ReviewViewModel {
             val plan = CanonicalProjectionPlanner.plan(envelope)
-            val destinationBadges = destinationBadgesFor(plan, session, selectedProjections, IngestionProjection.entries.toSet())
+            val delivery = CanonicalProjectionPlanner.deliveryProjections(envelope)
+            val destinationBadges = destinationBadgesFor(plan.copy(eligible = delivery),
+                session?.copy(projections = session.projections.filter { it.projection in delivery || it.status == ProjectionStatus.DISABLED }),
+                selectedProjections, IngestionProjection.entries.toSet())
             val declaredSourceFiles = envelope.source.sourceFiles.associateBy(SourceAttachment::id)
             // A canonical reference is displayable only when the existing local evidence binding
             // confirms that its attachment is readable. Manual review with no bindings remains honest.

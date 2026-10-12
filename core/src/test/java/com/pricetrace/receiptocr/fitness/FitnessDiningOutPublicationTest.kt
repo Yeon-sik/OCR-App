@@ -354,7 +354,7 @@ class FitnessDiningOutPublicationTest {
     }
 
     @Test
-    fun packagedProductKeepsExistingImportAndReceiptFreeInsufficientIdentityStaysUnresolved() = runBlocking {
+    fun packagedProductAndReceiptFreeNutritionCompleteWithoutInventingPublicIdentity() = runBlocking {
         val parsedPackaged = YeonsikOcrV2Json.decode(readExample("yeonsik-ocr.v2.packaged-product.example.json"), "local-packaged")
         val label = parsedPackaged.nutrition.single() as IngestionNutrition.ProductLabel
         val packaged = parsedPackaged.copy(nutrition = listOf(label.copy(
@@ -375,9 +375,9 @@ class FitnessDiningOutPublicationTest {
         val unresolvedBackend = FakeNutritionBackend()
         val unresolvedResult = FitnessCanonicalProjectionSubmitter(gateway(unresolvedBackend)).submit(
             request(unresolved, "receipt-free-no-exact-identity"),
-        ) as ProjectionSubmission.Failure
+        ) as ProjectionSubmission.Success
 
-        assertTrue(unresolvedResult.requiresReview)
+        assertNotNull(unresolvedResult.remoteId)
         assertEquals(1, unresolvedBackend.canonicalCreateCount) // Existing private estimate import remains replay-safe.
         assertEquals(0, unresolvedBackend.publicationCommitCount)
         assertEquals("null", unresolvedBackend.canonicalBodies.single()["p_pricetrace_identity"].toString())

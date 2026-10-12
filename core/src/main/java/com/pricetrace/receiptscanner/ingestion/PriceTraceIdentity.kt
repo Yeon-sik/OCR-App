@@ -124,6 +124,7 @@ object PriceTraceIdentityJson {
     }.orEmpty()
 
     fun hasPendingOcrResolution(metadataJson: String?): Boolean {
+        if (PurchaseNutritionIdentity.pendingResolutions(metadataJson).isNotEmpty()) return true
         if (ocrResolution(metadataJson)?.status.equals("needs_ocr_resolution", ignoreCase = true)) return true
         if (receiptMenuOcrResolutions(metadataJson).isNotEmpty()) return true
         if (standaloneMenuOcrResolutions(metadataJson).isNotEmpty()) return true
@@ -300,9 +301,18 @@ object PriceTraceIdentityJson {
             stringField("status"),
         )
         if (statuses.any { status ->
-                listOf("needs_ocr_resolution", "needs_user_selection", "ambiguous", "unresolved_catalog")
+                listOf("needs_ocr_resolution", "needs_user_selection", "ambiguous")
                     .any { it.equals(status, ignoreCase = true) }
             }
+        ) return true
+        // Catalog classification does not reopen OCR review after a raw retail observation exists.
+        if (statuses.any { it.equals("unresolved_catalog", ignoreCase = true) } &&
+            !(this["observationCreated"] == JsonPrimitive(true) &&
+                listOf("productId" to "product_id", "storeProductId" to "store_product_id",
+                    "receiptItemId" to "receipt_item_id", "observationId" to "observation_id")
+                    .all { (camel, snake) -> stringField(camel, snake)?.isNotBlank() == true } &&
+                stringField("restaurantMenuId", "restaurant_menu_id") == null &&
+                stringField("restaurantObservationId", "restaurant_observation_id") == null)
         ) return true
         val nested = (this["ocrResolution"] as? JsonObject)
             ?: (this["ocr_resolution"] as? JsonObject)

@@ -4,6 +4,30 @@ import kotlinx.serialization.json.*
 
 /** Only record-key + line-key correlation may carry a server identity into V5 publication. */
 object PurchaseNutritionIdentity {
+    data class PendingResolution(val purchaseRecordClientKey: String, val purchaseSourceId: String, val lineKey: String)
+
+    /** Selectors are accepted server metadata, never user-supplied canonical UUIDs. */
+    fun pendingResolutions(metadataJson: String?): List<PendingResolution> = runCatching {
+        val sources = Json.parseToJsonElement(metadataJson ?: return emptyList()).jsonObject["sources"] as? JsonArray
+            ?: return emptyList()
+        sources.flatMap { element ->
+            val source = element.jsonObject
+            val key = source["purchaseRecordClientKey"]?.jsonPrimitive?.contentOrNull ?: return@flatMap emptyList()
+            val id = source["purchaseSourceId"]?.jsonPrimitive?.contentOrNull ?: return@flatMap emptyList()
+            require(java.util.UUID.fromString(id).toString().equals(id, true))
+            if (source["sourceAcceptanceStatus"] != JsonPrimitive("accepted")) return@flatMap emptyList()
+            (source["lineResults"] as? JsonArray).orEmpty().mapNotNull { row ->
+                val line = row.jsonObject
+                val reason = line["reasonCode"]?.jsonPrimitive?.contentOrNull
+                if (line["kind"] != JsonPrimitive("restaurant_purchase") ||
+                    line["observationCreated"] == JsonPrimitive(true) ||
+                    reason == null || !(reason.startsWith("restaurant_") || reason.startsWith("menu_"))) return@mapNotNull null
+                val lineKey = line["lineKey"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                PendingResolution(key, id, lineKey)
+            }
+        }
+    }.getOrDefault(emptyList())
+
     /** The server must account for every submitted line, including non-observation outcomes. */
     fun validateLineResults(record: PurchaseRecord, source: JsonObject): List<JsonObject> {
         val rows = (source["lineResults"] as? JsonArray)?.map { it.jsonObject }
