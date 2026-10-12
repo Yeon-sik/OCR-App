@@ -176,8 +176,8 @@ class AndroidBundleBatchCoordinator(
         state: AndroidCanonicalJsonValidatorState,
     ): AndroidBundleBatchItem {
         val session = state.session
-        val activeProjections = session?.projections.orEmpty().filterNot {
-            it.status == ProjectionStatus.DISABLED
+        val activeProjections = session?.projections.orEmpty().filter {
+            it.projection in state.envelope?.let(com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner::deliveryProjections).orEmpty()
         }
         val verified = session?.let {
             it.verifiedCanonicalFingerprint == it.canonicalFingerprint
@@ -227,7 +227,7 @@ internal fun AndroidBundleBatchItem.fromRecovery(
     envelope: YeonsikOcrEnvelope?,
     session: com.pricetrace.receiptscanner.ingestion.IngestionSession?,
 ): AndroidBundleBatchItem {
-    val activeProjections = session?.projections.orEmpty().filterNot { it.status == ProjectionStatus.DISABLED }
+    val activeProjections = session?.projections.orEmpty().filter { it.projection in envelope?.let(com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner::deliveryProjections).orEmpty() }
     val verified = session?.let { it.verifiedCanonicalFingerprint == it.canonicalFingerprint } == true
     val allUploaded = activeProjections.isNotEmpty() && activeProjections.all { it.status == ProjectionStatus.UPLOADED }
     val projectionFailure = verified && activeProjections.any {
