@@ -64,6 +64,7 @@ class FitnessCanonicalProjectionSubmitter(
         }
         var lastFoodId: String? = null
         var reviewReason: String? = null
+        var privateLinkUnavailable = false
         val recoveryCache = RecoveryAuditCache()
         return try {
             for (item in envelope.nutrition) {
@@ -221,6 +222,7 @@ class FitnessCanonicalProjectionSubmitter(
                             if (privatePurchaseIdentity != null) {
                                 when (val linked = gateway.linkPrivatePurchaseNutrition(NutritionPrivatePurchaseLinkPayload(
                                     result.response.canonicalImportId, result.response.nutritionFoodId, item.clientKey, privatePurchaseIdentity))) {
+                                    NutritionPrivatePurchaseLinkOutcome.Unavailable -> privateLinkUnavailable = true
                                     is NutritionPrivatePurchaseLinkOutcome.Success -> responses += linked.rawResponse
                                     is NutritionPrivatePurchaseLinkOutcome.Failure -> return failure(
                                         linked.message ?: linked.reason.name, linked.reason.isRetryable(), responses)
@@ -269,6 +271,8 @@ class FitnessCanonicalProjectionSubmitter(
             ProjectionSubmission.Success(
                 remoteId = requireNotNull(lastFoodId),
                 metadataJson = responseMetadata(responses),
+                primaryUploaded = !privateLinkUnavailable,
+                primaryPendingReason = if (privateLinkUnavailable) "fitness_private_purchase_link_not_deployed" else null,
             )
         } catch (cancelled: CancellationException) {
             throw cancelled

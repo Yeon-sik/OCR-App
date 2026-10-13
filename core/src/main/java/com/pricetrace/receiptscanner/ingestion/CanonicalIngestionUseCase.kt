@@ -315,11 +315,16 @@ class CanonicalIngestionUseCase(
     ): List<ProjectionState> = submitSelected(ingestionId, envelope, selectedProjections)
 
     /** Shared OCR-only resolution and Fitness resume path used by Android and Desktop. */
+    suspend fun selectOwnerPurchaseRestaurant(ingestionId: String, envelope: YeonsikOcrEnvelope,
+        selection: PurchaseNutritionIdentity.OwnerRestaurantSelection): ProjectionSubmission? =
+        resolvePendingMerchantIdentityAndResume(ingestionId, envelope, selection)
+
     private suspend fun resolvePendingMerchantIdentityAndResume(
         ingestionId: String,
         envelope: YeonsikOcrEnvelope,
+        ownerSelection: PurchaseNutritionIdentity.OwnerRestaurantSelection? = null,
     ): ProjectionSubmission? {
-        val result = orchestrator.resolvePendingOcrIdentity(ingestionId, envelope) ?: return null
+        val result = orchestrator.resolvePendingOcrIdentity(ingestionId, envelope, ownerSelection) ?: return null
         if (result is ProjectionSubmission.Success && !result.requiresReview &&
             envelope.nutrition.any {
                 it is IngestionNutrition.RestaurantEstimate || it is IngestionNutrition.RestaurantMenuEstimate
@@ -329,6 +334,7 @@ class CanonicalIngestionUseCase(
                 ingestionId, IngestionProjection.FITNESS_NUTRITION, envelope,
             )
             if (nutritionState.status != ProjectionStatus.UPLOADED) {
+                if (nutritionState.lastError == "fitness_private_purchase_link_not_deployed") return result
                 return ProjectionSubmission.Failure(
                     message = nutritionState.lastError ?: "fitness_nutrition_projection_not_uploaded",
                     retryable = nutritionState.status == ProjectionStatus.FAILED,

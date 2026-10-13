@@ -84,6 +84,7 @@ fun ReviewWorkspace(
     onRetryRevision: () -> Unit,
     onDeveloperInfoVisibleChanged: (Boolean) -> Unit,
     onImportJson: () -> Unit,
+    onOwnerRestaurantSelected: (com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.OwnerRestaurantSelection) -> Unit = {},
 ) {
     Surface(
         modifier = Modifier.fillMaxSize().onPreviewKeyEvent { event ->
@@ -180,6 +181,19 @@ fun ReviewWorkspace(
                         "검수 기록 다시 저장", busy, onVerify)
                 }
                 SourceSummary(state, model.rows)
+                val ownerMetadata = state.session?.projections?.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson
+                com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.ownerRestaurantChoices(ownerMetadata).forEach { group ->
+                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("기존 내 식당 선택", style = MaterialTheme.typography.titleMedium)
+                        Text("${group.purchaseRecordClientKey} / ${group.lineKey} · 실제로 구매한 식당을 선택하세요. 확실하지 않으면 보류할 수 있습니다.")
+                        group.choices.forEach { choice ->
+                            CollectorButton(choice.displayLabel, { onOwnerRestaurantSelected(
+                                com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.OwnerRestaurantSelection(
+                                    group.purchaseRecordClientKey, group.lineKey, choice.restaurantId)) },
+                                enabled = canSubmit, emphasized = false)
+                        }
+                    }
+                }
                 if (state.reviewFieldErrors.isNotEmpty()) ValidationMessage(
                     "수정 필요 ${state.reviewFieldErrors.size}개 · 아래 편집 항목을 확인하세요", CollectorStatusKind.ERROR)
                 var showAllValues by rememberSaveable { mutableStateOf(false) }

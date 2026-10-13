@@ -688,6 +688,18 @@ class AndroidCanonicalJsonValidator(
         )) { "Android bundle recovery state could not be persisted" }
     }
 
+    suspend fun selectOwnerRestaurant(state: AndroidCanonicalJsonValidatorState,
+        selection: com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.OwnerRestaurantSelection): AndroidCanonicalJsonValidatorState {
+        require(state.reviewFieldErrors.isEmpty()) { "Resolve field edits before choosing a restaurant." }
+        val ingestionId = requireNotNull(state.ingestionId)
+        val result = useCase.selectOwnerPurchaseRestaurant(ingestionId, requireNotNull(state.envelope), selection)
+        val updated = state.copy(session = useCase.session(ingestionId),
+            notice = if (result is com.pricetrace.receiptscanner.ingestion.ProjectionSubmission.Success) "선택한 내 식당에 구매 기록을 연결했습니다." else null,
+            error = (result as? com.pricetrace.receiptscanner.ingestion.ProjectionSubmission.Failure)?.message)
+        persistBundleState(updated)
+        return updated
+    }
+
     suspend fun confirm(
         state: AndroidCanonicalJsonValidatorState,
     ): AndroidCanonicalJsonValidatorState {

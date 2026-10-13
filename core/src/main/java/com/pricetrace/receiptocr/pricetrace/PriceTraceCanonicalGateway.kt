@@ -167,6 +167,10 @@ class PriceTraceCanonicalGateway(
     suspend fun resolveOcrPurchaseMenu(request: OcrPurchaseMenuResolutionRequest): PriceTraceCanonicalOutcome =
         readAcceptedResponse { config ->
             require(java.util.UUID.fromString(request.purchaseSourceId).toString().equals(request.purchaseSourceId, true))
+            request.selectedOwnerRestaurantId?.let {
+                require(java.util.UUID.fromString(it).toString().equals(it, true))
+                require(request.reviewedMerchant != null) { "private_restaurant_selection_requires_reviewed_merchant" }
+            }
             // The orchestrator supplies these source facts only after checking the current review fingerprint.
             // A candidate response is never authority: the purchase-bound RPC independently checks ownership and facts.
             val candidateId = request.reviewedMerchant?.let { merchant ->
@@ -186,6 +190,7 @@ class PriceTraceCanonicalGateway(
                         put("source_namespace", request.sourceNamespace?.let(::JsonPrimitive) ?: JsonNull)
                         put("source_location_code", request.sourceLocationCode?.let(::JsonPrimitive) ?: JsonNull)
                     })
+                    request.selectedOwnerRestaurantId?.let { put("p_owner_restaurant_id", JsonPrimitive(it)) }
                 }.encode()))
             if (response.statusCode !in 200..299) return@readAcceptedResponse PriceTraceCanonicalOutcome.Failure(classify(response), response.body)
             val source = PriceTracePurchaseObservationV4Json.decodeResponse(response.body).raw

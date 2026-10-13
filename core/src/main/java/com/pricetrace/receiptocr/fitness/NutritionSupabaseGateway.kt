@@ -223,18 +223,23 @@ class NutritionSupabaseGateway(
     ): NutritionPrivatePurchaseLinkOutcome = try {
         val response = transport.execute(request(config, "POST", "/rest/v1/rpc/link_private_ocr_purchase_nutrition_v1",
             body = payload.toJson().toString()))
-        val reason = when (response.statusCode) {
-            401, 403 -> NutritionGatewayFailure.AUTHENTICATION
-            409 -> NutritionGatewayFailure.CONFLICT
-            429 -> NutritionGatewayFailure.RATE_LIMITED
-            in 500..599 -> NutritionGatewayFailure.SERVER
-            in 200..299 -> null
-            else -> NutritionGatewayFailure.CONTRACT
-        }
-        if (reason != null) NutritionPrivatePurchaseLinkOutcome.Failure(reason, response.body)
-        else {
-            payload.requireMatches(Json.parseToJsonElement(response.body).jsonObject)
-            NutritionPrivatePurchaseLinkOutcome.Success(response.body)
+        val unavailable = response.statusCode == 404 && runCatching {
+            Json.parseToJsonElement(response.body).jsonObject["code"] == JsonPrimitive("PGRST202")
+        }.getOrDefault(false)
+        if (unavailable) NutritionPrivatePurchaseLinkOutcome.Unavailable else {
+            val reason = when (response.statusCode) {
+                401, 403 -> NutritionGatewayFailure.AUTHENTICATION
+                409 -> NutritionGatewayFailure.CONFLICT
+                429 -> NutritionGatewayFailure.RATE_LIMITED
+                in 500..599 -> NutritionGatewayFailure.SERVER
+                in 200..299 -> null
+                else -> NutritionGatewayFailure.CONTRACT
+            }
+            if (reason != null) NutritionPrivatePurchaseLinkOutcome.Failure(reason, response.body)
+            else {
+                payload.requireMatches(Json.parseToJsonElement(response.body).jsonObject)
+                NutritionPrivatePurchaseLinkOutcome.Success(response.body)
+            }
         }
     } catch (cancelled: CancellationException) { throw cancelled
     } catch (_: IOException) { NutritionPrivatePurchaseLinkOutcome.Failure(NutritionGatewayFailure.NETWORK)

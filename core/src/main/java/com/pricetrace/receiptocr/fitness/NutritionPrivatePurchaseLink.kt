@@ -31,6 +31,7 @@ data class NutritionPrivatePurchaseLinkPayload(
 }
 
 sealed interface NutritionPrivatePurchaseLinkOutcome {
+    data object Unavailable : NutritionPrivatePurchaseLinkOutcome
     data class Success(val rawResponse: String) : NutritionPrivatePurchaseLinkOutcome
     data class Failure(val reason: NutritionGatewayFailure, val message: String? = null) : NutritionPrivatePurchaseLinkOutcome
 }

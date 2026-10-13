@@ -125,6 +125,7 @@ data class OcrPurchaseMenuResolutionRequest(
     val sourceNamespace: String? = null,
     val sourceLocationCode: String? = null,
     val reviewedMerchant: MerchantCandidate? = null,
+    val selectedOwnerRestaurantId: String? = null,
 )
 
 interface OcrPurchaseIdentityResolutionSubmitter {
@@ -999,6 +1000,7 @@ class IngestionOrchestrator(
     suspend fun resolvePendingOcrIdentity(
         ingestionId: String,
         envelope: YeonsikOcrEnvelope,
+        ownerSelection: PurchaseNutritionIdentity.OwnerRestaurantSelection? = null,
     ): ProjectionSubmission? {
         var session = prepareExistingSession(ingestionId, envelope) ?: return ProjectionSubmission.Failure(
             "ingestion_not_found", retryable = false,
@@ -1008,6 +1010,16 @@ class IngestionOrchestrator(
         }
         acceptedSourceRevisionConflict(session, envelope)?.let { conflict ->
             return ProjectionSubmission.Failure(conflict, retryable = false, requiresReview = true)
+        }
+        if (ownerSelection != null) {
+            val metadata = session.projections.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson
+            if (!isVerifiedForOcrResolution(session, envelope)) return resolutionNeedsReview(
+                "pricetrace_ocr_resolution_requires_verified_canonical_revision", metadata)
+            val group = PurchaseNutritionIdentity.ownerRestaurantChoices(metadata).singleOrNull {
+                it.purchaseRecordClientKey == ownerSelection.purchaseRecordClientKey && it.lineKey == ownerSelection.lineKey
+            }
+            if (group?.choices?.none { it.restaurantId == ownerSelection.restaurantId } != false) return resolutionNeedsReview(
+                "pricetrace_owner_restaurant_choice_not_available", metadata)
         }
         var lastSuccess: ProjectionSubmission.Success? = null
 
@@ -1117,7 +1129,9 @@ class IngestionOrchestrator(
         while (envelope.schemaVersion == YEONSIK_OCR_V5_SCHEMA) {
             session = requireNotNull(store.get(ingestionId))
             val state = session.projections.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION } ?: break
-            val pending = PurchaseNutritionIdentity.pendingResolutions(state.metadataJson).firstOrNull() ?: break
+            val pendingRows = PurchaseNutritionIdentity.pendingResolutions(state.metadataJson)
+            val pending = pendingRows.firstOrNull { it.purchaseRecordClientKey == ownerSelection?.purchaseRecordClientKey && it.lineKey == ownerSelection?.lineKey }
+                ?: pendingRows.firstOrNull() ?: break
             if (!isVerifiedForOcrResolution(session, envelope)) return resolutionNeedsReview(
                 "pricetrace_ocr_resolution_requires_verified_canonical_revision", state.metadataJson,
             )
@@ -1141,6 +1155,7 @@ class IngestionOrchestrator(
                 record.sellerSourceNamespace.takeIf { record.lineItems.single { it.lineKey == pending.lineKey }.sellerOverride == null },
                 record.sellerSourceCode.takeIf { record.lineItems.single { it.lineKey == pending.lineKey }.sellerOverride == null },
                 reviewedMerchant,
+                ownerSelection?.takeIf { it.purchaseRecordClientKey == pending.purchaseRecordClientKey && it.lineKey == pending.lineKey }?.restaurantId,
             ))
             val merged = mergePurchaseResolutionMetadata(state.metadataJson, pending, result.metadataJsonOrNull())
             merged?.let { metadata -> PurchaseNutritionIdentity.validateLineResults(record,
@@ -2356,5 +2371,5 @@ class IngestionOrchestrator(
 
     private fun String?.isDependencyRetryable(): Boolean = this == null ||
         startsWith("dependency_pending:") || this == "pricetrace_identity_missing" ||
-        this == "pricetrace_product_identity_missing"
+        this == "pricetrace_product_identity_missing" || this == "fitness_private_purchase_link_not_deployed"
 }

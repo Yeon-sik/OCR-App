@@ -9,6 +9,43 @@ object PurchaseNutritionIdentity {
         val restaurantId: String, val restaurantLocationId: String, val restaurantMenuId: String,
     )
     data class PendingResolution(val purchaseRecordClientKey: String, val purchaseSourceId: String, val lineKey: String)
+    data class OwnerRestaurantChoice(val restaurantId: String, val restaurantLocationId: String,
+        val merchantName: String, val branchName: String?, val sourceNamespace: String? = null, val sourceCode: String? = null) {
+        val displayLabel: String get() = listOfNotNull(merchantName, branchName ?: "지점 미기록",
+            sourceNamespace?.let { "$it / $sourceCode" }).joinToString(" · ")
+    }
+    data class OwnerRestaurantChoices(val purchaseRecordClientKey: String, val lineKey: String,
+        val choices: List<OwnerRestaurantChoice>)
+    /** Explicit UI selection; runtime only, never canonical input. */
+    data class OwnerRestaurantSelection(val purchaseRecordClientKey: String, val lineKey: String, val restaurantId: String)
+
+    fun ownerRestaurantChoices(metadataJson: String?): List<OwnerRestaurantChoices> = runCatching {
+        val sources = Json.parseToJsonElement(metadataJson ?: return emptyList()).jsonObject["sources"] as? JsonArray
+            ?: return emptyList()
+        sources.flatMap { element ->
+            val source = element.jsonObject
+            if (source["sourceAcceptanceStatus"] != JsonPrimitive("accepted")) return@flatMap emptyList()
+            val recordKey = source["purchaseRecordClientKey"]!!.jsonPrimitive.content
+            (source["lineResults"] as? JsonArray).orEmpty().mapNotNull { value ->
+                val row = value.jsonObject
+                if (row["observationCreated"] == JsonPrimitive(true) || row["kind"] != JsonPrimitive("restaurant_purchase")) return@mapNotNull null
+                val choices = (row["ownerRestaurantChoices"] as? JsonArray).orEmpty().map { raw ->
+                    val choice = raw.jsonObject
+                    val id = choice["restaurantId"]!!.jsonPrimitive.content
+                    val locationId = choice["restaurantLocationId"]!!.jsonPrimitive.content
+                    require(java.util.UUID.fromString(id).toString().equals(id, true))
+                    require(java.util.UUID.fromString(locationId).toString().equals(locationId, true))
+                    OwnerRestaurantChoice(id, locationId, choice["merchantName"]!!.jsonPrimitive.content,
+                        choice["branchName"]?.jsonPrimitive?.contentOrNull, choice["sourceNamespace"]?.jsonPrimitive?.contentOrNull,
+                        choice["sourceCode"]?.jsonPrimitive?.contentOrNull)
+                }
+                if (choices.isEmpty()) null else {
+                    require(choices.map { it.restaurantId }.distinct().size == choices.size)
+                    OwnerRestaurantChoices(recordKey, row["lineKey"]!!.jsonPrimitive.content, choices)
+                }
+            }
+        }
+    }.getOrDefault(emptyList())
 
     /** Selectors are accepted server metadata, never user-supplied canonical UUIDs. */
     fun pendingResolutions(metadataJson: String?): List<PendingResolution> = runCatching {
@@ -25,7 +62,7 @@ object PurchaseNutritionIdentity {
                 val reason = line["reasonCode"]?.jsonPrimitive?.contentOrNull
                 if (line["kind"] != JsonPrimitive("restaurant_purchase") ||
                     line["observationCreated"] == JsonPrimitive(true) ||
-                    reason == null || !(reason.startsWith("restaurant_") || reason.startsWith("menu_"))) return@mapNotNull null
+                    reason == null || !(reason.startsWith("restaurant_") || reason.startsWith("menu_") || reason == "owner_restaurant_selection_required")) return@mapNotNull null
                 val lineKey = line["lineKey"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
                 PendingResolution(key, id, lineKey)
             }
