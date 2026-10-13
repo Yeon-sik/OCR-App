@@ -4,6 +4,10 @@ import kotlinx.serialization.json.*
 
 /** Only record-key + line-key correlation may carry a server identity into V5 publication. */
 object PurchaseNutritionIdentity {
+    data class OwnerConfirmedIdentity(
+        val purchaseSourceId: String, val purchaseRecordClientKey: String, val lineKey: String,
+        val restaurantId: String, val restaurantLocationId: String, val restaurantMenuId: String,
+    )
     data class PendingResolution(val purchaseRecordClientKey: String, val purchaseSourceId: String, val lineKey: String)
 
     /** Selectors are accepted server metadata, never user-supplied canonical UUIDs. */
@@ -105,6 +109,30 @@ object PurchaseNutritionIdentity {
         linkedPurchaseLine(envelope, nutritionClientKey)?.let { (record, line) ->
             line.sellerOverride ?: record.seller
         }
+
+    /** Private reference only. Never accepted by exact() or the public publication RPC. */
+    fun ownerConfirmed(envelope: YeonsikOcrEnvelope, nutritionClientKey: String, metadataJson: String?): OwnerConfirmedIdentity? = runCatching {
+        if (envelope.schemaVersion != YEONSIK_OCR_V5_SCHEMA) return null
+        val link = envelope.purchaseNutritionLinks.singleOrNull { it.nutritionClientKey == nutritionClientKey } ?: return null
+        val record = envelope.purchaseRecords.singleOrNull { it.clientKey == link.purchaseRecordClientKey } ?: return null
+        val source = Json.parseToJsonElement(metadataJson ?: return null).jsonObject["sources"]!!.jsonArray
+            .map { it.jsonObject }.singleOrNull { it["purchaseRecordClientKey"]?.jsonPrimitive?.content == record.clientKey } ?: return null
+        val line = validateLineResults(record, source).single { it["lineKey"]?.jsonPrimitive?.content == link.purchaseLineKey }
+        if (source["sourceAcceptanceStatus"] != JsonPrimitive("accepted") ||
+            line["sourceAcceptanceStatus"] != JsonPrimitive("accepted") ||
+            line["authorityStatus"] != JsonPrimitive("owner_confirmed") ||
+            line["merchantResolutionStatus"] != JsonPrimitive("owner_confirmed") ||
+            line["menuResolutionStatus"] != JsonPrimitive("owner_confirmed") ||
+            line["observationStatus"] != JsonPrimitive("created") || line["observationCreated"] != JsonPrimitive(true) ||
+            line["observationType"] != JsonPrimitive("purchase_owner_price_observation") || line["authoritativeIds"] != JsonNull) return null
+        val ids = line["ownerConfirmedIds"]!!.jsonObject
+        fun uuid(value: JsonElement?): String = requireNotNull(value?.jsonPrimitive?.contentOrNull).also {
+            require(java.util.UUID.fromString(it).toString().equals(it, true))
+        }
+        uuid(line["observationId"])
+        OwnerConfirmedIdentity(uuid(source["purchaseSourceId"]), record.clientKey, link.purchaseLineKey,
+            uuid(ids["restaurantId"]), uuid(ids["restaurantLocationId"]), uuid(ids["restaurantMenuId"]))
+    }.getOrNull()
 
     /** An explicit line seller has no branch fact and cannot inherit the record's branch. */
     fun sellerBranchName(envelope: YeonsikOcrEnvelope, nutritionClientKey: String): String? =

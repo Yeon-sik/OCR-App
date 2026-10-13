@@ -124,6 +124,7 @@ data class OcrPurchaseMenuResolutionRequest(
     val lineKey: String,
     val sourceNamespace: String? = null,
     val sourceLocationCode: String? = null,
+    val reviewedMerchant: MerchantCandidate? = null,
 )
 
 interface OcrPurchaseIdentityResolutionSubmitter {
@@ -478,8 +479,12 @@ class IngestionOrchestrator(
         }
     }
 
-    private fun diningOutIdentityComplete(session: IngestionSession, envelope: YeonsikOcrEnvelope): Boolean =
-        diningOutIdentities(session, envelope).all { it != null }
+    private fun diningOutIdentityComplete(session: IngestionSession, envelope: YeonsikOcrEnvelope): Boolean {
+        val metadata = session.projections.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson
+        return diningOutItems(envelope).zip(diningOutIdentities(session, envelope)).all { (item, exact) ->
+            exact != null || PurchaseNutritionIdentity.ownerConfirmed(envelope, item.clientKey, metadata) != null
+        }
+    }
 
     private fun diningOutPublicationComplete(
         session: IngestionSession,
@@ -1124,10 +1129,18 @@ class IngestionOrchestrator(
             val submitter = submitters[IngestionProjection.PRICETRACE_PRICE_OBSERVATION] as? OcrPurchaseIdentityResolutionSubmitter
                 ?: return resolutionNeedsReview("pricetrace_purchase_resolution_not_configured", state.metadataJson)
             val attempted = beginOcrResolutionAttempt(ingestionId, state.projection) ?: break
+            val purchaseLine = record.lineItems.single { it.lineKey == pending.lineKey }
+            val reviewedMerchant = if (purchaseLine.sellerOverride == null && record.seller != null &&
+                record.sellerBusinessKind == "food_service") {
+                MerchantCandidate(name = record.seller, branchName = record.sellerBranchName,
+                    businessKind = com.pricetrace.receiptscanner.domain.BusinessKind.FOOD_SERVICE, sourceNamespace = record.sellerSourceNamespace,
+                    sourceLocationCode = record.sellerSourceCode)
+            } else null
             val result = submitter.resolvePurchaseMenuIdentity(OcrPurchaseMenuResolutionRequest(
                 pending.purchaseRecordClientKey, pending.purchaseSourceId, pending.lineKey,
                 record.sellerSourceNamespace.takeIf { record.lineItems.single { it.lineKey == pending.lineKey }.sellerOverride == null },
                 record.sellerSourceCode.takeIf { record.lineItems.single { it.lineKey == pending.lineKey }.sellerOverride == null },
+                reviewedMerchant,
             ))
             val merged = mergePurchaseResolutionMetadata(state.metadataJson, pending, result.metadataJsonOrNull())
             merged?.let { metadata -> PurchaseNutritionIdentity.validateLineResults(record,
@@ -1136,7 +1149,8 @@ class IngestionOrchestrator(
             val saved = persistOcrResolutionResult(ingestionId, envelope, state.projection, state, attempted, result, merged)
             if (saved !is ProjectionSubmission.Success) return saved
             lastSuccess = saved
-            if (saved.requiresReview) return saved
+            // A resolved line may leave another line pending. Continue only while this exact selector made progress.
+            if (saved.requiresReview && pending in PurchaseNutritionIdentity.pendingResolutions(merged)) return saved
         }
         return lastSuccess
     }

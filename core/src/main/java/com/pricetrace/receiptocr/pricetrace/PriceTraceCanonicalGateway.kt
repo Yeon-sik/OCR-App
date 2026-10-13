@@ -167,12 +167,22 @@ class PriceTraceCanonicalGateway(
     suspend fun resolveOcrPurchaseMenu(request: OcrPurchaseMenuResolutionRequest): PriceTraceCanonicalOutcome =
         readAcceptedResponse { config ->
             require(java.util.UUID.fromString(request.purchaseSourceId).toString().equals(request.purchaseSourceId, true))
-            val response = transport.execute(request(config, "POST", "/rest/v1/rpc/resolve_ocr_purchase_restaurant_line_v1",
+            // The orchestrator supplies these source facts only after checking the current review fingerprint.
+            // A candidate response is never authority: the purchase-bound RPC independently checks ownership and facts.
+            val candidateId = request.reviewedMerchant?.let { merchant ->
+                val candidate = submitMerchantOnce(StableIds.sha256("purchase-merchant|${request.purchaseSourceId}|${merchant.name}|${merchant.branchName}"), merchant, config)
+                if (candidate is PriceTraceCanonicalOutcome.Failure) return@readAcceptedResponse candidate
+                requireNotNull((candidate as PriceTraceCanonicalOutcome.Success).response.requiredStringOrNull("candidateId"))
+            }
+            val rpc = if (candidateId == null) "resolve_ocr_purchase_restaurant_line_v1"
+                else "resolve_user_confirmed_purchase_restaurant_line_v1"
+            val response = transport.execute(request(config, "POST", "/rest/v1/rpc/$rpc",
                 body = buildJsonObject {
                     put("p_purchase_source_id", JsonPrimitive(request.purchaseSourceId))
                     put("p_line_key", JsonPrimitive(request.lineKey))
                     put("p_user_verified", JsonPrimitive(true))
-                    if (request.sourceNamespace != null || request.sourceLocationCode != null) put("p_merchant", buildJsonObject {
+                    if (candidateId != null) put("p_merchant_candidate_id", JsonPrimitive(candidateId))
+                    else if (request.sourceNamespace != null || request.sourceLocationCode != null) put("p_merchant", buildJsonObject {
                         put("source_namespace", request.sourceNamespace?.let(::JsonPrimitive) ?: JsonNull)
                         put("source_location_code", request.sourceLocationCode?.let(::JsonPrimitive) ?: JsonNull)
                     })
