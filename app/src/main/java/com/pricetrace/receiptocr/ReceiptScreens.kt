@@ -133,6 +133,7 @@ import com.pricetrace.receiptscanner.nutrition.NutritionEvidenceVerdict
 import com.pricetrace.receiptscanner.nutrition.NutritionFieldVerdict
 import com.pricetrace.receiptscanner.nutrition.NutritionField
 import com.pricetrace.receiptscanner.nutrition.NutritionLabelDraft
+import com.pricetrace.receiptscanner.nutrition.NutritionPresentation
 import com.pricetrace.receiptscanner.nutrition.NutritionUnit
 import com.pricetrace.receiptscanner.ingestion.MerchantCandidate
 import com.pricetrace.receiptscanner.ingestion.ProductCandidate
@@ -900,8 +901,14 @@ private fun ImportPreviewScreen(
                             Text("상품명 · ${draft.value.productName.ifBlank { "미확인" }}")
                             Text("브랜드 · ${draft.value.brand ?: "미확인"}")
                             Text("기준량 · ${draft.value.basisAmount?.toString() ?: "미확인"} ${draft.value.basisUnit}")
-                            NutritionField.entries.take(5).forEach { field ->
-                                Text("${field.koreanLabel} · ${formatNutritionNumber(draft.value.value(field)).ifBlank { "미확인" }} ${field.canonicalUnit}")
+                            NutritionPresentation.entries.filter { entry ->
+                                entry.field.required || draft.value.value(entry.field) != null
+                            }.forEach { entry ->
+                                val field = entry.field
+                                Text(
+                                    "${entry.label} · ${formatNutritionNumber(draft.value.value(field)).ifBlank { "미확인" }} ${field.canonicalUnit}",
+                                    modifier = Modifier.padding(start = (entry.depth * 16).dp),
+                                )
                             }
                         }
                         is com.pricetrace.receiptscanner.importer.CanonicalDraft.Envelope -> {
@@ -2968,12 +2975,16 @@ private fun CanonicalRestaurantNutritionReviewScreen(
                             "추정 confidence · ${estimate.confidenceScore?.toString() ?: estimate.confidence}",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        NutritionField.entries.forEach { field ->
+                        NutritionPresentation.entries.forEach { entry ->
+                            val field = entry.field
                             val value = formatNutritionNumber(estimate.nutrients[field])
                             val range = estimate.ranges[field]?.let { range ->
                                 " · 범위 ${formatNutritionNumber(range.min)}~${formatNutritionNumber(range.max)}"
                             }.orEmpty()
-                            Text("${field.koreanLabel} · ${value.ifBlank { "모름" }} ${field.canonicalUnit}$range")
+                            Text(
+                                "${entry.label} · ${value.ifBlank { "모름" }} ${field.canonicalUnit}$range",
+                                modifier = Modifier.padding(start = (entry.depth * 16).dp),
+                            )
                         }
                     }
                     estimate?.nutrientProvenance?.values.orEmpty()
@@ -3145,8 +3156,9 @@ private fun NutritionReviewScreen(
                 }
             }
         }
-        item { SectionTitle("필수 7종 영양성분") }
-        items(NutritionField.entries, key = { it.wireKey }) { field ->
+        item { SectionTitle("영양성분 (필수 7종 포함)") }
+        items(NutritionPresentation.entries, key = { it.field.wireKey }) { entry ->
+            val field = entry.field
             val localValue = nutrientValues.getValue(field)
             OutlinedTextField(
                 value = localValue.value,
@@ -3155,7 +3167,7 @@ private fun NutritionReviewScreen(
                     onValueChanged(field, value)
                 },
                 label = {
-                    Text("${field.koreanLabel}${if (field.required) " *" else " (선택)"}")
+                    Text("${entry.label}${if (field.required) " *" else " (선택)"}")
                 },
                 suffix = { Text(field.canonicalUnit) },
                 singleLine = true,
@@ -3163,7 +3175,8 @@ private fun NutritionReviewScreen(
                 supportingText = if (field.required) null else {
                     { Text("라벨에 없으면 비워 두어 모름(null)으로 보존") }
                 },
-                modifier = Modifier.fillMaxWidth().testTag("nutrition_${field.wireKey}"),
+                modifier = Modifier.fillMaxWidth().padding(start = (entry.depth * 16).dp)
+                    .testTag("nutrition_${field.wireKey}"),
             )
         }
         if (validationErrors.isNotEmpty()) {

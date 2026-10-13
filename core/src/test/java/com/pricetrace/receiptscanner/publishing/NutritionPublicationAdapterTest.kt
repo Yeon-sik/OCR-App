@@ -70,6 +70,25 @@ class NutritionPublicationAdapterTest {
         )) is PublicationAdaptation.Blocked)
     }
 
+    @Test fun userVerifiedStatusDoesNotBypassParentChildValidation() {
+        for ((field, value) in listOf(
+            NutritionField.SUGARS_GRAMS to 50.0,
+            NutritionField.ADDED_SUGARS_GRAMS to 9.0,
+            NutritionField.SATURATED_FAT_GRAMS to 30.0,
+            NutritionField.TRANS_FAT_GRAMS to 30.0,
+        )) {
+            val draft = verifiedDraft().copy(nutrients = verifiedDraft().nutrients + mapOf(
+                NutritionField.CARBS_GRAMS to 43.0,
+                NutritionField.SUGARS_GRAMS to 8.0,
+                NutritionField.FAT_GRAMS to 28.0,
+                field to value,
+            ))
+            val result = NutritionPublicationAdapter.adapt(draft)
+            assertTrue(result is PublicationAdaptation.Blocked)
+            assertTrue((result as PublicationAdaptation.Blocked).errors.any { it.contains("포함되므로") })
+        }
+    }
+
     companion object {
         fun verifiedDraft() = NutritionLabelDraft(
             documentId = "publication-test-document",

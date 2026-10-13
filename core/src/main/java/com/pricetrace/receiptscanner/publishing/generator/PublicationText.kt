@@ -1,5 +1,7 @@
 package com.pricetrace.receiptscanner.publishing.generator
 
+import com.pricetrace.receiptscanner.nutrition.NutritionPresentation
+import com.pricetrace.receiptscanner.publishing.model.PublicationNutrient
 import com.pricetrace.receiptscanner.publishing.model.PublicationSource
 import java.math.BigDecimal
 import java.time.LocalDate
@@ -7,6 +9,19 @@ import java.time.OffsetDateTime
 
 /** Shared presentation rules keep the generated image and text consistent. */
 object PublicationText {
+    data class NutrientRow(val nutrient: PublicationNutrient, val label: String, val depth: Int)
+
+    /** Text and PNG use the review hierarchy without rewriting the flat source snapshot. */
+    fun nutrientRows(source: PublicationSource): List<NutrientRow> = source.nutrients
+        .sortedBy { nutrient ->
+            NutritionPresentation.entries.indexOfFirst { it.field.wireKey == nutrient.key }
+                .takeIf { it >= 0 } ?: Int.MAX_VALUE
+        }
+        .map { nutrient ->
+            val entry = NutritionPresentation.entries.firstOrNull { it.field.wireKey == nutrient.key }
+            NutrientRow(nutrient, entry?.label ?: nutrient.label, entry?.depth ?: 0)
+        }
+
     fun number(value: Double): String {
         require(value.isFinite()) { "Cannot publish a non-finite value" }
         return BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()

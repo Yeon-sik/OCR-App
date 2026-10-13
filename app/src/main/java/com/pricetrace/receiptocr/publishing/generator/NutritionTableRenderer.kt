@@ -30,15 +30,17 @@ class NutritionTableRenderer(
             val heading = text("영양정보", 38f, ACCENT, bold = true)
             val name = text(PublicationText.displayName(source), 48f, INK, bold = true, maxLines = 4)
             val rows = buildList {
-                PublicationText.basis(source)?.let { add("기준량" to it) }
-                source.nutrients.forEach {
-                    add(it.label to (PublicationText.number(it.value) + " " + it.unit))
+                PublicationText.basis(source)?.let { add(Triple("기준량", it, 0)) }
+                PublicationText.nutrientRows(source).forEach { row ->
+                    val nutrient = row.nutrient
+                    add(Triple(row.label, PublicationText.number(nutrient.value) + " " + nutrient.unit, row.depth))
                 }
-            }.map { (label, value) ->
-                val left = text(label, 34f, INK, width = LABEL_WIDTH)
+            }.map { (label, value, depth) ->
+                val indent = depth * 32
+                val left = text(label, 34f, INK, width = LABEL_WIDTH - indent)
                 val right = text(value, 38f, INK, bold = true, width = VALUE_WIDTH,
                     alignment = Layout.Alignment.ALIGN_OPPOSITE)
-                TableRow(left, right, max(left.height, right.height) + ROW_PADDING * 2)
+                TableRow(left, right, max(left.height, right.height) + ROW_PADDING * 2, indent)
             }
             val footer = text("출처: " + PublicationText.sourceLabel(source), 28f, MUTED)
             val date = PublicationText.confirmedDate(source)?.let {
@@ -61,7 +63,7 @@ class NutritionTableRenderer(
                     canvas.drawRect(PADDING.toFloat(), y.toFloat(), (WIDTH - PADDING).toFloat(),
                         (y + row.height).toFloat(), Paint().apply { color = TINT })
                 }
-                draw(canvas, row.left, PADDING + 18, y + ROW_PADDING)
+                draw(canvas, row.left, PADDING + 18 + row.indent, y + ROW_PADDING)
                 draw(canvas, row.right, WIDTH - PADDING - VALUE_WIDTH - 18, y + ROW_PADDING)
                 canvas.drawLine(PADDING.toFloat(), (y + row.height).toFloat(),
                     (WIDTH - PADDING).toFloat(), (y + row.height).toFloat(), rule)
@@ -105,7 +107,7 @@ class NutritionTableRenderer(
         canvas.restore()
     }
 
-    private data class TableRow(val left: StaticLayout, val right: StaticLayout, val height: Int)
+    private data class TableRow(val left: StaticLayout, val right: StaticLayout, val height: Int, val indent: Int)
 
     private companion object {
         const val WIDTH = 1080

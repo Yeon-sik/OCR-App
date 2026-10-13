@@ -25,8 +25,9 @@ class BlogDraftGenerator {
         val body = buildString {
             append(name); append(" 영양정보입니다.\n\n")
             PublicationText.basis(source)?.let { append("기준량: $it\n\n") }
-            source.nutrients.forEach { nutrient ->
-                append(nutrient.label); append(": ")
+            PublicationText.nutrientRows(source).forEach { row ->
+                val nutrient = row.nutrient
+                append("  ".repeat(row.depth)); append(row.label); append(": ")
                 append(PublicationText.number(nutrient.value)); append(" ")
                 append(nutrient.unit); append("\n")
             }
