@@ -2,7 +2,7 @@
 
 This package targets the **Fitness Nutrition Supabase project**. Do not apply it to OCR Evidence or PriceTrace. It accompanies the OCR-App and PriceTrace `feat/user-confirmed-purchase-restaurants` changes without altering the separate Fitness checkout.
 
-The verified target is `eytwkufdesbarxusifzt` (OCR runtime `NUTRITION_SUPABASE_URL`). OCR's linked `haxbzkwvybiebpogaouv` is **Evidence**, not Nutrition. On 2026-10-13, explicit user approval authorized permanent application; migration `20261013100505` and its DDL are now deployed and verified. Anonymous PostgREST execution returns `401 / 42501`. Signed-owner HTTP/session E2E remains unverified; deployment alone is not a merge-ready release claim.
+The verified target is `eytwkufdesbarxusifzt` (OCR runtime `NUTRITION_SUPABASE_URL`). OCR's linked `haxbzkwvybiebpogaouv` is **Evidence**, not Nutrition. On 2026-10-13, explicit user approval authorized permanent application; migration `20261013100505` and its DDL are now deployed and verified. Anonymous PostgREST execution returns `401 / 42501`. The user subsequently accepted the user-confirmed work as passed and requested both repositories be merged. Signed-owner HTTP/session E2E remains unverified in the agent's recorded checks.
 
 Apply `supabase/migrations/20261013100505_private_ocr_purchase_nutrition_link.sql` through the Fitness project's reviewed forward-migration process. The target must already have `nutrition_canonical_imports` and `nutrition_foods` (including V5 purchase provenance). The existing public dining-out publication RPC remains unchanged.
 
