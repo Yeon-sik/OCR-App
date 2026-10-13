@@ -4,10 +4,14 @@ package com.pricetrace.receiptscanner.nutrition
 object NutritionPresentation {
     data class Entry(val field: NutritionField, val depth: Int = 0) {
         val label: String
-            get() = when (field) {
-                NutritionField.CARBS_GRAMS, NutritionField.FAT_GRAMS -> "${field.koreanLabel} (총)"
-                else -> field.includedIn?.let { "${field.koreanLabel} (${it.koreanLabel}에 포함)" }
-                    ?: field.koreanLabel
+            get() {
+                val nutrientField = this.field
+                return when (nutrientField) {
+                    NutritionField.CARBS_GRAMS, NutritionField.FAT_GRAMS -> "${nutrientField.koreanLabel} (총)"
+                    else -> nutrientField.includedIn?.let { parent ->
+                        "${nutrientField.koreanLabel} (${parent.koreanLabel}에 포함)"
+                    } ?: nutrientField.koreanLabel
+                }
             }
     }
 
