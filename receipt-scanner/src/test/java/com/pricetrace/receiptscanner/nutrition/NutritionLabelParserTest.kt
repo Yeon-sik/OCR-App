@@ -16,6 +16,48 @@ class NutritionLabelParserTest {
     private val parser = NutritionLabelParser()
 
     @Test
+    fun preservesLiteralCarbohydrateAndFatTotalsWithTheirChildren() {
+        val draft = parser.parse(document(
+            "영양정보 100 g 당",
+            "탄수화물 43 g / 당류 8 g",
+            "지방 28 g / 포화지방 9 g / 트랜스지방 0.4 g",
+            "첨가당 2 g",
+        ))
+
+        assertEquals(43.0, draft.value(NutritionField.CARBS_GRAMS))
+        assertEquals(8.0, draft.value(NutritionField.SUGARS_GRAMS))
+        assertEquals(28.0, draft.value(NutritionField.FAT_GRAMS))
+        assertEquals(9.0, draft.value(NutritionField.SATURATED_FAT_GRAMS))
+        assertEquals(0.4, draft.value(NutritionField.TRANS_FAT_GRAMS))
+        assertEquals(2.0, draft.value(NutritionField.ADDED_SUGARS_GRAMS))
+        assertNull(draft.value(NutritionField.FIBER_GRAMS))
+        assertNull(draft.value(NutritionField.CHOLESTEROL_MG))
+    }
+
+    @Test
+    fun inconsistentChildIsKeptLiteralForReviewAndNeverChangesTheTotal() {
+        val draft = parser.parse(document("영양정보", "탄수화물 43 g", "당류 50 g",
+            "지방 28 g", "포화지방 30 g"))
+        assertEquals(43.0, draft.value(NutritionField.CARBS_GRAMS))
+        assertEquals(50.0, draft.value(NutritionField.SUGARS_GRAMS))
+        assertEquals(28.0, draft.value(NutritionField.FAT_GRAMS))
+        assertEquals(30.0, draft.value(NutritionField.SATURATED_FAT_GRAMS))
+        assertTrue(NutritionLabelValidator.validate(draft).errors.any { it.contains("포함되므로") })
+    }
+
+    @Test
+    fun childOnlyEvidenceDoesNotInventParentTotalsOrUnknownOptionalZeroes() {
+        val draft = parser.parse(document("영양정보", "첨가당류 2 g", "포화지방 9 g", "트랜스지방 0 g"))
+        assertNull(draft.value(NutritionField.CARBS_GRAMS))
+        assertNull(draft.value(NutritionField.SUGARS_GRAMS))
+        assertNull(draft.value(NutritionField.FAT_GRAMS))
+        assertEquals(2.0, draft.value(NutritionField.ADDED_SUGARS_GRAMS))
+        assertEquals(9.0, draft.value(NutritionField.SATURATED_FAT_GRAMS))
+        assertEquals(0.0, draft.value(NutritionField.TRANS_FAT_GRAMS))
+        assertNull(draft.value(NutritionField.FIBER_GRAMS))
+    }
+
+    @Test
     fun parsesKoreanPackagedFoodLabelWithoutInventingUnknownOptionalValues() {
         val draft = parser.parse(
             document(

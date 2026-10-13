@@ -37,6 +37,15 @@ enum class NutritionField(
     CHOLESTEROL_MG("cholesterol_mg", "콜레스테롤", "mg", false),
     ;
 
+    /** Label totals already include these children; never add or subtract them from the total. */
+    val includedIn: NutritionField?
+        get() = when (this) {
+            SUGARS_GRAMS -> CARBS_GRAMS
+            ADDED_SUGARS_GRAMS -> SUGARS_GRAMS
+            SATURATED_FAT_GRAMS, TRANS_FAT_GRAMS -> FAT_GRAMS
+            else -> null
+        }
+
     companion object {
         val requiredFields: List<NutritionField> = entries.filter(NutritionField::required)
         fun fromWireKey(value: String): NutritionField? = entries.firstOrNull { it.wireKey == value }
@@ -254,6 +263,16 @@ object NutritionLabelValidator {
                 val value = draft.value(field)
                 if (value != null && (!value.isFinite() || value < 0.0)) {
                     add("${field.koreanLabel} 값은 0 이상이거나 모름이어야 합니다.")
+                }
+            }
+            NutritionField.entries.forEach { child ->
+                val parent = child.includedIn ?: return@forEach
+                val childValue = draft.value(child) ?: return@forEach
+                val parentValue = draft.value(parent) ?: return@forEach
+                if (childValue.isFinite() && childValue >= 0.0 &&
+                    parentValue.isFinite() && parentValue >= 0.0 && childValue > parentValue
+                ) {
+                    add("${child.koreanLabel} 값은 ${parent.koreanLabel}에 포함되므로 ${parent.koreanLabel} 값보다 클 수 없습니다.")
                 }
             }
         }

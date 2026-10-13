@@ -2,7 +2,9 @@ package com.pricetrace.receiptscanner.nutrition
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -10,6 +12,35 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NutritionLabelJsonTest {
+    @Test
+    fun totalsAndChildrenKeepExistingFlatWireKeysVersionsAndUnknownNulls() {
+        val original = completeDraft().copy(nutrients = completeDraft().nutrients + mapOf(
+            NutritionField.CARBS_GRAMS to 43.0,
+            NutritionField.SUGARS_GRAMS to 8.0,
+            NutritionField.FAT_GRAMS to 28.0,
+            NutritionField.SATURATED_FAT_GRAMS to 9.0,
+            NutritionField.TRANS_FAT_GRAMS to 0.4,
+        ))
+        val wire = Json.parseToJsonElement(NutritionLabelJson.encode(original)).jsonObject
+        assertEquals("fitness-nutrition-draft.v1", wire.getValue("schema_version").jsonPrimitive.content)
+        assertEquals("nutrition-label-parser.v2", wire.getValue("parser_version").jsonPrimitive.content)
+        assertEquals("2", wire.getValue("data_version").toString())
+        val nutrients = wire.getValue("nutrients").jsonObject
+        assertEquals(NutritionField.entries.map { it.wireKey }.toSet(), nutrients.keys)
+        val server = NutritionLabelJson.serverRow(original.asUserVerified("2026-10-13T12:00:00+09:00"),
+            "fitness-user", "2026-10-13T12:00:00+09:00")
+        original.nutrients.forEach { (field, value) ->
+            assertEquals(value, nutrients.getValue(field.wireKey).jsonPrimitive.doubleOrNull)
+            assertEquals(value, server.getValue(field.wireKey).jsonPrimitive.doubleOrNull)
+        }
+        for (field in listOf(NutritionField.ADDED_SUGARS_GRAMS, NutritionField.FIBER_GRAMS,
+            NutritionField.CHOLESTEROL_MG)) {
+            assertEquals(JsonNull, nutrients[field.wireKey])
+            assertEquals(JsonNull, server[field.wireKey])
+        }
+        assertEquals(original, NutritionLabelJson.decode(NutritionLabelJson.encode(original)))
+    }
+
     @Test
     fun localDraftRoundTripsEvidenceAndUnknownValues() {
         val original = completeDraft().copy(

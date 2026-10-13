@@ -60,6 +60,16 @@ object NutritionCorrectionPrompt {
                or ingredient percentages as the target nutrient amount.
             8. Return at most 16 candidates and only one candidate per fieldPath.
             9. Keep reason short and Korean. Do not repeat sensitive manufacturer contact details.
+            10. carbs_grams is TOTAL carbohydrate and already includes sugars_grams.
+                Never subtract sugars_grams from carbs_grams or add sugars_grams to that total.
+                added_sugars_grams is contained in sugars_grams.
+            11. fat_grams is TOTAL fat and already includes saturated_fat_grams and trans_fat_grams.
+                Never subtract saturated_fat_grams or trans_fat_grams from fat_grams or add them to that total.
+            12. When both values are known, do not propose sugars_grams > carbs_grams,
+                added_sugars_grams > sugars_grams, saturated_fat_grams > fat_grams, or trans_fat_grams > fat_grams.
+                If the evidence conflicts with these relations, mark needs_review without changing literal label totals.
+            13. Never synthesize a missing parent total from child values. Unknown is not zero.
+                Preserve missing carbs_grams, sugars_grams, and fat_grams as unknown; do not sum or copy children into them.
 
             For every supplied target, return exactly one fieldChecks entry with fieldPath, verdict, sourceLineIds, reason.
             fieldChecks.verdict must be one of:
