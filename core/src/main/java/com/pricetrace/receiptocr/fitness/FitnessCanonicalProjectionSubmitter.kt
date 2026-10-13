@@ -64,11 +64,14 @@ class FitnessCanonicalProjectionSubmitter(
         }
         var lastFoodId: String? = null
         var reviewReason: String? = null
+        var privateLinkUnavailable = false
         val recoveryCache = RecoveryAuditCache()
         return try {
             for (item in envelope.nutrition) {
                 val itemKey = StableIds.sha256("${request.idempotencyKey}|nutrition|${item.clientKey}")
                 var publicationIdentity: PriceTraceRestaurantMenuIdentity? = null
+                val privatePurchaseIdentity = com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.ownerConfirmed(
+                    envelope, item.clientKey, request.dependencyMetadataJson[IngestionProjection.PRICETRACE_PRICE_OBSERVATION])
                 var identityRequiredForPublication = false
                 val payload = when (item) {
                     is IngestionNutrition.ProductLabel -> CanonicalNutritionPayloadFactory.fromProductLabel(
@@ -171,7 +174,7 @@ class FitnessCanonicalProjectionSubmitter(
                 }
                 var publicationKeySeed = itemKey
                 val recoveredImport = if (request.recoverCanonicalImport && identityRequiredForPublication) {
-                    if (publicationIdentity == null) {
+                    if (publicationIdentity == null && privatePurchaseIdentity == null) {
                         reviewReason = reviewReason ?: "restaurant_menu_identity_requires_ocr_review:${item.clientKey}"
                         continue
                     }
@@ -216,7 +219,15 @@ class FitnessCanonicalProjectionSubmitter(
                                 responses += v5NutritionMetadata(result.rawResponse, item.clientKey)
                             } else if (recoveredImport == null) responses += result.rawResponse
                             lastFoodId = result.response.nutritionFoodId
-                            if (identityRequiredForPublication && publicationIdentity == null) {
+                            if (privatePurchaseIdentity != null) {
+                                when (val linked = gateway.linkPrivatePurchaseNutrition(NutritionPrivatePurchaseLinkPayload(
+                                    result.response.canonicalImportId, result.response.nutritionFoodId, item.clientKey, privatePurchaseIdentity))) {
+                                    NutritionPrivatePurchaseLinkOutcome.Unavailable -> privateLinkUnavailable = true
+                                    is NutritionPrivatePurchaseLinkOutcome.Success -> responses += linked.rawResponse
+                                    is NutritionPrivatePurchaseLinkOutcome.Failure -> return failure(
+                                        linked.message ?: linked.reason.name, linked.reason.isRetryable(), responses)
+                                }
+                            } else if (identityRequiredForPublication && publicationIdentity == null) {
                                 reviewReason = reviewReason ?: if (envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA) {
                                     "pricetrace_purchase_line_identity_metadata_missing:${item.clientKey}"
                                 } else "restaurant_menu_identity_requires_ocr_review:${item.clientKey}"
@@ -260,6 +271,8 @@ class FitnessCanonicalProjectionSubmitter(
             ProjectionSubmission.Success(
                 remoteId = requireNotNull(lastFoodId),
                 metadataJson = responseMetadata(responses),
+                primaryUploaded = !privateLinkUnavailable,
+                primaryPendingReason = if (privateLinkUnavailable) "fitness_private_purchase_link_not_deployed" else null,
             )
         } catch (cancelled: CancellationException) {
             throw cancelled

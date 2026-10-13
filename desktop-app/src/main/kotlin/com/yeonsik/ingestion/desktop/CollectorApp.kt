@@ -193,6 +193,9 @@ fun YeonsikCollectorApp(
                         selectedProjections = next
                     },
                     onEdit = editStructured,
+                    onOwnerRestaurantSelected = { selection ->
+                        runIo { controller.selectOwnerRestaurant(selection); batchCoordinator.syncActiveItem(); refreshRecent() }
+                    },
                     onVerify = {
                         runIo {
                             controller.verify(

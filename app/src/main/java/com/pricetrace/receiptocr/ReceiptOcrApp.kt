@@ -94,6 +94,7 @@ fun ReceiptOcrApp(
         onCanonicalJsonBasisChanged = viewModel::setCanonicalJsonValidatorBasis,
         onCanonicalJsonParse = viewModel::parseCanonicalJsonValidator,
         onCanonicalJsonConfirm = viewModel::confirmCanonicalJsonValidator,
+        onOwnerRestaurantSelected = viewModel::selectOwnerPurchaseRestaurant,
         onCanonicalJsonProjectionSelected = viewModel::selectCanonicalJsonProjection,
         onCanonicalJsonSubmit = viewModel::submitCanonicalJsonValidator,
         onCanonicalJsonRetry = viewModel::retryCanonicalJsonValidator,

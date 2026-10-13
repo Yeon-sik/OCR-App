@@ -1,0 +1,318 @@
+{
+  "schema_version": "yeonsik-ocr.v5",
+  "mode": "restaurant_purchase",
+  "source": {
+    "producer": "chatgpt",
+    "source_files": [
+      {
+        "id": "order-history-1",
+        "type": "order_history",
+        "label": "주문내역 캡처"
+      },
+      {
+        "id": "payment-history-1",
+        "type": "payment_history",
+        "label": "결제내역 캡처"
+      },
+      {
+        "id": "food-photo-1",
+        "type": "food_photo",
+        "label": "테스트용 음식 사진 (영양 수치는 합성 fixture)"
+      }
+    ],
+    "user_text": null
+  },
+  "merchant_candidate": null,
+  "receipt": null,
+  "product_candidates": [],
+  "price_observations": [],
+  "purchase_records": [
+    {
+      "client_key": "purchase-1",
+      "platform": "웨이티",
+      "platform_code": null,
+      "seller": "한성대학교 학생식당",
+      "seller_branch_name": null,
+      "seller_source_namespace": null,
+      "seller_source_code": null,
+      "seller_business_kind": "food_service",
+      "source_version": "chatgpt-restaurant-purchase-v5-example",
+      "order_reference": "853",
+      "purchase_kind": "restaurant",
+      "ordered_on": "2026-10-13",
+      "ordered_at": null,
+      "paid_on": "2026-10-13",
+      "paid_at": null,
+      "status": "paid",
+      "currency": "KRW",
+      "totals": {
+        "subtotal_amount_krw": 9500,
+        "discount_amount_krw": 0,
+        "shipping_amount_krw": 0,
+        "tax_amount_krw": 0,
+        "grand_total_amount_krw": 9500,
+        "paid_amount_krw": 9500
+      },
+      "payment": {
+        "method": "card",
+        "provider": null,
+        "status": "paid"
+      },
+      "line_items": [
+        {
+          "line_key": "line-1",
+          "product_client_key": null,
+          "description": "돼지불백덮밥",
+          "seller_override": null,
+          "option_text": null,
+          "option_items": [],
+          "price_status": "itemized",
+          "merchant_sku": null,
+          "quantity": 1,
+          "unit_price_amount_krw": 5700,
+          "gross_amount_krw": 5700,
+          "discount_amount_krw": 0,
+          "net_amount_krw": 5700
+        },
+        {
+          "line_key": "line-2",
+          "product_client_key": null,
+          "description": "어묵우동",
+          "seller_override": null,
+          "option_text": null,
+          "option_items": [],
+          "price_status": "itemized",
+          "merchant_sku": null,
+          "quantity": 1,
+          "unit_price_amount_krw": 3800,
+          "gross_amount_krw": 3800,
+          "discount_amount_krw": 0,
+          "net_amount_krw": 3800
+        }
+      ],
+      "evidence": [
+        {
+          "source_type": "order_history",
+          "source_attachment_ids": [
+            "order-history-1"
+          ],
+          "source_ref": "order-seller",
+          "field": "seller",
+          "observed_value": "한성대학교 학생식당"
+        },
+        {
+          "source_type": "order_history",
+          "source_attachment_ids": [
+            "order-history-1"
+          ],
+          "source_ref": "order-header",
+          "field": "platform",
+          "observed_value": "웨이티"
+        },
+        {
+          "source_type": "order_history",
+          "source_attachment_ids": [
+            "order-history-1"
+          ],
+          "source_ref": "order-total",
+          "field": "grand_total_amount_krw",
+          "observed_value": "9500"
+        },
+        {
+          "source_type": "payment_history",
+          "source_attachment_ids": [
+            "payment-history-1"
+          ],
+          "source_ref": "payment-status",
+          "field": "payment.status",
+          "observed_value": "paid"
+        }
+      ],
+      "confidence": 0.98
+    }
+  ],
+  "nutrition": [
+    {
+      "client_key": "food-1",
+      "kind": "restaurant_estimate",
+      "line_id": null,
+      "menu_name": "돼지불백덮밥",
+      "payload": null,
+      "estimate": {
+        "estimated": true,
+        "confidence": 0.82,
+        "nutrients": {
+          "calories_kcal": 620,
+          "protein_grams": 28,
+          "carbs_grams": 82,
+          "fat_grams": 18,
+          "sodium_mg": 980,
+          "saturated_fat_grams": 4,
+          "sugars_grams": 9,
+          "fiber_grams": 6,
+          "added_sugars_grams": null,
+          "trans_fat_grams": null,
+          "cholesterol_mg": 110
+        },
+        "ranges": {},
+        "provenance": {
+          "calories_kcal": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          },
+          "protein_grams": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          },
+          "carbs_grams": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          },
+          "fat_grams": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          },
+          "sodium_mg": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          },
+          "saturated_fat_grams": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          },
+          "sugars_grams": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "client_key": "food-2",
+      "kind": "restaurant_estimate",
+      "line_id": null,
+      "menu_name": "어묵우동",
+      "payload": null,
+      "estimate": {
+        "estimated": true,
+        "confidence": 0.82,
+        "nutrients": {
+          "calories_kcal": 620,
+          "protein_grams": 28,
+          "carbs_grams": 82,
+          "fat_grams": 18,
+          "sodium_mg": 980,
+          "saturated_fat_grams": 4,
+          "sugars_grams": 9,
+          "fiber_grams": 6,
+          "added_sugars_grams": null,
+          "trans_fat_grams": null,
+          "cholesterol_mg": 110
+        },
+        "ranges": {},
+        "provenance": {
+          "calories_kcal": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          },
+          "protein_grams": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          },
+          "carbs_grams": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          },
+          "fat_grams": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          },
+          "sodium_mg": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          },
+          "saturated_fat_grams": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          },
+          "sugars_grams": {
+            "value_status": "estimated",
+            "source_type": "food_image_estimate",
+            "evidence_refs": [
+              "food-photo-1"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "consumption": [],
+  "classification_hints": {
+    "cashos": {
+      "category_hint": "food",
+      "institution_hint": null,
+      "payment_method_hint": "card"
+    }
+  },
+  "links": [
+    {
+      "nutrition_client_key": "food-1",
+      "purchase_record_client_key": "purchase-1",
+      "purchase_line_key": "line-1"
+    },
+    {
+      "nutrition_client_key": "food-2",
+      "purchase_record_client_key": "purchase-1",
+      "purchase_line_key": "line-2"
+    }
+  ],
+  "projection_targets": [
+    "pricetrace_price_observation",
+    "cashos_transaction",
+    "fitness_nutrition"
+  ],
+  "review": {
+    "status": "needs_review",
+    "blocking_issues": [],
+    "warnings": []
+  }
+}

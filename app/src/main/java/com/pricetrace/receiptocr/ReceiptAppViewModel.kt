@@ -826,6 +826,9 @@ class ReceiptAppViewModel(
     fun confirmCanonicalJsonValidator() =
         runCanonicalJsonValidator(canonicalJsonValidator::confirm)
 
+    fun selectOwnerPurchaseRestaurant(selection: com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.OwnerRestaurantSelection) =
+        runCanonicalJsonValidator { state -> canonicalJsonValidator.selectOwnerRestaurant(state, selection) }
+
     fun submitCanonicalJsonValidator() =
         runCanonicalJsonValidator(canonicalJsonValidator::submit)
 
