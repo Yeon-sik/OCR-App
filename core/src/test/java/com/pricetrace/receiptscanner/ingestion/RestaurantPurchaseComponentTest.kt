@@ -10,6 +10,27 @@ import org.junit.Test
 import java.io.File
 
 class RestaurantPurchaseComponentTest {
+    @Test fun producerCandidateCompleteExamplesDecodeValidateAndMatchPaidLines() {
+        val document = File("../docs/producer-candidate/07_YEONSIK_OCR_V5_RESTAURANT_PURCHASE_EXAMPLES.md").readText()
+        val examples = Regex("```json\\s*([\\s\\S]*?)```").findAll(document).mapIndexed { index, match ->
+            YeonsikOcrEnvelopeCodec.decode(match.groupValues[1],"producer-candidate-$index").also(YeonsikOcrV5Json::validate)
+        }.toList()
+        assertEquals(5,examples.size)
+        assertEquals(3,Json.parseToJsonElement(YeonsikOcrV5Json.encodeDraft(examples[0])).jsonObject.getValue("links").jsonArray.single().jsonObject.size)
+        assertEquals(1,examples[1].purchaseRecords.single().lineItems.size)
+        assertEquals(2,examples[1].nutrition.size)
+        assertEquals(2,examples[2].purchaseRecords.single().lineItems.size)
+        assertEquals(PurchaseComponentRole.SIDE,examples[2].purchaseNutritionLinks.last().componentRole)
+        assertEquals(PurchaseNutritionRelation.PURCHASE_LINE,examples[2].purchaseNutritionLinks.last().relationType)
+        assertEquals("paid-side",examples[2].purchaseNutritionLinks.last().purchaseLineKey)
+        assertTrue(examples[3].purchaseRecords.single().lineItems.single().optionItems.isNotEmpty())
+        assertEquals(YeonsikOcrV5Json.canonicalize(examples[1]),YeonsikOcrV5Json.canonicalize(examples[4]))
+        examples.forEach { value ->
+            assertTrue(value.consumption.isEmpty())
+            assertFalse(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").containsMatchIn(YeonsikOcrV5Json.canonicalize(value)))
+            assertTrue(IngestionEvidenceGate.evaluate(value,value.source.sourceFiles.map { LocalEvidence(it.id,it.type,true) }).isAllowed)
+        }
+    }
     @Test fun twoOccupiedMenuLinesSwapAtomicallyAndAuditBothArtifacts() {
         val value = base()
         val main = value.nutrition.single() as IngestionNutrition.RestaurantEstimate

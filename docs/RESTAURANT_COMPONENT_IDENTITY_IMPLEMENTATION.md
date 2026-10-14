@@ -1,5 +1,8 @@
 # 식당 구매 구성요소 · identity 검수 구현 보고서
 
+2026-10-15 추가 최종화 및 현재 activation gate는 [후속 검증 보고서](validation/2026-10-15-restaurant-component-finalization.md)를 따른다.
+아래 테스트 수치는 최초 feature 구현 시점의 기록이다. 실제 Project Source of Truth는 확인되지 않았고 Producer 후보는 비활성이다.
+
 ## 기준과 보존
 
 - OCR-App 기준 main: `887948203a13917e3513269a9ed5fb6348fcc728`.
@@ -91,8 +94,9 @@ docs/contracts/RESTAURANT_COMPONENT_IDENTITY_RESOLUTION.md
 허용하지 않는다. 외부 RPC는 `auth.uid()`와 source/identity owner를 확인하고 빈 search_path를
 사용한다. internal helper의 PUBLIC/anon/authenticated 실행 권한은 회수했다.
 
-같은 canonical fingerprint/nutrition key는 purchase source가 달라도 중복 등록할 수 없다.
-다른 사실/부모로 재전송하면 거부하며 새 local revision은 새 evidence history로 남긴다.
+2026-10-15 최종화: component evidence identity는 owner + purchase source + canonical fingerprint + nutrition key다.
+별도 실제 purchase는 같은 fingerprint/local key를 사용해도 독립 evidence로 등록된다.
+동일 source/revision/key에서 다른 사실/부모로 재전송하면 거부하며 새 local revision은 새 evidence history로 남긴다.
 OCR은 저장된 구성요소를 읽고 누락된 항목만 100개씩 보낸다. 저장 후 응답을 잃은 batch도 재개한다.
 
 식당/메뉴 alias용 중복 테이블은 추가하지 않았다. #62의 source bindings를 사용하며
@@ -136,7 +140,7 @@ Project 원본은 workspace에 없으므로 구현과 일치하는 [문서 패�
   V2 component 재사용, provenance/runtime boundary 제한 변경 필요.
 - `07_YEONSIK_OCR_V5_RESTAURANT_PURCHASE_EXAMPLES.md`: 메인 6,000원 + 국물의 완전한 JSON,
   실제 유료 side 및 식당/메뉴/플랫폼 검색 사례 추가 필요.
-- `05_YEONSIK_BUNDLE_SPEC.md`: 수정 불필요. ZIP/manifest/evidence archive/fingerprint transport 유지.
+- `05_YEONSIK_BUNDLE_SPEC.md`: V5 지원 schema 및 order_history/payment_history/food_photo를 문구로 명시. ZIP/manifest/evidence archive/fingerprint transport 유지.
 
 ## 4. Android/Desktop UX
 
@@ -246,6 +250,6 @@ alias는 owner 범위이며 지점/source/serving의 모호함을 해소한 명�
 2. 별도로 승인된 배포 작업에서 local/remote migration 이력과 기존 데이터 제약을 확인하고
    forward migration을 검증·적용한다. 이번 작업에서는 적용하지 않았다.
 3. OCR feature를 병합하여 Android/Desktop 공통 검수와 새 resolver를 활성화한다.
-4. OCR importer 배포에 맞춰 Project 00/06/07 패치를 적용한다. 05 bundle 계약은 유지한다.
+4. OCR importer 배포와 실제 Project 원본 대조를 마친 후 00/05/06/07을 활성화한다. 05는 V5 지원 문구만 보완하고 transport 계약은 유지한다.
 
 실제 commit/push는 feature branch까지만 수행한다. main은 직접 push/merge하지 않는다.

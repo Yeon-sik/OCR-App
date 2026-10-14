@@ -10,6 +10,86 @@ import java.io.File
 
 /** Local adapter integration: actual review/orchestrator/gateways with deterministic HTTP boundaries. */
 class OwnerConfirmedPurchaseRecoveryTest {
+    @Test fun producerBundleOwnerParentContractAndReplay() = componentBundleContract(false)
+    @Test fun producerBundleExactParentContractAndReplay() = componentBundleContract(true)
+
+    private fun componentBundleContract(exact: Boolean) = runBlocking {
+        val canonical = File("../examples/yeonsik-ocr.v5.restaurant-purchase-components.example.json").readText()
+        val bundle = componentBundle(canonical)
+        val envelope = bundle.envelope
+        val id = "component-contract-${if (exact) "exact" else "owner"}"
+        val backend = Backend(envelope).apply {
+            exactAuthority = exact
+            if (exact) resolved.addAll(envelope.purchaseRecords.single().lineItems.map { requireNotNull(it.lineKey) })
+            dropComponentResponse = true
+        }
+        val store = InMemoryIngestionSessionStore()
+        fun app() = CanonicalIngestionUseCase(store,mapOf(
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION to PriceTraceCanonicalProjectionSubmitter(PriceTraceCanonicalGateway(PtStore(),backend)),
+            IngestionProjection.FITNESS_NUTRITION to FitnessCanonicalProjectionSubmitter(NutritionSupabaseGateway(FitnessStore(),backend)),
+            IngestionProjection.CASHOS_TRANSACTION to CashOsCanonicalProjectionSubmitter(CashOsReceiptGateway(CashStore(),backend))))
+        val evidence = bundle.manifest.evidence.map { LocalEvidence(it.sourceFileId,it.type,true) }
+        assertTrue(IngestionEvidenceGate.evaluate(envelope,evidence).isAllowed)
+        val imported = app().importJson(bundle.canonicalJson,id,id,evidence) as CanonicalImportResult.Success
+        val verified = app().confirm(id,imported.envelope,evidence).envelope
+        val targets = setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION,IngestionProjection.FITNESS_NUTRITION,IngestionProjection.CASHOS_TRANSACTION)
+        app().submitSelected(id,verified,targets)
+        app().confirm(id,verified,evidence)
+        app().retrySelected(id,verified,targets)
+        val checkpoint = store.get(id)!!.projections.single { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }.metadataJson!!
+        app().retrySelected(id,verified,targets)
+        assertEquals(checkpoint,store.get(id)!!.projections.single { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }.metadataJson)
+        assertEquals(1,backend.ingestCalls)
+        assertEquals(1,backend.resolved.size)
+        assertEquals(1,backend.componentCalls)
+        assertEquals(1,backend.components.size)
+        assertEquals(2,backend.imports.size)
+        assertEquals(if (exact) 0 else 1,backend.privateLinks.size)
+        assertEquals(if (exact) 1 else 0,backend.publications.size)
+        assertEquals(1,backend.cashRequests.size)
+        assertEquals(1,backend.purchaseRequests.single().getValue("p_purchase").jsonObject.getValue("items").jsonArray.size)
+        assertEquals(1,backend.cashRequests.single().getValue("p_items").jsonArray.size)
+        assertTrue(verified.consumption.isEmpty())
+        assertFalse(CanonicalProjectionPlanner.plan(verified).eligible.contains(IngestionProjection.FITNESS_MEAL))
+        assertNull(PurchaseNutritionIdentity.exact(verified,"food-soup",checkpoint))
+        assertNull(PurchaseNutritionIdentity.ownerConfirmed(verified,"food-soup",checkpoint))
+        val soupImport = backend.imports.values.single { it.first["p_food_name"] == JsonPrimitive("국물") }
+        assertTrue(backend.publications.none { it["p_canonical_import_id"] == soupImport.second["canonical_import_id"] })
+        assertTrue(backend.privateLinks.values.none { it["canonical_import_id"] == soupImport.second["canonical_import_id"] })
+        assertEquals(YeonsikOcrV5Json.canonicalize(envelope),YeonsikOcrV5Json.canonicalize(verified))
+        assertFalse(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").containsMatchIn(YeonsikOcrV5Json.canonicalize(verified)))
+        File("build/component-contract-${if (exact) "exact" else "owner"}.json").apply { parentFile.mkdirs() }.writeText(buildJsonObject {
+            put("canonical",Json.parseToJsonElement(YeonsikOcrV5Json.encodeDraft(verified)))
+            put("purchaseRequest",backend.purchaseRequests.single())
+            put("componentRequest",backend.componentRequests.single())
+            put("cashRequest",backend.cashRequests.single())
+            put("fitnessImports",JsonArray(backend.imports.values.map { it.first }))
+            put("bundleVersion",bundle.manifest.bundleVersion)
+        }.toString())
+    }
+
+    private fun componentBundle(canonical: String): YeonsikBundle {
+        val envelope = YeonsikOcrEnvelopeCodec.decode(canonical,"component-bundle")
+        val evidence = envelope.source.sourceFiles.associate { it.id to "synthetic ${it.id} bytes".toByteArray() }
+        val canonicalHash = java.security.MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray()).joinToString("") { "%02x".format(it) }
+        val manifest = YeonsikBundleManifest(YEONSIK_BUNDLE_VERSION,"canonical.json",canonicalHash,
+            envelope.source.sourceFiles.map { source -> val bytes = evidence.getValue(source.id)
+                YeonsikBundleEvidence(source.id,source.type,"evidence/${source.id}.jpg",
+                    java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) },"image/jpeg",bytes.size.toLong(),"${source.id}.jpg") })
+        val out = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(out).use { zip ->
+            fun add(path: String,bytes: ByteArray) { zip.putNextEntry(java.util.zip.ZipEntry(path)); zip.write(bytes); zip.closeEntry() }
+            add("canonical.json",canonical.toByteArray()); add("manifest.json",YeonsikBundleManifestCodec.encode(manifest).toByteArray())
+            manifest.evidence.forEach { add(it.path,evidence.getValue(it.sourceFileId)) }
+        }
+        val files = linkedMapOf<String,java.io.ByteArrayOutputStream>()
+        val bundle = YeonsikBundleReader.read(java.io.ByteArrayInputStream(out.toByteArray()),"component-bundle",object : YeonsikBundleMaterializer {
+            override fun open(relativePath: String) = java.io.ByteArrayOutputStream().also { files[relativePath] = it }
+            override fun abort() { files.clear() }
+        })
+        manifest.evidence.forEach { assertArrayEquals(evidence.getValue(it.sourceFileId),files.getValue(it.path).toByteArray()) }
+        return bundle
+    }
     private fun fixture() = File("src/test/resources/hansung-restaurant-purchase.v5.json").readText()
     private fun uuid(n: Int) = "00000000-0000-4000-8000-${n.toString().padStart(12, '0')}"
 
@@ -231,6 +311,11 @@ class OwnerConfirmedPurchaseRecoveryTest {
     }
 
     private inner class Backend(val envelope: YeonsikOcrEnvelope, val sourceNumber: Int = 20, val artifactOffset: Int = 0) : PriceObservationHttpTransport, NutritionHttpTransport {
+        var exactAuthority = false
+        val purchaseRequests = mutableListOf<JsonObject>()
+        val componentRequests = mutableListOf<JsonObject>()
+        val cashRequests = mutableListOf<JsonObject>()
+        val publications = mutableListOf<JsonObject>()
         var ingestCalls = 0; var candidateCalls = 0; var dropLinkResponse = false
         var privateRpcMissing = false; var requireOwnerSelection = false; var selectedLine: String? = null
         var dropComponentResponse = false; var componentCalls = 0
@@ -251,26 +336,32 @@ class OwnerConfirmedPurchaseRecoveryTest {
                 put("lineKey", line.lineKey); put("lineOrdinal", i + 1); put("kind", "restaurant_purchase")
                 put("sourceAcceptanceStatus", "accepted"); put("observationCreated", ready)
                 put("observationStatus", if (ready) "created" else "not_created")
-                listOf("authorityStatus", "merchantResolutionStatus", "menuResolutionStatus").forEach { put(it, if (ready) "owner_confirmed" else "unresolved") }
-                put("authoritativeIds", JsonNull); put("reasonCode", if (ready) JsonNull else JsonPrimitive(if (requireOwnerSelection) "owner_restaurant_selection_required" else "restaurant_source_identity_missing"))
+                listOf("authorityStatus", "merchantResolutionStatus", "menuResolutionStatus").forEach { put(it, if (ready) { if (exactAuthority) "exact" else "owner_confirmed" } else "unresolved") }
+                put("authoritativeIds",if (ready && exactAuthority) buildJsonObject {
+                    put("restaurantId",uuid(21)); put("restaurantLocationId",uuid(22)); put("restaurantMenuId",uuid(31 + i)); put("catalogProductId",uuid(41 + i))
+                } else JsonNull); put("reasonCode", if (ready) JsonNull else JsonPrimitive(if (requireOwnerSelection) "owner_restaurant_selection_required" else "restaurant_source_identity_missing"))
                 if (!ready && requireOwnerSelection) put("ownerRestaurantChoices", JsonArray(listOf(21, 23).map { n -> buildJsonObject {
                     put("restaurantId", uuid(n)); put("restaurantLocationId", uuid(n + 1)); put("merchantName", "한성대학교 학생식당"); put("branchName", "지점-$n")
                 } }))
                 if (ready) {
-                    put("observationId", uuid(51 + i)); put("observationType", "purchase_owner_price_observation")
-                    put("ownerConfirmedIds", buildJsonObject { put("restaurantId", uuid(21)); put("restaurantLocationId", uuid(22)); put("restaurantMenuId", uuid(31 + i)) })
+                    put("observationId", uuid(51 + i)); put("observationType", if (exactAuthority) "restaurant_menu_manual_observation" else "purchase_owner_price_observation")
+                    if (!exactAuthority) put("ownerConfirmedIds", buildJsonObject { put("restaurantId", uuid(21)); put("restaurantLocationId", uuid(22)); put("restaurantMenuId", uuid(31 + i)) })
                 }
             } }))
         }
         override suspend fun execute(request: PriceObservationHttpRequest): PriceObservationHttpResponse {
             val body = Json.parseToJsonElement(request.body!!).jsonObject
             val result = when (request.url.substringAfterLast('/')) {
-                "ingest_verified_purchase_price_observation_v1" -> { ingestCalls++; source() }
+                "ingest_verified_purchase_price_observation_v1" -> { ingestCalls++; purchaseRequests += body; source() }
+                "finance_ingest_transaction_v4" -> {
+                    cashRequests += body
+                    return PriceObservationHttpResponse(200,"""[{"ledger_entry_id":"ledger-component","transaction_id":"transaction-component","replayed":false,"item_count":1,"category_id":null,"account_id":null,"category_resolution":"unresolved","account_resolution":"unresolved","account_candidate_ids":[],"posting_state":"CONFIRMED_EXPENSE","posting_date_source":"paid_local_date"}]""")
+                }
                 "get_purchase_price_ingestion_response_v1" -> source()
                 "submit_merchant_identity_candidate_v1" -> {
                     candidateCalls++
                     val merchant = body["p_merchant"]!!.jsonObject
-                    assertEquals(JsonPrimitive("한성대학교 학생식당"), merchant["merchant_name"])
+                    assertEquals(JsonPrimitive(envelope.purchaseRecords.single().seller!!), merchant["merchant_name"])
                     assertEquals(JsonPrimitive("food_service"), merchant["business_kind"])
                     listOf("source_namespace", "source_location_code", "branch_name", "address", "phone", "business_registration_number").forEach { assertEquals(JsonNull, merchant[it]) }
                     assertEquals(JsonPrimitive(true), body["p_user_verified"])
@@ -289,12 +380,14 @@ class OwnerConfirmedPurchaseRecoveryTest {
                 "resolve_purchase_owner_platform_v1" -> source()
                 "register_purchase_menu_components_v1" -> {
                     componentCalls++
+                    componentRequests += body
                     body.getValue("p_components").jsonArray.forEach { raw ->
                         val component = raw.jsonObject
                         val key = component.getValue("nutritionClientKey").jsonPrimitive.content
                         components[key] = JsonObject(component + mapOf("id" to (components[key]?.get("id") ?: JsonPrimitive(uuid(80 + components.size))),
                             "lineKey" to body.getValue("p_line_key"),"canonicalFingerprint" to body.getValue("p_canonical_fingerprint"),
-                            "parentOwnerMenuId" to JsonPrimitive(uuid(31)),"parentRestaurantMenuId" to JsonNull))
+                            "parentOwnerMenuId" to (if (exactAuthority) JsonNull else JsonPrimitive(uuid(31))),
+                            "parentRestaurantMenuId" to (if (exactAuthority) JsonPrimitive(uuid(31)) else JsonNull)))
                     }
                     if (dropComponentResponse || componentCalls == dropComponentResponseAt) { dropComponentResponse = false; dropComponentResponseAt = null; return PriceObservationHttpResponse(503,"component response lost after commit") }
                     source()
@@ -306,6 +399,15 @@ class OwnerConfirmedPurchaseRecoveryTest {
         override suspend fun execute(request: NutritionHttpRequest): NutritionHttpResponse {
             val body = Json.parseToJsonElement(request.body!!).jsonObject
             return when (request.url.substringAfterLast('/')) {
+                "publish_verified_ocr_dining_out_nutrition_v1" -> {
+                    publications += body
+                    NutritionHttpResponse(200,buildJsonObject {
+                        listOf("canonical_import_id","nutrition_food_id","restaurant_id","restaurant_location_id","restaurant_menu_id","catalog_product_id")
+                            .forEach { put(it,body.getValue("p_$it")) }
+                        put("nutrition_link_id","link-main"); put("nutrition_link_revision",1); put("visibility","public")
+                        put("food_revision",1); put("publication_revision",1); put("published_at","2026-10-14T00:00:00Z"); put("replayed",false)
+                    }.toString())
+                }
                 "import_canonical_nutrition_v3" -> {
                     val key = body["p_idempotency_key"]!!.jsonPrimitive.content
                     val old = imports[key]
@@ -337,6 +439,12 @@ class OwnerConfirmedPurchaseRecoveryTest {
         override fun read() = PriceTraceSupabaseConfig("https://pt.example", "abcdefghijklmnopqrst", "owner", "", "token")
         override fun saveConnection(url: String, publishableKey: String) = Result.success(read())
         override fun saveSession(userId: String, email: String, accessToken: String, refreshToken: String) = Result.success(read())
+        override fun clearSession() = true
+    }
+    private class CashStore : CashOsSupabaseStore {
+        override fun read() = CashOsSupabaseConfig("https://cash.example","abcdefghijklmnopqrst","owner","","token")
+        override fun saveConnection(url: String,publishableKey: String) = Result.success(read())
+        override fun saveSession(userId: String,email: String,accessToken: String,refreshToken: String) = Result.success(read())
         override fun clearSession() = true
     }
     private class FitnessStore : NutritionSupabaseStore {

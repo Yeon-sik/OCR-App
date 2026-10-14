@@ -85,9 +85,14 @@ purchase_records, option_items, consumption, projection_targets의 기존 계약
 
 ## 05_YEONSIK_BUNDLE_SPEC.md
 
-수정 불필요. ZIP/manifest, attachment ID/type, byte_size/SHA-256, evidence archive 및
-bundle fingerprint의 transport 계약은 변경하지 않는다. canonical 내용의 새 revision은
-기존 수정본 보관·verification event 경로를 사용한다.
+transport 구조는 변경하지 않는다. canonical.json 지원 schema에 V5를 명시하고,
+V5 attachment-backed type인 order_history/payment_history/food_photo를 추가 설명한다.
+ZIP/manifest exact shape, attachment ID/type binding, byte_size/SHA-256, evidence archive 및
+bundle fingerprint/version은 유지한다. Evidence UUID/Storage URL은 canonical에 금지한다.
+
+2026-10-15: 이 파일은 실제 Project Source of Truth가 아니다. 원본이 없으므로
+[비활성 00/05/06/07 runtime 후보](producer-candidate/00_YEONSIK_OCR_SCHEMA_ROUTER.md)를
+준비했다. 07의 완전 예제 5개는 core strict parser 테스트 대상이다. 배포 및 원본 대조 전 활성화하지 않는다.
 
 ## 적용 순서
 
