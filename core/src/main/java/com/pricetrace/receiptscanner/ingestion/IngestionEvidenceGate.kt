@@ -56,7 +56,7 @@ object IngestionEvidenceGate {
             if (wrongTypes.isNotEmpty()) return IngestionEvidenceResult(false, wrongTypes.map { "purchase_evidence_type_mismatch:$it" })
             val purchaseResult = evaluatePurchaseEvidence(envelope, evidence, artifactKeys)
             if (purchaseResult?.isAllowed == false) return purchaseResult
-            val selected = envelope.nutrition.filterIsInstance<IngestionNutrition.RestaurantEstimate>()
+            val selected = envelope.nutrition
                 .filter { artifactKeys == null || IngestionArtifactKeys.nutrition(it.clientKey) in artifactKeys }
             val localById = evidence.groupBy(LocalEvidence::attachmentId)
             val missing = selected.flatMap { YeonsikOcrV5Json.foodEvidenceIds(it) }.distinct().filter { id ->

@@ -315,6 +315,14 @@ class CanonicalIngestionUseCase(
     ): List<ProjectionState> = submitSelected(ingestionId, envelope, selectedProjections)
 
     /** Shared OCR-only resolution and Fitness resume path used by Android and Desktop. */
+    suspend fun reviewPurchaseIdentity(ingestionId: String, envelope: YeonsikOcrEnvelope, command: PurchaseIdentityCommand): ProjectionSubmission {
+        val result = orchestrator.reviewPurchaseIdentity(ingestionId, envelope, command)
+        if (command.action !in setOf(PurchaseIdentityAction.SEARCH, PurchaseIdentityAction.DEFER) && result is ProjectionSubmission.Success && !result.requiresReview) {
+            orchestrator.submitProjection(ingestionId, IngestionProjection.FITNESS_NUTRITION, envelope)
+        }
+        return result
+    }
+
     suspend fun selectOwnerPurchaseRestaurant(ingestionId: String, envelope: YeonsikOcrEnvelope,
         selection: PurchaseNutritionIdentity.OwnerRestaurantSelection): ProjectionSubmission? =
         resolvePendingMerchantIdentityAndResume(ingestionId, envelope, selection)

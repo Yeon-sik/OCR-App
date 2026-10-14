@@ -1078,9 +1078,32 @@ data class PurchaseNutritionLink(
     val purchaseRecordClientKey: String,
     val purchaseLineKey: String,
     val nutritionClientKey: String,
+    val componentRole: PurchaseComponentRole = PurchaseComponentRole.MAIN,
+    val relationType: PurchaseNutritionRelation = PurchaseNutritionRelation.PURCHASE_LINE,
 ) {
     init {
         require(purchaseRecordClientKey.isNotBlank() && purchaseLineKey.isNotBlank() && nutritionClientKey.isNotBlank())
+    }
+    // Preserve legacy projection payload fingerprints and checkpoint keys.
+    override fun toString(): String = "PurchaseNutritionLink(purchaseRecordClientKey=$purchaseRecordClientKey, purchaseLineKey=$purchaseLineKey, nutritionClientKey=$nutritionClientKey)" +
+        if (componentRole == PurchaseComponentRole.MAIN && relationType == PurchaseNutritionRelation.PURCHASE_LINE) ""
+        else "|role=${componentRole.wireValue}|relation=${relationType.wireValue}"
+}
+
+enum class PurchaseComponentRole(val wireValue: String) {
+    MAIN("main"), SIDE("side"), COMPLIMENTARY_SIDE("complimentary_side"),
+    SAUCE("sauce"), BEVERAGE("beverage"), OTHER("other");
+    companion object {
+        fun fromWireValue(value: String) = entries.singleOrNull { it.wireValue == value }
+            ?: error("Unsupported purchase component role: $value")
+    }
+}
+
+enum class PurchaseNutritionRelation(val wireValue: String) {
+    PURCHASE_LINE("purchase_line"), MENU_COMPONENT("menu_component");
+    companion object {
+        fun fromWireValue(value: String) = entries.singleOrNull { it.wireValue == value }
+            ?: error("Unsupported purchase nutrition relation: $value")
     }
 }
 

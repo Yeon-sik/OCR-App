@@ -170,9 +170,72 @@ class OwnerConfirmedPurchaseRecoveryTest {
         assertEquals(YeonsikOcrV5Json.canonicalize(envelope), YeonsikOcrV5Json.canonicalize(confirmed.envelope))
     }
 
+    @Test fun complimentarySoupStaysPrivateAndComponentResponseLossDoesNotReplaySuccessfulSinks() = runBlocking {
+        val base = YeonsikOcrEnvelopeCodec.decode(fixture(),"component-retry")
+        val main = base.nutrition.first() as IngestionNutrition.RestaurantEstimate
+        val envelope = base.copy(nutrition = base.nutrition + IngestionNutrition.MealComponentEstimate("food-soup",menuName = "국물",estimate = main.estimate),
+            purchaseNutritionLinks = base.purchaseNutritionLinks + base.purchaseNutritionLinks.first().copy(nutritionClientKey = "food-soup",
+                componentRole = PurchaseComponentRole.COMPLIMENTARY_SIDE,relationType = PurchaseNutritionRelation.MENU_COMPONENT))
+        val backend = Backend(envelope).apply { dropComponentResponse = true }
+        val store = InMemoryIngestionSessionStore()
+        var cashCalls = 0
+        fun app() = CanonicalIngestionUseCase(store,mapOf(
+            IngestionProjection.PRICETRACE_PRICE_OBSERVATION to PriceTraceCanonicalProjectionSubmitter(PriceTraceCanonicalGateway(PtStore(),backend)),
+            IngestionProjection.FITNESS_NUTRITION to FitnessCanonicalProjectionSubmitter(NutritionSupabaseGateway(FitnessStore(),backend)),
+            IngestionProjection.CASHOS_TRANSACTION to object : IngestionProjectionSubmitter {
+                override suspend fun submit(request: ProjectionRequest): ProjectionSubmission { cashCalls++; return ProjectionSubmission.Success("cash-component") }
+            }))
+        val evidence = envelope.source.sourceFiles.map { LocalEvidence(it.id,it.type,true) }
+        val selected = setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION,IngestionProjection.FITNESS_NUTRITION,IngestionProjection.CASHOS_TRANSACTION)
+        val imported = app().importJson(YeonsikOcrV5Json.encodeDraft(envelope),"component-retry","component-retry",evidence) as CanonicalImportResult.Success
+        val verified = app().confirm("component-retry",imported.envelope,evidence).envelope
+        app().submitSelected("component-retry",verified,selected)
+        assertEquals(3,backend.imports.size)
+        assertEquals(1,cashCalls)
+        app().confirm("component-retry",verified,evidence)
+        val restarted = app()
+        restarted.confirm("component-retry",verified,evidence)
+        restarted.retrySelected("component-retry",verified,selected)
+        assertEquals(1,backend.ingestCalls)
+        assertEquals(2,backend.resolved.size)
+        assertEquals(1,backend.components.size)
+        assertEquals(1,backend.componentCalls)
+        assertEquals(3,backend.imports.size)
+        assertEquals(2,backend.privateLinks.size)
+        assertEquals(1,cashCalls)
+        val soup = backend.imports.values.single { it.first["p_food_name"] == JsonPrimitive("국물") }.first
+        assertEquals(JsonPrimitive("complimentary_side"),soup.getValue("p_provenance").jsonObject["component_role"])
+        assertEquals(JsonPrimitive("menu_component"),soup.getValue("p_provenance").jsonObject["relation_type"])
+        assertNull(PurchaseNutritionIdentity.ownerConfirmed(verified,"food-soup",store.get("component-retry")!!.projections.single { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }.metadataJson))
+        assertEquals(YeonsikOcrV5Json.canonicalize(envelope),YeonsikOcrV5Json.canonicalize(verified))
+        assertTrue(verified.consumption.isEmpty())
+    }
+
+    @Test fun componentBatchesRecoverOnlyMissingItemsAfterACommittedResponseIsLost() = runBlocking {
+        val base = YeonsikOcrEnvelopeCodec.decode(fixture(),"component-batch")
+        val main = base.nutrition.first() as IngestionNutrition.RestaurantEstimate
+        val components = (1..205).map { IngestionNutrition.MealComponentEstimate("component-$it",menuName = "국물 $it",estimate = main.estimate) }
+        val envelope = base.copy(nutrition = base.nutrition + components,
+            purchaseNutritionLinks = base.purchaseNutritionLinks + components.map { base.purchaseNutritionLinks.first().copy(nutritionClientKey = it.clientKey,
+                componentRole = PurchaseComponentRole.COMPLIMENTARY_SIDE,relationType = PurchaseNutritionRelation.MENU_COMPONENT) })
+        val backend = Backend(envelope).apply { resolved += listOf("line-1","line-2"); dropComponentResponseAt = 2 }
+        val gateway = PriceTraceCanonicalGateway(PtStore(),backend)
+        val request = OcrPurchaseMenuResolutionRequest("purchase-1",uuid(20),"line-1",envelope = envelope)
+        assertTrue(gateway.synchronizePurchaseContext(request) is PriceTraceCanonicalOutcome.Failure)
+        assertEquals(200,backend.components.size)
+        assertTrue(gateway.synchronizePurchaseContext(request) is PriceTraceCanonicalOutcome.Success)
+        assertEquals(205,backend.components.size)
+        assertEquals(3,backend.componentCalls)
+        assertEquals(2,backend.resolved.size)
+        assertEquals(0,backend.ingestCalls)
+    }
+
     private inner class Backend(val envelope: YeonsikOcrEnvelope, val sourceNumber: Int = 20, val artifactOffset: Int = 0) : PriceObservationHttpTransport, NutritionHttpTransport {
         var ingestCalls = 0; var candidateCalls = 0; var dropLinkResponse = false
         var privateRpcMissing = false; var requireOwnerSelection = false; var selectedLine: String? = null
+        var dropComponentResponse = false; var componentCalls = 0
+        var dropComponentResponseAt: Int? = null
+        val components = linkedMapOf<String,JsonObject>()
         val resolved = linkedSetOf<String>()
         val merchants = linkedMapOf<String, JsonObject>()
         val imports = linkedMapOf<String, Pair<JsonObject, JsonObject>>()
@@ -182,6 +245,7 @@ class OwnerConfirmedPurchaseRecoveryTest {
             put("lineAuthorityVersion", "purchase-line-authority.v1")
             put("observationCreated", resolved.isNotEmpty()); put("observationCount", resolved.size)
             put("observationIds", JsonArray(resolved.map { JsonPrimitive(uuid(50 + it.last().digitToInt())) }))
+            put("menuComponents",JsonArray(components.values.toList()))
             put("lineResults", JsonArray(envelope.purchaseRecords.single().lineItems.mapIndexed { i, line -> buildJsonObject {
                 val ready = line.lineKey in resolved
                 put("lineKey", line.lineKey); put("lineOrdinal", i + 1); put("kind", "restaurant_purchase")
@@ -216,10 +280,23 @@ class OwnerConfirmedPurchaseRecoveryTest {
                 }
                 "resolve_user_confirmed_purchase_restaurant_line_v1" -> {
                     assertEquals(setOf("p_purchase_source_id", "p_line_key", "p_merchant_candidate_id", "p_user_verified") +
-                        if (body.containsKey("p_owner_restaurant_id")) setOf("p_owner_restaurant_id") else emptySet(), body.keys)
+                        setOf("p_owner_restaurant_id", "p_owner_menu_id", "p_resolution_action"), body.keys)
                     assertEquals(JsonPrimitive(uuid(40)), body["p_merchant_candidate_id"])
-                    if (body.containsKey("p_owner_restaurant_id")) { assertEquals(JsonPrimitive(uuid(21)), body["p_owner_restaurant_id"]); selectedLine = body["p_line_key"]!!.jsonPrimitive.content; requireOwnerSelection = false }
+                    if (body["p_owner_restaurant_id"] != JsonNull) { assertEquals(JsonPrimitive(uuid(21)), body["p_owner_restaurant_id"]); selectedLine = body["p_line_key"]!!.jsonPrimitive.content; requireOwnerSelection = false }
                     if (!requireOwnerSelection) resolved += body["p_line_key"]!!.jsonPrimitive.content
+                    source()
+                }
+                "resolve_purchase_owner_platform_v1" -> source()
+                "register_purchase_menu_components_v1" -> {
+                    componentCalls++
+                    body.getValue("p_components").jsonArray.forEach { raw ->
+                        val component = raw.jsonObject
+                        val key = component.getValue("nutritionClientKey").jsonPrimitive.content
+                        components[key] = JsonObject(component + mapOf("id" to (components[key]?.get("id") ?: JsonPrimitive(uuid(80 + components.size))),
+                            "lineKey" to body.getValue("p_line_key"),"canonicalFingerprint" to body.getValue("p_canonical_fingerprint"),
+                            "parentOwnerMenuId" to JsonPrimitive(uuid(31)),"parentRestaurantMenuId" to JsonNull))
+                    }
+                    if (dropComponentResponse || componentCalls == dropComponentResponseAt) { dropComponentResponse = false; dropComponentResponseAt = null; return PriceObservationHttpResponse(503,"component response lost after commit") }
                     source()
                 }
                 else -> error("Unexpected PriceTrace RPC ${request.url}")

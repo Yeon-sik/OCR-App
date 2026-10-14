@@ -712,6 +712,25 @@ class CanonicalReviewController(
         applied: YeonsikOcrEnvelope,
         path: String,
     ): List<FieldChange> = buildList {
+        if (path.startsWith("links[")) {
+            original.purchaseNutritionLinks.forEach { before ->
+                val key = before.nutritionClientKey
+                val after = applied.purchaseNutritionLinks.single { it.nutritionClientKey == key }
+                listOf("purchase_record_client_key", "purchase_line_key", "component_role", "relation_type").forEach { field ->
+                    val linkedPath = "links[$key].$field"
+                    val oldValue = CanonicalFieldRegistry.value(original,linkedPath)
+                    val newValue = CanonicalFieldRegistry.value(applied,linkedPath)
+                    if (linkedPath != path && oldValue != newValue) add(FieldChange(linkedPath,oldValue,newValue,
+                        if (field in setOf("component_role","relation_type")) CanonicalFieldType.ENUM else CanonicalFieldType.TEXT))
+                }
+                val oldNutrition = original.nutrition.single { it.clientKey == key }
+                val newNutrition = applied.nutrition.single { it.clientKey == key }
+                if (oldNutrition is IngestionNutrition.MealComponentEstimate && newNutrition is IngestionNutrition.RestaurantEstimate) {
+                    add(FieldChange("nutrition[$key].kind","meal_component_estimate","restaurant_estimate",CanonicalFieldType.ENUM))
+                    add(FieldChange("nutrition[$key].component_role",oldNutrition.componentRole,null,CanonicalFieldType.ENUM))
+                }
+            }
+        }
         if (path.startsWith("receipt.merchant.")) {
             addAll(merchantCandidateChanges(original, applied))
         }
@@ -793,13 +812,39 @@ class CanonicalReviewController(
             val match = Regex("""links\[([^]]+)]\.(.+)""").matchEntire(path) ?: error("invalid purchase link path")
             val key = match.groupValues[1]
             val value = parsed.value as? String ?: error("link key is required")
+            if (match.groupValues[2] == "parent_purchase_line") {
+                val current = envelope.purchaseNutritionLinks.single { it.nutritionClientKey == key }
+                val (record,line) = envelope.purchaseRecords.flatMap { record -> record.lineItems.map { record to it } }
+                    .single { CanonicalFieldRegistry.purchaseLineChoice(envelope,key,it.first,it.second) == value }
+                val occupied = envelope.purchaseNutritionLinks.singleOrNull { it.nutritionClientKey != key &&
+                    it.relationType == com.pricetrace.receiptscanner.ingestion.PurchaseNutritionRelation.PURCHASE_LINE &&
+                    it.purchaseRecordClientKey == record.clientKey && it.purchaseLineKey == line.lineKey }
+                envelope.copy(purchaseNutritionLinks = envelope.purchaseNutritionLinks.map { link -> when {
+                    link.nutritionClientKey == key -> link.copy(purchaseRecordClientKey = record.clientKey,purchaseLineKey = requireNotNull(line.lineKey))
+                    current.relationType == com.pricetrace.receiptscanner.ingestion.PurchaseNutritionRelation.PURCHASE_LINE && link == occupied ->
+                        link.copy(purchaseRecordClientKey = current.purchaseRecordClientKey,purchaseLineKey = current.purchaseLineKey)
+                    else -> link
+                } })
+            } else {
             envelope.copy(purchaseNutritionLinks = envelope.purchaseNutritionLinks.map { link ->
                 if (link.nutritionClientKey != key) link else when (match.groupValues[2]) {
                     "purchase_record_client_key" -> link.copy(purchaseRecordClientKey = value)
                     "purchase_line_key" -> link.copy(purchaseLineKey = value)
+                    "component_role" -> com.pricetrace.receiptscanner.ingestion.PurchaseComponentRole.fromWireValue(value).let { role ->
+                        link.copy(componentRole = role, relationType = when (role) {
+                            com.pricetrace.receiptscanner.ingestion.PurchaseComponentRole.MAIN -> com.pricetrace.receiptscanner.ingestion.PurchaseNutritionRelation.PURCHASE_LINE
+                            com.pricetrace.receiptscanner.ingestion.PurchaseComponentRole.COMPLIMENTARY_SIDE -> com.pricetrace.receiptscanner.ingestion.PurchaseNutritionRelation.MENU_COMPONENT
+                            else -> link.relationType
+                        })
+                    }
+                    "relation_type" -> link.copy(relationType = com.pricetrace.receiptscanner.ingestion.PurchaseNutritionRelation.fromWireValue(value))
                     else -> error("link field is not editable")
                 }
+            },nutrition = envelope.nutrition.map { item ->
+                if (match.groupValues[2] == "component_role" && value != "complimentary_side" && item.clientKey == key && item is IngestionNutrition.MealComponentEstimate)
+                    IngestionNutrition.RestaurantEstimate(item.clientKey,item.lineId,item.menuName,item.estimate) else item
             })
+            }
         }
         else -> error("이 필드는 편집할 수 없습니다.")
     }

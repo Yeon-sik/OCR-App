@@ -1,5 +1,38 @@
 # yeonsik-ocr.v5: 식당 구매 기록과 음식 사진
 
+## 2026-10-14 구성요소와 identity 검수 확장
+
+기존 V5의 3-key links는 그대로 main + purchase_line이다. 선택 `component_role`은
+main/side/complimentary_side/sauce/beverage/other, `relation_type`은 purchase_line/menu_component다.
+하나의 실제 부모 행에 main 최대 하나와 구성요소 여러 개를 연결한다. 무료 반찬은 가짜 행이나
+0원 observation을 만들지 않는다. [완전한 구성요소 예제](../examples/yeonsik-ocr.v5.restaurant-purchase-components.example.json)와
+[Project 계약 패치](PROJECT_V5_CONTRACT_PATCH.md)를 함께 사용한다.
+최신 기준 SHA, 전체 변경 목록과 검증 결과는
+[구현 보고서](RESTAURANT_COMPONENT_IDENTITY_IMPLEMENTATION.md)에 기록했다.
+
+Android/Desktop은 공통 field registry에서 실제 부모 행과 역할을 수정한다. 수정은 validation,
+fingerprint, verification, projection payload와 감사 기록을 다시 계산한다.
+유료 행을 이미 다른 음식이 사용하면 선택지에 "맞교환"을 표시하고 두 연결을 한 번에 검증·수정한다.
+무료 component의 역할을 수정할 때는 같은 식품 추정치와 provenance를 보존한다. 기본 3-key canonical과
+기존 projection dependency 문자열은 보존한다. 저장된 구매 source를 검수한 후 공통 resolver의
+검색/선택/다시 검색/신규 등록/보류를 사용한다. canonical seller/menu/platform은 바뀌지 않으며
+선택과 query는 기존 projection runtime metadata/checkpoint에만 저장한다.
+
+식당·메뉴 alias는 #62의 merchant/menu source bindings를 재사용한다. 명시적 source pair/branch
+충돌과 serving/option 차이를 합치지 않는다. 검색의 공백·단어 matching은 제안 전용이다.
+모호한 후보는 사용자가 선택한다. 공개 검증 후보 선택도 owner-confirmed mapping이며,
+기존 exact/global source authority 및 공개 publication 경로와 구분한다.
+
+구성요소 Nutrition은 기존 V3 food-estimate private import를 재사용하고 부모 메뉴의 public identity나
+private paid-menu link를 부여하지 않는다. PT에는 부모 메뉴의 owner-scoped 구성 관계 및 해당
+canonical revision/evidence binding을 저장한다. 실제 유료 side는 기존 별도 메뉴와 가격 경로다.
+구매만으로 consumption 또는 Meal을 만들지 않는다.
+
+새 PT migration은 `20261014091055_restaurant_component_identity_resolution.sql`이다.
+플랫폼은 신규 owner registry와 기존 purchase source의 이름/code binding을 사용한다. 실제 remote
+migration apply/production write는 이번 작업 범위에 포함하지 않는다. V1–V4 importer와 bundle
+transport/manifest는 변경하지 않는다. 아래의 이전 날짜 검증 수치는 해당 당시의 기록이다.
+
 V5는 비영수증 식당 주문·결제 사실과 음식 사진 기반 영양 추정치를 하나의 canonical과 기존 `.yeonsik` ZIP으로 처리한다. 주문내역만 있으면 V4, 영수증과 음식 사진이면 V2를 계속 사용한다. 자동 승격이나 이름 기반 연결은 없다.
 
 기준: OCR-App `origin/main`의 `d8e64f8`을 fetch/pull한 뒤 `feat/ocr-v5-restaurant-purchase`에서 구현했다. 2026-10-09 후속 정합성 수정은 fetch한 PriceTrace `origin/feat/ocr-purchase-line-resolution`의 `0007dc9`와 Fitness `feat/ocr-v5-fitness-compat`의 `dcf8fe2` 계약을 대조했다. 다른 저장소의 production 파일과 기존 아이콘·설정 작업은 변경하지 않았다.
@@ -18,10 +51,10 @@ top-level은 아래 **14개 key와 정확히 일치**해야 한다. 누락·추�
 | `product_candidates` | `[]` |
 | `price_observations` | `[]` |
 | `purchase_records` | 1개 이상. 기존 V4 필드·금액·날짜·evidence 검증 재사용. `purchase_kind = "restaurant"` |
-| `nutrition` | 1개 이상. 기존 V2 `restaurant_estimate`. `line_id = null`. 필수 영양소 provenance는 `food_image_estimate`, evidence_refs는 실제 선언된 `food_photo` ID |
+| `nutrition` | 1개 이상. V2 `restaurant_estimate` 또는 complimentary side의 `meal_component_estimate`. `line_id = null`. 필수 영양소 provenance는 `food_image_estimate`, evidence_refs는 실제 선언된 `food_photo` ID. V5 component legacy identity reference 금지 |
 | `consumption` | 기존 V2 item-level 계약. 선택 사항. 구매 사실만으로 생성하지 않음 |
 | `classification_hints` | 기존 `{cashos: {category_hint, institution_hint, payment_method_hint}}` |
-| `links` | 아래 exact 3-key 객체 배열. 모든 nutrition에 정확한 구매 행 하나가 연결되어야 함 |
+| `links` | 아래 필수 3-key 객체 배열. 선택 `component_role`/`relation_type`을 지원. 모든 nutrition에 실제 parent 구매 행 하나가 연결되어야 함 |
 | `projection_targets` | 기존 projection 이름. PT 가격, CashOS transaction, Fitness Nutrition/Meal. Core가 실제 적격성을 계산 |
 | `review` | 기존 `{status, blocking_issues, warnings}`. 기존 로컬 persistence 경로만 `verification_basis`를 보존 |
 
@@ -33,7 +66,7 @@ top-level은 아래 **14개 key와 정확히 일치**해야 한다. 누락·추�
 }
 ```
 
-세 key는 비어 있을 수 없다. record, 해당 record의 실제 `line_items.line_key`, 실제 nutrition을 참조해야 한다. dangling, duplicate, conflicting link를 거부한다. 링크가 있는 행에는 명시적인 V4 `line_key`가 필요하다. 연결되지 않은 다른 구매 행으로부터 영양을 생성하지 않는다. V3 `priceObservationClientKey`를 구매 행 key로 사용하지 않는다.
+세 key는 비어 있을 수 없다. record, 해당 record의 실제 `line_items.line_key`, 실제 nutrition을 참조해야 한다. dangling, duplicate nutrition link와 동일 부모 행의 중복 main을 거부한다. 한 부모 행에는 main 최대 하나와 component 여러 개가 가능하다. 링크가 있는 행에는 명시적인 V4 `line_key`가 필요하다. 연결되지 않은 다른 구매 행으로부터 영양을 생성하지 않는다. V3 `priceObservationClientKey`를 구매 행 key로 사용하지 않는다.
 
 전체 유효 JSON: [V5 예제](../examples/yeonsik-ocr.v5.restaurant-purchase.example.json). 예제의 주문·결제·음식 파일은 합성 source 선언이며 실제 evidence 파일을 포함하지 않는다.
 
@@ -45,7 +78,7 @@ top-level은 아래 **14개 key와 정확히 일치**해야 한다. 누락·추�
 [V4 구조화 옵션 계약](YEONSIK_OCR_V4_PURCHASE_EVIDENCE.md#구매-행의-구조화-옵션-v4v5-공통)과
 [세 옵션 전체 예제](../examples/yeonsik-ocr.v5.restaurant-purchase-options.example.json)를 참고한다.
 option은 parent line 내부에만 존재한다. Nutrition link는 계속
-`purchase_record_client_key + purchase_line_key + nutrition_client_key`의 exact 3-key이며
+`purchase_record_client_key + purchase_line_key + nutrition_client_key`를 필수로 유지하며
 `option_key`를 링크에 넣지 않는다. 옵션의 kcal/탄수/단백질 문자열은 영양 숫자나
 `food_image_estimate` provenance로 승격되지 않는다. 옵션 편집은 nutrient·food evidence·
 consumption·source/user_text를 변경하지 않는다. purchase만으로 consumption을 만들지 않는다.
