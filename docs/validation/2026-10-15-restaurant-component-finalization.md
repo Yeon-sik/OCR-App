@@ -1,5 +1,7 @@
 # Restaurant component identity finalization
 
+이 문서는 PT 배포 전 검증 기록이다. 승인된 실제 배포·signed HTTP smoke·OCR 최종 gate는 [후속 배포 보고서](2026-10-15-component-deployment-and-ocr-merge-gate.md)를 따른다.
+
 검증일: 2026-10-15 KST. 현재 local 판정: READY_FOR_PT_MERGE. 운영 활성화 판정이 아니다.
 
 ## 1. 발견한 기존 문제
