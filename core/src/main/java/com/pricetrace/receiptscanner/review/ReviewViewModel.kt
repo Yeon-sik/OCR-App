@@ -173,11 +173,18 @@ data class ReviewViewModel(
                 envelope.purchaseNutritionLinks.forEach { link ->
                     val record = envelope.purchaseRecords.single { it.clientKey == link.purchaseRecordClientKey }
                     val line = record.lineItems.single { it.lineKey == link.purchaseLineKey }
+                    val nutrition = envelope.nutrition.single { it.clientKey == link.nutritionClientKey }
+                    val metadata = session?.projections?.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson
+                    val menuCard = com.pricetrace.receiptscanner.ingestion.PurchaseIdentityReview.cards(envelope,metadata).singleOrNull {
+                        it.command.purchaseRecordClientKey == record.clientKey && it.command.lineKey == link.purchaseLineKey && it.command.entity == com.pricetrace.receiptscanner.ingestion.PurchaseIdentityEntity.MENU }
                     add(ReviewRow(
                         id = "purchase-nutrition:${link.nutritionClientKey}",
                         section = "구매 행과 영양 연결",
-                        item = line.description ?: link.purchaseLineKey,
+                        item = when(nutrition) { is IngestionNutrition.RestaurantEstimate -> nutrition.menuName; is IngestionNutrition.MealComponentEstimate -> nutrition.menuName; else -> link.nutritionClientKey },
                         value = "${link.purchaseRecordClientKey} / ${link.purchaseLineKey} → ${link.nutritionClientKey}",
+                        evidence = evidenceFor(sourceFiles,com.pricetrace.receiptscanner.ingestion.YeonsikOcrV5Json.foodEvidenceIds(nutrition).toList(),envelope.source.userText),
+                        details = listOf(ReviewDetail("구매 메뉴",line.description ?: link.purchaseLineKey),ReviewDetail("구성 역할",link.componentRole.wireValue),ReviewDetail("구매 관계",link.relationType.wireValue),
+                            ReviewDetail("부모 메뉴 연결",menuCard?.statusLabel ?: "연결 대기")),
                         destinations = destinationBadgesFor(plan, session, selectedProjections, setOf(IngestionProjection.PRICETRACE_PRICE_OBSERVATION, IngestionProjection.FITNESS_NUTRITION)),
                     ))
                 }

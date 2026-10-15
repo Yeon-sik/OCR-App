@@ -21,6 +21,20 @@ import org.junit.Test
 import java.nio.file.Files
 
 class DesktopSessionStoreTest {
+    @Test fun `resolver selections survive file store restart outside canonical`() = runBlocking {
+        val directory = Files.createTempDirectory("yeonsik-identity-restart")
+        val id = "00000000-0000-4000-8000-000000000021"
+        val metadata = """{"identityReviews":[{"purchaseRecordClientKey":"purchase-1","lineKey":"line-1","entity":"restaurant","query":"한성","status":"owner_confirmed","choices":[{"id":"$id","name":"한성대학교 학식당"}],"selected":{"id":"$id","name":"한성대학교 학식당"}}]}"""
+        val session = sampleSession().copy(projections = listOf(ProjectionState(IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+            ProjectionStatus.UPLOADED,idempotencyKey = "successful-price-key",remoteId = id,metadataJson = metadata,updatedAt = "now")))
+        DesktopSessionStore(directory).saveRecord(DesktopSessionRecord(session,"{}","{\"seller\":\"한성대 학식당\"}",emptyList()))
+        val restored = DesktopSessionStore(directory).loadRecord(session.ingestionId)!!
+        val state = com.pricetrace.receiptscanner.ingestion.PurchaseIdentityReview.states(restored.session.projections.single().metadataJson).single()
+        assertEquals(id,state.selected!!.id)
+        assertEquals("successful-price-key",restored.session.projections.single().idempotencyKey)
+        assertFalse(restored.canonicalJson.contains(id))
+        assertTrue(restored.canonicalJson.contains("한성대 학식당"))
+    }
     @Test
     fun `recent records are newest first and honor the requested limit`() = runBlocking {
         val directory = Files.createTempDirectory("yeonsik-desktop-recents")

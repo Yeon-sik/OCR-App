@@ -67,7 +67,13 @@ class FitnessCanonicalProjectionSubmitter(
         var privateLinkUnavailable = false
         val recoveryCache = RecoveryAuditCache()
         return try {
-            for (item in envelope.nutrition) {
+            for (sourceItem in envelope.nutrition) {
+                // V5 uses the existing private food-estimate contract for every photo artifact.
+                // V2's receipt component RPC retains its original semantics.
+                val item = if (envelope.schemaVersion == com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA && sourceItem is IngestionNutrition.MealComponentEstimate)
+                    IngestionNutrition.RestaurantEstimate(sourceItem.clientKey, null, sourceItem.menuName, sourceItem.estimate) else sourceItem
+                val purchaseLink = envelope.purchaseNutritionLinks.singleOrNull { it.nutritionClientKey == item.clientKey }
+                val isPurchaseComponent = purchaseLink?.relationType == com.pricetrace.receiptscanner.ingestion.PurchaseNutritionRelation.MENU_COMPONENT
                 val itemKey = StableIds.sha256("${request.idempotencyKey}|nutrition|${item.clientKey}")
                 var publicationIdentity: PriceTraceRestaurantMenuIdentity? = null
                 val privatePurchaseIdentity = com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.ownerConfirmed(
@@ -101,7 +107,7 @@ class FitnessCanonicalProjectionSubmitter(
                             "restaurant_name_missing",
                             retryable = false,
                         )
-                        identityRequiredForPublication = envelope.receipt != null || envelope.purchaseNutritionLinks.any { it.nutritionClientKey == item.clientKey }
+                        identityRequiredForPublication = !isPurchaseComponent && (envelope.receipt != null || envelope.purchaseNutritionLinks.any { it.nutritionClientKey == item.clientKey })
                         publicationIdentity = if (envelope.receipt != null) {
                             resolvedReceiptIdentity?.let { identity -> item.lineId?.let { sourceLineId ->
                                 PriceTraceIdentityJson.exactRestaurantMenuForSourceLine(identity, sourceLineId)
@@ -131,6 +137,9 @@ class FitnessCanonicalProjectionSubmitter(
                                 "purchase_record_client_key" to JsonPrimitive(link.purchaseRecordClientKey),
                                 "purchase_line_key" to JsonPrimitive(link.purchaseLineKey),
                                 "nutrition_client_key" to JsonPrimitive(link.nutritionClientKey),
+                            ) + if (link.componentRole == com.pricetrace.receiptscanner.ingestion.PurchaseComponentRole.MAIN && !isPurchaseComponent) emptyMap() else mapOf(
+                                "component_role" to JsonPrimitive(link.componentRole.wireValue),
+                                "relation_type" to JsonPrimitive(link.relationType.wireValue),
                             )))
                         }
                     }

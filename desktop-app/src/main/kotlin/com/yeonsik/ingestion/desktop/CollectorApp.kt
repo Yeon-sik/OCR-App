@@ -196,6 +196,9 @@ fun YeonsikCollectorApp(
                     onOwnerRestaurantSelected = { selection ->
                         runIo { controller.selectOwnerRestaurant(selection); batchCoordinator.syncActiveItem(); refreshRecent() }
                     },
+                    onPurchaseIdentityCommand = { command ->
+                        runIo { controller.reviewPurchaseIdentity(command); batchCoordinator.syncActiveItem(); refreshRecent() }
+                    },
                     onVerify = {
                         runIo {
                             controller.verify(

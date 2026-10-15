@@ -34,8 +34,10 @@ object YeonsikOcrV5Json {
             classificationHints = YeonsikOcrV2Json.decodeHints(root.getValue("classification_hints").jsonObject),
             purchaseNutritionLinks = root.getValue("links").jsonArray.map {
                 val link = it.jsonObject
-                require(link.keys == linkKeys) { "Unexpected or missing v5 link keys" }
-                PurchaseNutritionLink(link.string("purchase_record_client_key"), link.string("purchase_line_key"), link.string("nutrition_client_key"))
+                require(link.keys.containsAll(linkKeys) && (link.keys - linkKeys).all { it in setOf("component_role", "relation_type") }) { "Unexpected or missing v5 link keys" }
+                PurchaseNutritionLink(link.string("purchase_record_client_key"), link.string("purchase_line_key"), link.string("nutrition_client_key"),
+                    link["component_role"]?.let { PurchaseComponentRole.fromWireValue(link.string("component_role")) } ?: PurchaseComponentRole.MAIN,
+                    link["relation_type"]?.let { PurchaseNutritionRelation.fromWireValue(link.string("relation_type")) } ?: PurchaseNutritionRelation.PURCHASE_LINE)
             },
             targets = root.getValue("projection_targets").jsonArray.map {
                 require(it is JsonPrimitive && it.isString)
@@ -59,13 +61,26 @@ object YeonsikOcrV5Json {
         require(envelope.nutrition.isNotEmpty()) { "v5 requires food estimates; purchase-only input uses v4" }
         require(envelope.nutrition.map { it.clientKey }.distinct().size == envelope.nutrition.size) { "nutrition keys must be unique" }
         envelope.nutrition.forEach { item ->
-            require(item is IngestionNutrition.RestaurantEstimate && item.lineId == null && item.clientKey.isNotBlank() && item.menuName.isNotBlank()) {
-                "v5 requires restaurant_estimate with null line_id"
+            val estimate = when (item) {
+                is IngestionNutrition.RestaurantEstimate -> item.estimate
+                is IngestionNutrition.MealComponentEstimate -> {
+                    require(item.reference == null) { "v5 component references use local parent links only" }
+                    item.estimate
+                }
+                else -> error("v5 requires food estimates")
             }
+            require(item.lineId == null && item.clientKey.isNotBlank()) {
+                "v5 requires food estimates with null line_id"
+            }
+            require(when(item) {
+                is IngestionNutrition.RestaurantEstimate -> item.menuName.isNotBlank()
+                is IngestionNutrition.MealComponentEstimate -> item.menuName.isNotBlank()
+                else -> false
+            }) { "v5 food names must be non-empty" }
             // Reuse the V2 estimate field/provenance validator on both imports and local revisions.
             YeonsikOcrV2Json.decodeNutrition(YeonsikOcrV2Json.nutritionJson(item, false), true)
             require(NutritionField.requiredFields.all { field ->
-                item.estimate.nutrientProvenance[field]?.sourceType == "food_image_estimate"
+                estimate.nutrientProvenance[field]?.sourceType == "food_image_estimate"
             }) { "v5 restaurant estimates require food_image_estimate provenance" }
             val refs = foodEvidenceIds(item)
             require(refs.isNotEmpty() && refs.all { id -> files.any { it.id == id && it.type == SourceAttachmentType.FOOD_PHOTO } }) {
@@ -75,10 +90,18 @@ object YeonsikOcrV5Json {
         val links = envelope.purchaseNutritionLinks
         require(links.map { it.nutritionClientKey }.toSet() == envelope.nutrition.map { it.clientKey }.toSet()) { "every v5 nutrition requires an exact purchase line link" }
         require(links.map { it.nutritionClientKey }.distinct().size == links.size) { "duplicate or conflicting nutrition link" }
-        require(links.map { it.purchaseRecordClientKey to it.purchaseLineKey }.distinct().size == links.size) { "duplicate or conflicting purchase line link" }
+        val mains = links.filter { it.componentRole == PurchaseComponentRole.MAIN }
+        require(mains.map { it.purchaseRecordClientKey to it.purchaseLineKey }.distinct().size == mains.size) { "duplicate main purchase line link" }
+        val purchased = links.filter { it.relationType == PurchaseNutritionRelation.PURCHASE_LINE }
+        require(purchased.map { it.purchaseRecordClientKey to it.purchaseLineKey }.distinct().size == purchased.size) { "duplicate purchased nutrition for one actual line; included foods use menu_component" }
         links.forEach { link ->
             val record = envelope.purchaseRecords.singleOrNull { it.clientKey == link.purchaseRecordClientKey }
             require(record?.lineItems?.count { it.lineKey == link.purchaseLineKey } == 1) { "dangling or ambiguous purchase line link" }
+            require(link.relationType != PurchaseNutritionRelation.MENU_COMPONENT || link.componentRole != PurchaseComponentRole.MAIN) { "main requires an actual purchase line relation" }
+            require(link.componentRole != PurchaseComponentRole.COMPLIMENTARY_SIDE || link.relationType == PurchaseNutritionRelation.MENU_COMPONENT) { "complimentary side requires a parent menu component relation" }
+            if (envelope.nutrition.single { it.clientKey == link.nutritionClientKey } is IngestionNutrition.MealComponentEstimate) {
+                require(link.componentRole == PurchaseComponentRole.COMPLIMENTARY_SIDE && link.relationType == PurchaseNutritionRelation.MENU_COMPONENT)
+            }
         }
         require(envelope.consumption.map { it.clientKey }.distinct().size == envelope.consumption.size) { "consumption keys must be unique" }
         envelope.consumption.forEach { consumption ->
@@ -98,8 +121,11 @@ object YeonsikOcrV5Json {
         nutrition = emptyList(), consumption = emptyList(), purchaseNutritionLinks = emptyList(),
     )
 
-    fun foodEvidenceIds(item: IngestionNutrition.RestaurantEstimate): Set<String> =
-        item.estimate.nutrientProvenance.values.flatMap { it.evidenceRefs }.toSet()
+    fun foodEvidenceIds(item: IngestionNutrition): Set<String> = when (item) {
+        is IngestionNutrition.RestaurantEstimate -> item.estimate
+        is IngestionNutrition.MealComponentEstimate -> item.estimate
+        else -> error("v5 requires food estimates")
+    }.nutrientProvenance.values.flatMap { it.evidenceRefs }.toSet()
 
     fun encodeDraft(envelope: YeonsikOcrEnvelope, canonicalIds: Boolean = false): String = encode(envelope, canonicalIds, false, false)
     fun encodePersisted(envelope: YeonsikOcrEnvelope, canonicalIds: Boolean = false): String = encode(envelope, canonicalIds, true, false)
@@ -131,6 +157,8 @@ object YeonsikOcrV5Json {
             put("purchase_record_client_key", JsonPrimitive(link.purchaseRecordClientKey))
             put("purchase_line_key", JsonPrimitive(link.purchaseLineKey))
             put("nutrition_client_key", JsonPrimitive(link.nutritionClientKey))
+            if (link.componentRole != PurchaseComponentRole.MAIN) put("component_role", JsonPrimitive(link.componentRole.wireValue))
+            if (link.relationType != PurchaseNutritionRelation.PURCHASE_LINE) put("relation_type", JsonPrimitive(link.relationType.wireValue))
         } })
         return json.encodeToString(JsonElement.serializer(), JsonObject(fields))
     }

@@ -194,6 +194,7 @@ fun ReceiptOcrContent(
     onCanonicalJsonParse: () -> Unit = {},
     onCanonicalJsonConfirm: () -> Unit = {},
     onOwnerRestaurantSelected: (com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.OwnerRestaurantSelection) -> Unit = {},
+    onPurchaseIdentityCommand: (com.pricetrace.receiptscanner.ingestion.PurchaseIdentityCommand) -> Unit = {},
     onCanonicalJsonProjectionSelected: (IngestionProjection, Boolean) -> Unit = { _, _ -> },
     onCanonicalJsonSubmit: () -> Unit = {},
     onCanonicalJsonRetry: () -> Unit = {},
@@ -464,6 +465,7 @@ fun ReceiptOcrContent(
                     onParse = onCanonicalJsonParse,
                     onConfirm = onCanonicalJsonConfirm,
                     onOwnerRestaurantSelected = onOwnerRestaurantSelected,
+                    onPurchaseIdentityCommand = onPurchaseIdentityCommand,
                     onProjectionSelected = onCanonicalJsonProjectionSelected,
                     onSubmit = onCanonicalJsonSubmit,
                     onRetry = onCanonicalJsonRetry,
@@ -962,6 +964,7 @@ private fun CanonicalJsonValidatorScreen(
     onParse: () -> Unit,
     onConfirm: () -> Unit,
     onOwnerRestaurantSelected: (com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.OwnerRestaurantSelection) -> Unit,
+    onPurchaseIdentityCommand: (com.pricetrace.receiptscanner.ingestion.PurchaseIdentityCommand) -> Unit,
     onProjectionSelected: (IngestionProjection, Boolean) -> Unit,
     onSubmit: () -> Unit,
     onRetry: () -> Unit,
@@ -1076,19 +1079,11 @@ private fun CanonicalJsonValidatorScreen(
             }
         }
         val ownerMetadata = state.session?.projections?.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson
-        com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.ownerRestaurantChoices(ownerMetadata).forEach { group ->
-            item("owner-restaurant:${group.purchaseRecordClientKey}:${group.lineKey}") {
-                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("기존 내 식당 선택", style = MaterialTheme.typography.titleMedium)
-                    Text("${group.purchaseRecordClientKey} / ${group.lineKey} · 실제로 구매한 식당을 선택하세요. 확실하지 않으면 보류할 수 있습니다.")
-                    group.choices.forEach { choice ->
-                        OutlinedButton(onClick = { onOwnerRestaurantSelected(
-                            com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.OwnerRestaurantSelection(
-                                group.purchaseRecordClientKey, group.lineKey, choice.restaurantId)) },
-                            enabled = !state.busy && revisionReady && state.session?.verifiedCanonicalFingerprint != null &&
-                                state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint,
-                            modifier = Modifier.fillMaxWidth()) { Text(choice.displayLabel) }
-                    }
+        state.envelope?.let { envelope ->
+            com.pricetrace.receiptscanner.ingestion.PurchaseIdentityReview.cards(envelope,ownerMetadata).forEach { card ->
+                item("identity:${card.command.purchaseRecordClientKey}:${card.command.lineKey}:${card.command.entity}") {
+                    PurchaseIdentityCard(card,card.sourceSaved && !state.busy && revisionReady && state.session?.verifiedCanonicalFingerprint != null &&
+                        state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint,onPurchaseIdentityCommand)
                 }
             }
         }

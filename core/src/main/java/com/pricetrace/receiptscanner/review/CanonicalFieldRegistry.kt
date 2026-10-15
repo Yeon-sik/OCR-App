@@ -198,6 +198,12 @@ object CanonicalFieldRegistry {
             val prefix = "links[${link.nutritionClientKey}]"
             add(text("$prefix.purchase_record_client_key", "${link.nutritionClientKey} 연결 구매 기록", nullable = false))
             add(text("$prefix.purchase_line_key", "${link.nutritionClientKey} 연결 구매 행", nullable = false))
+            add(enum("$prefix.parent_purchase_line", "${link.nutritionClientKey} 음식의 구매 행",
+                envelope.purchaseRecords.flatMap { record -> record.lineItems.map { purchaseLineChoice(envelope,link.nutritionClientKey,record,it) } }, nullable = false))
+            add(enum("$prefix.component_role", "${link.nutritionClientKey} 구성 역할",
+                com.pricetrace.receiptscanner.ingestion.PurchaseComponentRole.entries.map { it.wireValue }, nullable = false))
+            add(enum("$prefix.relation_type", "${link.nutritionClientKey} 구매 행 / 포함 구성요소",
+                com.pricetrace.receiptscanner.ingestion.PurchaseNutritionRelation.entries.map { it.wireValue }, nullable = false))
         }
     }.map { field -> field.copy(value = value(envelope, field.path)) }
 
@@ -284,6 +290,10 @@ object CanonicalFieldRegistry {
                 when (match?.groupValues?.get(2)) {
                     "purchase_record_client_key" -> link?.purchaseRecordClientKey
                     "purchase_line_key" -> link?.purchaseLineKey
+                    "component_role" -> link?.componentRole?.wireValue
+                    "relation_type" -> link?.relationType?.wireValue
+                    "parent_purchase_line" -> link?.let { relation -> envelope.purchaseRecords.singleOrNull { it.clientKey == relation.purchaseRecordClientKey }
+                        ?.let { record -> record.lineItems.singleOrNull { it.lineKey == relation.purchaseLineKey }?.let { purchaseLineChoice(envelope,relation.nutritionClientKey,record,it) } } }
                     else -> null
                 }
             }
@@ -545,6 +555,21 @@ object CanonicalFieldRegistry {
         .let { if (it.startsWith("merchant.")) "receipt.$it" else it }
         .let { if (it.startsWith("line_items[")) "receipt.$it" else it }
         .replace(".lines[", ".line_items[")
+
+    fun purchaseLineChoice(record: PurchaseRecord, line: com.pricetrace.receiptscanner.ingestion.PurchaseRecordLine): String =
+        "${record.clientKey} / ${line.lineKey} · ${line.description.orEmpty()}"
+
+    fun purchaseLineChoice(envelope: YeonsikOcrEnvelope, nutritionKey: String,record: PurchaseRecord,line: com.pricetrace.receiptscanner.ingestion.PurchaseRecordLine): String {
+        val current = envelope.purchaseNutritionLinks.single { it.nutritionClientKey == nutritionKey }
+        val occupied = envelope.purchaseNutritionLinks.singleOrNull { it.nutritionClientKey != nutritionKey &&
+            it.relationType == com.pricetrace.receiptscanner.ingestion.PurchaseNutritionRelation.PURCHASE_LINE &&
+            it.purchaseRecordClientKey == record.clientKey && it.purchaseLineKey == line.lineKey }
+        val swap = occupied?.takeIf { current.relationType == com.pricetrace.receiptscanner.ingestion.PurchaseNutritionRelation.PURCHASE_LINE }
+        val name = swap?.let { relation -> envelope.nutrition.single { it.clientKey == relation.nutritionClientKey } }.let { item ->
+            when(item) { is IngestionNutrition.RestaurantEstimate -> item.menuName; is IngestionNutrition.MealComponentEstimate -> item.menuName; else -> swap?.nutritionClientKey }
+        }
+        return purchaseLineChoice(record,line) + if (swap == null) "" else " ($name 연결과 맞교환)"
+    }
 
     private fun text(path: String, label: String, nullable: Boolean = true) = CanonicalEditableField(path, label, CanonicalFieldType.TEXT, nullable)
     private fun integer(path: String, label: String, nullable: Boolean, min: BigDecimal? = null, max: BigDecimal? = null, minExclusive: Boolean = false) = CanonicalEditableField(path, label, CanonicalFieldType.INTEGER, nullable, min = min, max = max, minExclusive = minExclusive)

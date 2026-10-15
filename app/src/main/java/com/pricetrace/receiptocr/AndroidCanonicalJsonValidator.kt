@@ -700,6 +700,16 @@ class AndroidCanonicalJsonValidator(
         return updated
     }
 
+    suspend fun reviewPurchaseIdentity(state: AndroidCanonicalJsonValidatorState, command: com.pricetrace.receiptscanner.ingestion.PurchaseIdentityCommand): AndroidCanonicalJsonValidatorState {
+        require(state.reviewFieldErrors.isEmpty()) { "필드 수정을 완료한 후 연결하세요." }
+        val ingestionId = requireNotNull(state.ingestionId)
+        val result = useCase.reviewPurchaseIdentity(ingestionId,requireNotNull(state.envelope),command)
+        val updated = state.copy(session = useCase.session(ingestionId), notice = if (result is com.pricetrace.receiptscanner.ingestion.ProjectionSubmission.Success) "${command.entity.label} 연결 상태를 저장했습니다." else null,
+            error = (result as? com.pricetrace.receiptscanner.ingestion.ProjectionSubmission.Failure)?.message)
+        persistBundleState(updated)
+        return updated
+    }
+
     suspend fun confirm(
         state: AndroidCanonicalJsonValidatorState,
     ): AndroidCanonicalJsonValidatorState {

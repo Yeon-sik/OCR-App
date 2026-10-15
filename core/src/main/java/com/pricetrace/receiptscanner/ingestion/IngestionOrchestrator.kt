@@ -126,10 +126,15 @@ data class OcrPurchaseMenuResolutionRequest(
     val sourceLocationCode: String? = null,
     val reviewedMerchant: MerchantCandidate? = null,
     val selectedOwnerRestaurantId: String? = null,
+    val selectedOwnerMenuId: String? = null,
+    val resolutionAction: String? = null,
+    val envelope: YeonsikOcrEnvelope? = null,
+    val resolvePlatform: Boolean = true,
 )
 
 interface OcrPurchaseIdentityResolutionSubmitter {
     suspend fun resolvePurchaseMenuIdentity(request: OcrPurchaseMenuResolutionRequest): ProjectionSubmission
+    suspend fun synchronizePurchaseContext(request: OcrPurchaseMenuResolutionRequest): ProjectionSubmission? = null
 }
 
 /** PriceTrace-owned owner-authenticated menu resolution RPCs for receipt and receipt-free rows. */
@@ -444,7 +449,8 @@ class IngestionOrchestrator(
     }
 
     private fun diningOutItems(envelope: YeonsikOcrEnvelope): List<IngestionNutrition> = envelope.nutrition.filter {
-        it is IngestionNutrition.RestaurantEstimate || it is IngestionNutrition.RestaurantMenuEstimate
+        (it is IngestionNutrition.RestaurantEstimate || it is IngestionNutrition.RestaurantMenuEstimate) &&
+            envelope.purchaseNutritionLinks.none { link -> link.nutritionClientKey == it.clientKey && link.relationType == PurchaseNutritionRelation.MENU_COMPONENT }
     }
 
     private fun diningOutIdentities(
@@ -1132,6 +1138,10 @@ class IngestionOrchestrator(
             val pendingRows = PurchaseNutritionIdentity.pendingResolutions(state.metadataJson)
             val pending = pendingRows.firstOrNull { it.purchaseRecordClientKey == ownerSelection?.purchaseRecordClientKey && it.lineKey == ownerSelection?.lineKey }
                 ?: pendingRows.firstOrNull() ?: break
+            if (PurchaseIdentityReview.states(state.metadataJson).any { it.purchaseRecordClientKey == pending.purchaseRecordClientKey &&
+                    it.lineKey == pending.lineKey && it.status == "deferred" && it.entity != PurchaseIdentityEntity.PLATFORM }) {
+                return resolutionNeedsReview("pricetrace_purchase_identity_deferred", state.metadataJson)
+            }
             if (!isVerifiedForOcrResolution(session, envelope)) return resolutionNeedsReview(
                 "pricetrace_ocr_resolution_requires_verified_canonical_revision", state.metadataJson,
             )
@@ -1156,6 +1166,9 @@ class IngestionOrchestrator(
                 record.sellerSourceCode.takeIf { record.lineItems.single { it.lineKey == pending.lineKey }.sellerOverride == null },
                 reviewedMerchant,
                 ownerSelection?.takeIf { it.purchaseRecordClientKey == pending.purchaseRecordClientKey && it.lineKey == pending.lineKey }?.restaurantId,
+                resolutionAction = if (ownerSelection == null) "review" else "select_restaurant",
+                envelope = envelope,
+                resolvePlatform = PurchaseIdentityReview.states(state.metadataJson).none { it.purchaseRecordClientKey == record.clientKey && it.entity == PurchaseIdentityEntity.PLATFORM && it.status == "deferred" },
             ))
             val merged = mergePurchaseResolutionMetadata(state.metadataJson, pending, result.metadataJsonOrNull())
             merged?.let { metadata -> PurchaseNutritionIdentity.validateLineResults(record,
@@ -1167,7 +1180,77 @@ class IngestionOrchestrator(
             // A resolved line may leave another line pending. Continue only while this exact selector made progress.
             if (saved.requiresReview && pending in PurchaseNutritionIdentity.pendingResolutions(merged)) return saved
         }
+        if (envelope.schemaVersion == YEONSIK_OCR_V5_SCHEMA) {
+            session = requireNotNull(store.get(ingestionId))
+            if (!isVerifiedForOcrResolution(session, envelope)) return resolutionNeedsReview("pricetrace_ocr_resolution_requires_verified_canonical_revision", null)
+            for (recordKey in envelope.purchaseRecords.filter { it.priceTraceSubmissionEligible }.map { it.clientKey }) {
+                val state = requireNotNull(store.get(ingestionId)).projections.single { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }
+                val source = state.metadataJson?.let { Json.parseToJsonElement(it).jsonObject["sources"] as? JsonArray }
+                    ?.map { it.jsonObject }?.singleOrNull { it["purchaseRecordClientKey"] == JsonPrimitive(recordKey) } ?: continue
+                if (source["platformResolutionChecked"] == JsonPrimitive(true) && envelope.purchaseNutritionLinks.none { it.purchaseRecordClientKey == recordKey && it.relationType == PurchaseNutritionRelation.MENU_COMPONENT }) continue
+                val platformDeferred = PurchaseIdentityReview.states(state.metadataJson).any { it.purchaseRecordClientKey == recordKey && it.entity == PurchaseIdentityEntity.PLATFORM && it.status == "deferred" }
+                if (platformDeferred && envelope.purchaseNutritionLinks.none { it.purchaseRecordClientKey == recordKey && it.relationType == PurchaseNutritionRelation.MENU_COMPONENT }) continue
+                val submitter = submitters[state.projection] as? OcrPurchaseIdentityResolutionSubmitter ?: continue
+                val lineKey = envelope.purchaseRecords.single { it.clientKey == recordKey }.lineItems.first().lineKey ?: "line-1"
+                val sourceId = source.getValue("purchaseSourceId").jsonPrimitive.content
+                val result = submitter.synchronizePurchaseContext(OcrPurchaseMenuResolutionRequest(recordKey, sourceId, lineKey, envelope = envelope,resolvePlatform = !platformDeferred)) ?: continue
+                val merged = mergePurchaseResolutionMetadata(state.metadataJson, PurchaseNutritionIdentity.PendingResolution(recordKey, sourceId, lineKey), result.metadataJsonOrNull())
+                val attempted = beginOcrResolutionAttempt(ingestionId, state.projection) ?: state
+                val saved = persistOcrResolutionResult(ingestionId, envelope, state.projection, state, attempted, result, merged)
+                if (saved !is ProjectionSubmission.Success) return saved
+                lastSuccess = saved
+            }
+        }
         return lastSuccess
+    }
+
+    suspend fun reviewPurchaseIdentity(ingestionId: String, envelope: YeonsikOcrEnvelope, command: PurchaseIdentityCommand): ProjectionSubmission {
+        val session = prepareExistingSession(ingestionId, envelope) ?: return resolutionNeedsReview("ingestion_not_found", null)
+        val state = session.projections.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }
+            ?: return resolutionNeedsReview("pricetrace_purchase_projection_missing", null)
+        val record = envelope.purchaseRecords.singleOrNull { it.clientKey == command.purchaseRecordClientKey }
+            ?: return resolutionNeedsReview("pricetrace_purchase_record_missing", state.metadataJson)
+        require(record.lineItems.count { it.lineKey == command.lineKey } == 1)
+        val current = PurchaseIdentityReview.state(state.metadataJson, command) ?: PurchaseIdentityReview.cards(envelope,state.metadataJson)
+            .singleOrNull { it.command.purchaseRecordClientKey == command.purchaseRecordClientKey && it.command.lineKey == command.lineKey && it.command.entity == command.entity }?.state
+        if (command.action == PurchaseIdentityAction.DEFER) {
+            if (PurchaseIdentityReview.cards(envelope,state.metadataJson).singleOrNull { it.command.purchaseRecordClientKey == command.purchaseRecordClientKey && it.command.lineKey == command.lineKey && it.command.entity == command.entity }?.sourceSaved != true)
+                return resolutionNeedsReview("pricetrace_purchase_source_save_required",state.metadataJson)
+            val root = Json.parseToJsonElement(state.metadataJson ?: "{}").jsonObject
+            val old = (root["identityReviews"] as? JsonArray).orEmpty().singleOrNull {
+                val row = it.jsonObject
+                row["purchaseRecordClientKey"] == JsonPrimitive(command.purchaseRecordClientKey) && row["lineKey"] == JsonPrimitive(command.lineKey) && row["entity"] == JsonPrimitive(command.entity.wireValue)
+            }?.jsonObject ?: buildJsonObject { put("entity", JsonPrimitive(command.entity.wireValue)); put("query", JsonPrimitive(command.query)); put("choices", JsonArray(emptyList())); put("selected", JsonNull) }
+            val metadata = PurchaseIdentityReview.merge(state.metadataJson, command, JsonObject(old + ("status" to JsonPrimitive("deferred"))))
+            store.save(session.copy(projections = session.projections.replace(state.copy(metadataJson = metadata, updatedAt = now()))))
+            return ProjectionSubmission.Success(state.remoteId ?: ingestionId, metadataJson = metadata, requiresReview = true)
+        }
+        if (!isVerifiedForOcrResolution(session, envelope)) return resolutionNeedsReview("pricetrace_ocr_resolution_requires_verified_canonical_revision", state.metadataJson)
+        acceptedSourceRevisionConflict(session, envelope)?.let { return resolutionNeedsReview(it, state.metadataJson) }
+        if (command.action == PurchaseIdentityAction.SELECT && (command.selectedId == null || current?.choices?.none { it.id == command.selectedId && it.identityKind == command.selectedKind } != false))
+            return resolutionNeedsReview("pricetrace_identity_choice_not_available", state.metadataJson)
+        if (command.action == PurchaseIdentityAction.CREATE && (current == null || current.query != command.query || current.choices.isNotEmpty() || current.status != "needs_selection"))
+            return resolutionNeedsReview("pricetrace_identity_search_required_before_create", state.metadataJson)
+        val source = state.metadataJson?.let { Json.parseToJsonElement(it).jsonObject["sources"] as? JsonArray }
+            ?.map { it.jsonObject }?.singleOrNull { it["purchaseRecordClientKey"] == JsonPrimitive(record.clientKey) }
+            ?: return resolutionNeedsReview("pricetrace_purchase_source_save_required", state.metadataJson)
+        PurchaseNutritionIdentity.validateLineResults(record, source)
+        require(source["sourceAcceptanceStatus"] == JsonPrimitive("accepted"))
+        val sourceId = source.getValue("purchaseSourceId").jsonPrimitive.content
+        val submitter = submitters[state.projection] as? PurchaseIdentityReviewSubmitter
+            ?: return resolutionNeedsReview("pricetrace_purchase_resolution_not_configured", state.metadataJson)
+        val result = submitter.reviewPurchaseIdentity(PurchaseIdentityReviewRequest(command, sourceId, envelope))
+        if (result is ProjectionSubmission.Failure) return result
+        val response = Json.parseToJsonElement(requireNotNull((result as ProjectionSubmission.Success).metadataJson)).jsonObject
+        var metadata = if (response["sources"] != null) mergePurchaseResolutionMetadata(state.metadataJson,
+            PurchaseNutritionIdentity.PendingResolution(record.clientKey, sourceId, command.lineKey), response.toString()) else state.metadataJson
+        metadata = PurchaseIdentityReview.merge(metadata, command, response.getValue("identityReview").jsonObject)
+        if (command.action == PurchaseIdentityAction.SEARCH) {
+            store.save(session.copy(projections = session.projections.replace(state.copy(metadataJson = metadata, updatedAt = now()))))
+            return result.copy(metadataJson = metadata)
+        }
+        val attempted = beginOcrResolutionAttempt(ingestionId, state.projection) ?: state
+        return persistOcrResolutionResult(ingestionId, envelope, state.projection, state, attempted, result, metadata)
     }
 
     private fun isVerifiedForOcrResolution(session: IngestionSession, envelope: YeonsikOcrEnvelope): Boolean =
@@ -1728,6 +1811,12 @@ class IngestionOrchestrator(
                 "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
         }
         is IngestionNutrition.MealComponentEstimate -> {
+            if (envelope.schemaVersion == YEONSIK_OCR_V5_SCHEMA) {
+                "restaurant-purchase-component|" + YeonsikOcrV2Json.nutritionJson(item, true) +
+                    "|link=" + envelope.purchaseNutritionLinks.single { it.nutritionClientKey == item.clientKey } +
+                    restaurantBranchPayloadDependency(envelope, item, includeRestaurantSourceName) +
+                    "|seller=" + PurchaseNutritionIdentity.sellerName(envelope, item.clientKey)
+            } else {
             val artifactEnvelope = YeonsikOcrEnvelope(
                 mode = IngestionMode.RESTAURANT,
                 source = IngestionSource(producer = "fitness", sourceFiles = emptyList()),
@@ -1740,6 +1829,7 @@ class IngestionOrchestrator(
                 "|restaurant_name=" + (item.reference?.restaurantName ?: fitnessRestaurantName(envelope) ?: "<null>") +
                 "|branch_name=" + (item.reference?.branchName ?: "<null>") +
                 "|" + YeonsikOcrEnvelopeCodec.encode(artifactEnvelope, canonicalIds = true)
+            }
         }
     }
 

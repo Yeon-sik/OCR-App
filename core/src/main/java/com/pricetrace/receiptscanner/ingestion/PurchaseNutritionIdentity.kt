@@ -62,7 +62,7 @@ object PurchaseNutritionIdentity {
                 val reason = line["reasonCode"]?.jsonPrimitive?.contentOrNull
                 if (line["kind"] != JsonPrimitive("restaurant_purchase") ||
                     line["observationCreated"] == JsonPrimitive(true) ||
-                    reason == null || !(reason.startsWith("restaurant_") || reason.startsWith("menu_") || reason == "owner_restaurant_selection_required")) return@mapNotNull null
+                    reason == null || !(reason.startsWith("restaurant_") || reason.startsWith("menu_") || reason in setOf("owner_restaurant_selection_required", "owner_menu_selection_required"))) return@mapNotNull null
                 val lineKey = line["lineKey"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
                 PendingResolution(key, id, lineKey)
             }
@@ -117,6 +117,7 @@ object PurchaseNutritionIdentity {
 
     fun exact(envelope: YeonsikOcrEnvelope, nutritionClientKey: String, metadataJson: String?): PriceTraceRestaurantMenuIdentity? = runCatching {
         val link = envelope.purchaseNutritionLinks.singleOrNull { it.nutritionClientKey == nutritionClientKey } ?: return null
+        if (link.relationType == PurchaseNutritionRelation.MENU_COMPONENT) return null
         val record = envelope.purchaseRecords.singleOrNull { it.clientKey == link.purchaseRecordClientKey } ?: return null
         val root = Json.parseToJsonElement(metadataJson ?: return null).jsonObject
         val source = root["sources"]?.jsonArray?.map { it.jsonObject }?.singleOrNull {
@@ -151,6 +152,7 @@ object PurchaseNutritionIdentity {
     fun ownerConfirmed(envelope: YeonsikOcrEnvelope, nutritionClientKey: String, metadataJson: String?): OwnerConfirmedIdentity? = runCatching {
         if (envelope.schemaVersion != YEONSIK_OCR_V5_SCHEMA) return null
         val link = envelope.purchaseNutritionLinks.singleOrNull { it.nutritionClientKey == nutritionClientKey } ?: return null
+        if (link.relationType == PurchaseNutritionRelation.MENU_COMPONENT) return null
         val record = envelope.purchaseRecords.singleOrNull { it.clientKey == link.purchaseRecordClientKey } ?: return null
         val source = Json.parseToJsonElement(metadataJson ?: return null).jsonObject["sources"]!!.jsonArray
             .map { it.jsonObject }.singleOrNull { it["purchaseRecordClientKey"]?.jsonPrimitive?.content == record.clientKey } ?: return null

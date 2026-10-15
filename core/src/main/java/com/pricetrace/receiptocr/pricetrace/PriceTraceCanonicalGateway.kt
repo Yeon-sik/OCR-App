@@ -26,6 +26,7 @@ import com.pricetrace.receiptscanner.ingestion.StandalonePriceObservationKind
 import com.pricetrace.receiptscanner.ingestion.PriceTraceV4SubmissionCompatibility
 import com.pricetrace.receiptscanner.ingestion.PriceTraceV4SubmissionReason
 import com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity
+import com.pricetrace.receiptscanner.ingestion.*
 import com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V5_SCHEMA
 import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.ingestion.PriceTraceIdentityJson
@@ -42,6 +43,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -191,19 +193,166 @@ class PriceTraceCanonicalGateway(
                         put("source_location_code", request.sourceLocationCode?.let(::JsonPrimitive) ?: JsonNull)
                     })
                     request.selectedOwnerRestaurantId?.let { put("p_owner_restaurant_id", JsonPrimitive(it)) }
+                    if (candidateId != null && request.resolutionAction != null) {
+                        put("p_owner_restaurant_id", request.selectedOwnerRestaurantId?.let(::JsonPrimitive) ?: JsonNull)
+                        put("p_owner_menu_id", request.selectedOwnerMenuId?.let(::JsonPrimitive) ?: JsonNull)
+                        put("p_resolution_action", JsonPrimitive(request.resolutionAction))
+                    }
                 }.encode()))
             if (response.statusCode !in 200..299) return@readAcceptedResponse PriceTraceCanonicalOutcome.Failure(classify(response), response.body)
-            val source = PriceTracePurchaseObservationV4Json.decodeResponse(response.body).raw
+            var source = PriceTracePurchaseObservationV4Json.decodeResponse(response.body).raw
             require(source.requiredStringOrNull("purchaseSourceId") == request.purchaseSourceId)
             require(PurchaseNutritionIdentity.hasAuthorityMetadata(source)) { "pricetrace_purchase_authority_metadata_missing" }
             require((source["lineResults"] as? JsonArray)?.singleOrNull {
                 it.jsonObject["lineKey"]?.jsonPrimitive?.contentOrNull == request.lineKey
             } != null) { "pricetrace_purchase_resolution_line_mismatch" }
+            request.envelope?.let { source = synchronizeSourceComponents(source, request.purchaseRecordClientKey, it, config) }
+            if (request.resolutionAction == "review" && request.resolvePlatform) {
+                source = synchronizeSourcePlatform(source,config)
+            }
             val bound = JsonObject(source + ("purchaseRecordClientKey" to JsonPrimitive(request.purchaseRecordClientKey)))
             PriceTraceCanonicalOutcome.Success(JsonObject(mapOf("sources" to JsonArray(listOf(bound)),
                 "observationCreated" to source.getValue("observationCreated"),
                 "observationIds" to source.getValue("observationIds"), "observationCount" to source.getValue("observationCount"))))
         }
+
+    suspend fun reviewPurchaseIdentity(input: PurchaseIdentityReviewRequest): PriceTraceCanonicalOutcome = readAcceptedResponse { config ->
+        val command = input.command
+        var mutation: JsonObject? = null
+        if (command.action != PurchaseIdentityAction.SEARCH) {
+            if (command.action == PurchaseIdentityAction.SELECT && command.selectedKind == "global_verified") {
+                require(command.entity != PurchaseIdentityEntity.PLATFORM)
+                val response = transport.execute(request(config,"POST","/rest/v1/rpc/resolve_purchase_global_identity_v1",body = buildJsonObject {
+                    put("p_purchase_source_id",input.purchaseSourceId); put("p_line_key",command.lineKey); put("p_entity",command.entity.wireValue)
+                    put("p_identity_id",requireNotNull(command.selectedId)); put("p_user_verified",true)
+                }.encode()))
+                if (response.statusCode !in 200..299) return@readAcceptedResponse PriceTraceCanonicalOutcome.Failure(classify(response),response.body)
+                var source = PriceTracePurchaseObservationV4Json.decodeResponse(response.body).raw
+                require(source.requiredStringOrNull("purchaseSourceId") == input.purchaseSourceId)
+                source = synchronizeSourceComponents(source,command.purchaseRecordClientKey,input.envelope,config)
+                mutation = purchaseSourceMetadata(source,command.purchaseRecordClientKey)
+            } else if (command.entity == PurchaseIdentityEntity.PLATFORM) {
+                val response = transport.execute(request(config,"POST","/rest/v1/rpc/resolve_purchase_owner_platform_v1",body = buildJsonObject {
+                    put("p_purchase_source_id", input.purchaseSourceId)
+                    put("p_platform_id", command.selectedId?.let(::JsonPrimitive) ?: JsonNull)
+                    put("p_create", command.action == PurchaseIdentityAction.CREATE); put("p_user_verified", true)
+                }.encode()))
+                if (response.statusCode !in 200..299) return@readAcceptedResponse PriceTraceCanonicalOutcome.Failure(classify(response),response.body)
+                val source = PriceTracePurchaseObservationV4Json.decodeResponse(response.body).raw
+                require(source.requiredStringOrNull("purchaseSourceId") == input.purchaseSourceId)
+                mutation = purchaseSourceMetadata(source,command.purchaseRecordClientKey)
+            } else {
+                val record = input.envelope.purchaseRecords.single { it.clientKey == command.purchaseRecordClientKey }
+                val line = record.lineItems.single { it.lineKey == command.lineKey }
+                val merchant = MerchantCandidate(name = requireNotNull(line.sellerOverride ?: record.seller),
+                    branchName = record.sellerBranchName.takeIf { line.sellerOverride == null },
+                    businessKind = com.pricetrace.receiptscanner.domain.BusinessKind.FOOD_SERVICE,
+                    sourceNamespace = record.sellerSourceNamespace.takeIf { line.sellerOverride == null },
+                    sourceLocationCode = record.sellerSourceCode.takeIf { line.sellerOverride == null })
+                val outcome = resolveOcrPurchaseMenu(OcrPurchaseMenuResolutionRequest(command.purchaseRecordClientKey,input.purchaseSourceId,command.lineKey,
+                    reviewedMerchant = merchant,
+                    selectedOwnerRestaurantId = command.selectedId.takeIf { command.entity == PurchaseIdentityEntity.RESTAURANT },
+                    selectedOwnerMenuId = command.selectedId.takeIf { command.entity == PurchaseIdentityEntity.MENU },
+                    resolutionAction = "${command.action.wireValue}_${command.entity.wireValue}", envelope = input.envelope))
+                if (outcome is PriceTraceCanonicalOutcome.Failure) return@readAcceptedResponse outcome
+                mutation = (outcome as PriceTraceCanonicalOutcome.Success).response
+            }
+        }
+        val response = transport.execute(request(config,"POST","/rest/v1/rpc/search_purchase_owner_identity_v1",body = buildJsonObject {
+            put("p_purchase_source_id",input.purchaseSourceId); put("p_line_key",command.lineKey)
+            put("p_entity",command.entity.wireValue); put("p_query",command.query)
+        }.encode()))
+        if (response.statusCode !in 200..299) return@readAcceptedResponse PriceTraceCanonicalOutcome.Failure(classify(response),response.body)
+        val review = Json.parseToJsonElement(response.body).jsonObject
+        require(review["entity"] == JsonPrimitive(command.entity.wireValue) && review["query"] == JsonPrimitive(command.query))
+        // Validate IDs and cardinality before they enter durable UI metadata.
+        PurchaseIdentityReview.merge(null,command,review)
+        PriceTraceCanonicalOutcome.Success(JsonObject((mutation ?: JsonObject(emptyMap())) + ("identityReview" to review)))
+    }
+
+    suspend fun synchronizePurchaseContext(input: OcrPurchaseMenuResolutionRequest): PriceTraceCanonicalOutcome = readAcceptedResponse { config ->
+        val response = transport.execute(request(config,"POST","/rest/v1/rpc/get_purchase_price_ingestion_response_v1",body = buildJsonObject {
+            put("p_purchase_source_id",input.purchaseSourceId)
+        }.encode()))
+        if (response.statusCode !in 200..299) return@readAcceptedResponse PriceTraceCanonicalOutcome.Failure(classify(response),response.body)
+        var source = PriceTracePurchaseObservationV4Json.decodeResponse(response.body).raw
+        require(source.requiredStringOrNull("purchaseSourceId") == input.purchaseSourceId)
+        source = synchronizeSourceComponents(source,input.purchaseRecordClientKey,requireNotNull(input.envelope),config)
+        if (input.resolvePlatform) source = synchronizeSourcePlatform(source,config)
+        PriceTraceCanonicalOutcome.Success(purchaseSourceMetadata(source,input.purchaseRecordClientKey))
+    }
+
+    private suspend fun synchronizeSourcePlatform(source: JsonObject,config: PriceTraceSupabaseConfig): JsonObject {
+        val response = transport.execute(request(config,"POST","/rest/v1/rpc/resolve_purchase_owner_platform_v1",body = buildJsonObject {
+            put("p_purchase_source_id",source.getValue("purchaseSourceId")); put("p_platform_id",JsonNull); put("p_create",false); put("p_user_verified",true)
+        }.encode()))
+        if (response.statusCode !in 200..299) throw PurchaseContextFailure(PriceTraceCanonicalOutcome.Failure(classify(response),
+            "pricetrace_platform_resolution_failed:${response.statusCode}"))
+        val saved = PriceTracePurchaseObservationV4Json.decodeResponse(response.body).raw
+        require(saved["purchaseSourceId"] == source["purchaseSourceId"])
+        (saved["platformIdentity"] as? JsonObject)?.let { identity ->
+            val id = identity.getValue("id").jsonPrimitive.content
+            require(java.util.UUID.fromString(id).toString().equals(id,true) && identity["authorityStatus"] == JsonPrimitive("owner_confirmed"))
+        }
+        return JsonObject(saved + ("platformResolutionChecked" to JsonPrimitive(true)))
+    }
+
+    private fun purchaseSourceMetadata(source: JsonObject, recordKey: String): JsonObject = JsonObject(mapOf(
+        "sources" to JsonArray(listOf(JsonObject(source + ("purchaseRecordClientKey" to JsonPrimitive(recordKey))))),
+        "observationCreated" to source.getValue("observationCreated"),"observationIds" to source.getValue("observationIds"),
+        "observationCount" to source.getValue("observationCount")))
+
+    private suspend fun synchronizeSourceComponents(initial: JsonObject, recordKey: String, envelope: YeonsikOcrEnvelope, config: PriceTraceSupabaseConfig): JsonObject {
+        var source = initial
+        val fingerprint = StableIds.sha256(YeonsikOcrV5Json.canonicalize(envelope))
+        val links = envelope.purchaseNutritionLinks.filter { it.purchaseRecordClientKey == recordKey && it.relationType == PurchaseNutritionRelation.MENU_COMPONENT }
+        for ((lineKey, components) in links.groupBy { it.purchaseLineKey }) {
+            val parent = source.getValue("lineResults").jsonArray.single { it.jsonObject["lineKey"] == JsonPrimitive(lineKey) }.jsonObject
+            if (parent["observationCreated"] != JsonPrimitive(true)) continue
+            val payload = JsonArray(components.map { link ->
+                val item = envelope.nutrition.single { it.clientKey == link.nutritionClientKey }
+                val name = when(item) { is IngestionNutrition.RestaurantEstimate -> item.menuName; is IngestionNutrition.MealComponentEstimate -> item.menuName; else -> error("component food estimate required") }
+                buildJsonObject { put("nutritionClientKey",link.nutritionClientKey); put("name",name); put("role",link.componentRole.wireValue)
+                    put("evidenceRefs",JsonArray(YeonsikOcrV5Json.foodEvidenceIds(item).sorted().map(::JsonPrimitive))) }
+            })
+            val saved = (source["menuComponents"] as? JsonArray).orEmpty().map { it.jsonObject }.filter { it["canonicalFingerprint"] == JsonPrimitive(fingerprint) && it["lineKey"] == JsonPrimitive(lineKey) }
+            fun validateSaved(rows: List<JsonObject>, parentRow: JsonObject) {
+                require(rows.map { it["nutritionClientKey"] }.distinct().size == rows.size)
+                require(rows.groupBy { it["id"] }.values.all { group -> group.map { listOf(it["name"],it["role"],it["parentOwnerMenuId"],it["parentRestaurantMenuId"]) }.distinct().size == 1 })
+                rows.forEach { row ->
+                    val expected = payload.map { it.jsonObject }.single { it["nutritionClientKey"] == row["nutritionClientKey"] }
+                    val id = row.getValue("id").jsonPrimitive.content
+                    require(java.util.UUID.fromString(id).toString().equals(id,true))
+                    require(listOf("name","role","evidenceRefs").all { row[it] == expected[it] }) { "pricetrace_component_facts_mismatch" }
+                    if (parentRow["authorityStatus"] == JsonPrimitive("owner_confirmed")) {
+                        require(row["parentOwnerMenuId"] == parentRow.getValue("ownerConfirmedIds").jsonObject["restaurantMenuId"] && row["parentRestaurantMenuId"] == JsonNull)
+                    } else {
+                        require(parentRow["authorityStatus"] == JsonPrimitive("exact") && row["parentRestaurantMenuId"] == parentRow.getValue("authoritativeIds").jsonObject["restaurantMenuId"] && row["parentOwnerMenuId"] == JsonNull)
+                    }
+                }
+            }
+            validateSaved(saved,parent)
+            if (saved.map { it["nutritionClientKey"] }.toSet() == components.map { JsonPrimitive(it.nutritionClientKey) }.toSet() && saved.size == components.size) continue
+            val savedKeys = saved.map { it["nutritionClientKey"] }.toSet()
+            for (batch in payload.filter { it.jsonObject["nutritionClientKey"] !in savedKeys }.chunked(100)) {
+            val response = transport.execute(request(config,"POST","/rest/v1/rpc/register_purchase_menu_components_v1",body = buildJsonObject {
+                put("p_purchase_source_id", source.getValue("purchaseSourceId")); put("p_line_key",lineKey)
+                put("p_canonical_fingerprint",fingerprint); put("p_components",JsonArray(batch)); put("p_user_verified",true)
+            }.encode()))
+            if (response.statusCode !in 200..299) throw PurchaseContextFailure(PriceTraceCanonicalOutcome.Failure(classify(response),
+                "pricetrace_component_registration_failed:${response.statusCode}"))
+            val updated = PriceTracePurchaseObservationV4Json.decodeResponse(response.body).raw
+            require(updated["purchaseSourceId"] == source["purchaseSourceId"])
+            PurchaseNutritionIdentity.validateLineResults(envelope.purchaseRecords.single { it.clientKey == recordKey },updated)
+            val rows = updated.getValue("menuComponents").jsonArray.map { it.jsonObject }.filter { it["canonicalFingerprint"] == JsonPrimitive(fingerprint) && it["lineKey"] == JsonPrimitive(lineKey) }
+            validateSaved(rows,updated.getValue("lineResults").jsonArray.single { it.jsonObject["lineKey"] == JsonPrimitive(lineKey) }.jsonObject)
+            source = updated
+            }
+            val finalRows = source.getValue("menuComponents").jsonArray.map { it.jsonObject }.filter { it["canonicalFingerprint"] == JsonPrimitive(fingerprint) && it["lineKey"] == JsonPrimitive(lineKey) }
+            require(finalRows.size == components.size && finalRows.map { it["nutritionClientKey"] }.toSet() == components.map { JsonPrimitive(it.nutritionClientKey) }.toSet())
+        }
+        return source
+    }
 
     private suspend fun readAcceptedResponse(
         read: suspend (PriceTraceSupabaseConfig) -> PriceTraceCanonicalOutcome,
@@ -212,6 +361,8 @@ class PriceTraceCanonicalGateway(
         if (!initial.isSignedIn) return PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
         suspend fun safely(config: PriceTraceSupabaseConfig): PriceTraceCanonicalOutcome = try {
             read(config)
+        } catch (error: PurchaseContextFailure) {
+            error.outcome
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: SocketTimeoutException) {
@@ -226,6 +377,8 @@ class PriceTraceCanonicalGateway(
         val refreshed = refresh(initial) ?: return first
         return safely(refreshed)
     }
+
+    private class PurchaseContextFailure(val outcome: PriceTraceCanonicalOutcome.Failure) : RuntimeException()
 
     suspend fun submitVerifiedReceipt(idempotencyKey: String, receipt: ReceiptV2): PriceTraceCanonicalOutcome {
         if (receipt.document.source.transcriptionStatus != TranscriptionStatus.USER_VERIFIED) {
@@ -1062,8 +1215,18 @@ class PriceTraceCanonicalGateway(
 
 class PriceTraceCanonicalProjectionSubmitter(
     private val gateway: PriceTraceCanonicalGateway,
-) : IngestionProjectionSubmitter, OcrMerchantIdentityResolutionSubmitter, OcrMenuIdentityResolutionSubmitter, OcrPurchaseIdentityResolutionSubmitter,
+) : IngestionProjectionSubmitter, OcrMerchantIdentityResolutionSubmitter, OcrMenuIdentityResolutionSubmitter, OcrPurchaseIdentityResolutionSubmitter, PurchaseIdentityReviewSubmitter,
     OcrProjectionResponseReader {
+    override suspend fun reviewPurchaseIdentity(request: PurchaseIdentityReviewRequest): ProjectionSubmission =
+        when (val result = gateway.reviewPurchaseIdentity(request)) {
+            is PriceTraceCanonicalOutcome.Failure -> result.toProjectionFailure(reviewAware = true)
+            is PriceTraceCanonicalOutcome.Success -> ProjectionSubmission.Success(request.purchaseSourceId, metadataJson = result.response.encode(),
+                requiresReview = PurchaseNutritionIdentity.pendingResolutions(result.response.encode()).isNotEmpty())
+        }
+
+    override suspend fun synchronizePurchaseContext(request: OcrPurchaseMenuResolutionRequest): ProjectionSubmission =
+        purchaseProjectionResult(gateway.synchronizePurchaseContext(request))
+
     override suspend fun readAcceptedProjection(request: ProjectionRequest): ProjectionSubmission {
         val cached = runCatching { Json.parseToJsonElement(request.previousMetadataJson.orEmpty()).jsonObject }.getOrNull()
             ?: return ProjectionSubmission.Failure("pricetrace_checkpoint_metadata_missing", false, requiresReview = true)

@@ -321,8 +321,14 @@ class PriceTraceCanonicalGatewayTest {
     @Test
     fun v5SelectedFitnessPipelineRunsPurchaseThenV3PrivateImportThenPublicationAndReplaySkipsSinks() = runTest {
         val calls = mutableListOf<String>()
+        var contextReads = 0
         val ptTransport = object : PriceObservationHttpTransport {
             override suspend fun execute(request: PriceObservationHttpRequest): PriceObservationHttpResponse {
+                if (request.url.endsWith("/get_purchase_price_ingestion_response_v1") || request.url.endsWith("/resolve_purchase_owner_platform_v1")) {
+                    contextReads++
+                    assertEquals(v5SourceId,Json.parseToJsonElement(request.body!!).jsonObject["p_purchase_source_id"]!!.jsonPrimitive.content)
+                    return PriceObservationHttpResponse(200,v5AuthorityResponse())
+                }
                 calls += "purchase"
                 assertTrue(request.url.endsWith("/ingest_verified_purchase_price_observation_v1"))
                 assertFalse(Json.parseToJsonElement(request.body!!).jsonObject["p_purchase"]!!.jsonObject["items"]!!.jsonArray.single().jsonObject.containsKey("seller"))
@@ -378,6 +384,10 @@ class PriceTraceCanonicalGatewayTest {
             bundleFingerprint = "a".repeat(64)) as CanonicalImportResult.Success).startResult is IngestionStartResult.Duplicate)
         useCase.submitSelected("v5-pipeline", confirmed.envelope, setOf(IngestionProjection.FITNESS_NUTRITION))
         assertEquals(3, calls.size)
+        assertEquals(2,contextReads)
+        useCase.submitSelected("v5-pipeline", confirmed.envelope, setOf(IngestionProjection.FITNESS_NUTRITION))
+        assertEquals(3,calls.size)
+        assertEquals(2,contextReads)
     }
 
     @Test
