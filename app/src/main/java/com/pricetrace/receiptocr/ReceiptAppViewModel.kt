@@ -832,6 +832,9 @@ class ReceiptAppViewModel(
     fun reviewPurchaseIdentity(command: com.pricetrace.receiptscanner.ingestion.PurchaseIdentityCommand) =
         runCanonicalJsonValidator { state -> canonicalJsonValidator.reviewPurchaseIdentity(state,command) }
 
+    fun reviewSavedIdentity(command: com.pricetrace.receiptscanner.ingestion.SavedIdentityCommand) =
+        runCanonicalJsonValidator { state -> canonicalJsonValidator.reviewSavedIdentity(state,command) }
+
     fun submitCanonicalJsonValidator() =
         runCanonicalJsonValidator(canonicalJsonValidator::submit)
 

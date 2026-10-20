@@ -314,6 +314,9 @@ class CanonicalIngestionUseCase(
         selectedProjections: Set<IngestionProjection>,
     ): List<ProjectionState> = submitSelected(ingestionId, envelope, selectedProjections)
 
+    suspend fun reviewSavedIdentity(ingestionId: String, envelope: YeonsikOcrEnvelope, command: SavedIdentityCommand): ProjectionSubmission =
+        orchestrator.reviewSavedIdentity(ingestionId,envelope,command)
+
     /** Shared OCR-only resolution and Fitness resume path used by Android and Desktop. */
     suspend fun reviewPurchaseIdentity(ingestionId: String, envelope: YeonsikOcrEnvelope, command: PurchaseIdentityCommand): ProjectionSubmission {
         val result = orchestrator.reviewPurchaseIdentity(ingestionId, envelope, command)

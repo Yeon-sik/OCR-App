@@ -840,6 +840,23 @@ class DesktopIngestionController(
         } finally { endBusy() }
     }
 
+    suspend fun reviewSavedIdentity(command: com.pricetrace.receiptscanner.ingestion.SavedIdentityCommand) {
+        beginBusy()
+        try {
+            val current = _state.value
+            require(current.reviewFieldErrors.isEmpty()) { "필드 수정을 완료한 후 연결하세요." }
+            val session = requireNotNull(current.session)
+            val result = useCase.reviewSavedIdentity(session.ingestionId,currentEnvelope(),command)
+            val latest = store.get(session.ingestionId) ?: session
+            persistRecord(latest,current.rawJson,current.canonicalJson,current.evidence)
+            _state.value = current.copy(session = latest,notice = if (result is com.pricetrace.receiptscanner.ingestion.ProjectionSubmission.Success) "연결 정보를 갱신했습니다." else null,
+                error = (result as? com.pricetrace.receiptscanner.ingestion.ProjectionSubmission.Failure)?.message)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) { _state.value = _state.value.copy(error = error.message ?: error.javaClass.simpleName,notice = null) }
+        finally { endBusy() }
+    }
+
     suspend fun reviewPurchaseIdentity(command: com.pricetrace.receiptscanner.ingestion.PurchaseIdentityCommand) {
         beginBusy()
         try {

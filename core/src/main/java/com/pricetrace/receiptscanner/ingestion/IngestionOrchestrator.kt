@@ -1204,6 +1204,36 @@ class IngestionOrchestrator(
         return lastSuccess
     }
 
+    suspend fun reviewSavedIdentity(ingestionId: String, envelope: YeonsikOcrEnvelope, command: SavedIdentityCommand): ProjectionSubmission {
+        val session = prepareExistingSession(ingestionId,envelope) ?: return resolutionNeedsReview("ingestion_not_found",null)
+        val recordIds = SavedIdentityConnections.recordIds(session)
+        if (recordIds.isEmpty()) return resolutionNeedsReview("PriceTrace에 기록을 저장한 뒤 연결할 수 있습니다.",null)
+        if (recordIds.size > SavedIdentityConnections.MAX_RECORD_IDS)
+            return resolutionNeedsReview("연결 대상이 ${SavedIdentityConnections.MAX_RECORD_IDS}개를 넘었습니다. 수집 기록을 나누어 확인하세요.",null)
+        if (!isVerifiedForOcrResolution(session,envelope)) return resolutionNeedsReview("현재 검수 내용을 먼저 확정하세요.",null)
+        acceptedSourceRevisionConflict(session,envelope)?.let { return resolutionNeedsReview(it,null) }
+        val state = session.projections.firstOrNull { it.projection in SavedIdentityConnections.projections &&
+            submitters[it.projection] is SavedIdentitySubmitter }
+            ?: return resolutionNeedsReview("PriceTrace 연결 설정을 확인하세요.",null)
+        val current = SavedIdentityConnections.state(session)
+        if (command.action == SavedIdentityAction.CONNECT && (current == null || current.query != command.query ||
+            current.searchEntity != command.entity || current.searchSourceId != command.sourceId ||
+            current.choices.none { it.id == command.targetId })) return resolutionNeedsReview("다시 검색한 뒤 연결할 항목을 선택하세요.",state.metadataJson)
+        val result = (submitters[state.projection] as SavedIdentitySubmitter).reviewSavedIdentity(SavedIdentityRequest(command,recordIds))
+        if (result is ProjectionSubmission.Success) {
+            val response = Json.parseToJsonElement(requireNotNull(result.metadataJson)).jsonObject
+            SavedIdentityConnections.decode(response)
+            val latest = requireNotNull(store.get(ingestionId))
+            require(latest.canonicalFingerprint == session.canonicalFingerprint)
+            val latestState = latest.projections.single { it.projection == state.projection }
+            val metadata = Json.parseToJsonElement(latestState.metadataJson ?: "{}").jsonObject
+            store.save(latest.copy(projections = latest.projections.replace(latestState.copy(
+                metadataJson = JsonObject(metadata + ("identityConnections" to response)).toString(),updatedAt = now()))))
+        }
+        // Identity grouping has no effect on canonical facts, completion states, or Fitness submission.
+        return result
+    }
+
     suspend fun reviewPurchaseIdentity(ingestionId: String, envelope: YeonsikOcrEnvelope, command: PurchaseIdentityCommand): ProjectionSubmission {
         val session = prepareExistingSession(ingestionId, envelope) ?: return resolutionNeedsReview("ingestion_not_found", null)
         val state = session.projections.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }

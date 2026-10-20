@@ -199,6 +199,9 @@ fun YeonsikCollectorApp(
                     onPurchaseIdentityCommand = { command ->
                         runIo { controller.reviewPurchaseIdentity(command); batchCoordinator.syncActiveItem(); refreshRecent() }
                     },
+                    onSavedIdentityCommand = { command ->
+                        runIo { controller.reviewSavedIdentity(command); batchCoordinator.syncActiveItem(); refreshRecent() }
+                    },
                     onVerify = {
                         runIo {
                             controller.verify(

@@ -195,6 +195,7 @@ fun ReceiptOcrContent(
     onCanonicalJsonConfirm: () -> Unit = {},
     onOwnerRestaurantSelected: (com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.OwnerRestaurantSelection) -> Unit = {},
     onPurchaseIdentityCommand: (com.pricetrace.receiptscanner.ingestion.PurchaseIdentityCommand) -> Unit = {},
+    onSavedIdentityCommand: (com.pricetrace.receiptscanner.ingestion.SavedIdentityCommand) -> Unit = {},
     onCanonicalJsonProjectionSelected: (IngestionProjection, Boolean) -> Unit = { _, _ -> },
     onCanonicalJsonSubmit: () -> Unit = {},
     onCanonicalJsonRetry: () -> Unit = {},
@@ -466,6 +467,7 @@ fun ReceiptOcrContent(
                     onConfirm = onCanonicalJsonConfirm,
                     onOwnerRestaurantSelected = onOwnerRestaurantSelected,
                     onPurchaseIdentityCommand = onPurchaseIdentityCommand,
+                    onSavedIdentityCommand = onSavedIdentityCommand,
                     onProjectionSelected = onCanonicalJsonProjectionSelected,
                     onSubmit = onCanonicalJsonSubmit,
                     onRetry = onCanonicalJsonRetry,
@@ -965,6 +967,7 @@ private fun CanonicalJsonValidatorScreen(
     onConfirm: () -> Unit,
     onOwnerRestaurantSelected: (com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.OwnerRestaurantSelection) -> Unit,
     onPurchaseIdentityCommand: (com.pricetrace.receiptscanner.ingestion.PurchaseIdentityCommand) -> Unit,
+    onSavedIdentityCommand: (com.pricetrace.receiptscanner.ingestion.SavedIdentityCommand) -> Unit = {},
     onProjectionSelected: (IngestionProjection, Boolean) -> Unit,
     onSubmit: () -> Unit,
     onRetry: () -> Unit,
@@ -1079,6 +1082,10 @@ private fun CanonicalJsonValidatorScreen(
             }
         }
         val ownerMetadata = state.session?.projections?.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson
+        item("saved-identity-connections") {
+            SavedIdentityConnectionsPanel(state.session,!state.busy && revisionReady && state.session?.verifiedCanonicalFingerprint != null &&
+                state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint,onSavedIdentityCommand)
+        }
         state.envelope?.let { envelope ->
             com.pricetrace.receiptscanner.ingestion.PurchaseIdentityReview.cards(envelope,ownerMetadata).forEach { card ->
                 item("identity:${card.command.purchaseRecordClientKey}:${card.command.lineKey}:${card.command.entity}") {
