@@ -545,7 +545,7 @@ private fun InboxRecentItem(
         enabled = enabled,
         modifier = Modifier.fillMaxWidth().collectorFocusOutline(CollectorTokens.panelShape).semantics {
             this.selected = selected
-            contentDescription = "${item.title}, ${kind.label}, ${item.updatedAt}"
+            contentDescription = "${item.title}, ${kind.label}, ${reviewTimestamp(item.updatedAt)}"
         },
         shape = CollectorTokens.panelShape,
         color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
@@ -565,7 +565,7 @@ private fun InboxRecentItem(
                 )
                 StatusBadge(kind)
             }
-            Text(item.updatedAt, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            Text(reviewTimestamp(item.updatedAt), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
     }
 }

@@ -43,6 +43,7 @@ internal object OcrSemanticTokens {
         errorContainer = Color(0xFF482725), onErrorContainer = Color(0xFFF3ABA7),
     )
     val success: Color @Composable get() = if (isSystemInDarkTheme()) Color(0xFF9DD8B5) else Color(0xFF28634A)
+    val payment: Color @Composable get() = if (isSystemInDarkTheme()) Color(0xFFCBB9EB) else Color(0xFF65468C)
     val warning: Color @Composable get() = if (isSystemInDarkTheme()) Color(0xFFE6C27A) else Color(0xFF805718)
     val disabledContent: Color @Composable get() = if (isSystemInDarkTheme()) Color(0xFF8D949B) else Color(0xFF767A80)
     val disabledSurface: Color @Composable get() = if (isSystemInDarkTheme()) Color(0xFF30353A) else Color(0xFFE6E5E1)

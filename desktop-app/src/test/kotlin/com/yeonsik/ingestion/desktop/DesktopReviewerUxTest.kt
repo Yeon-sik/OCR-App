@@ -123,10 +123,11 @@ class DesktopReviewerUxTest {
         show(c)
         val field = canonicalReviewFieldGroups(c.state.value.envelope!!).visibleFields.single { it.path.endsWith(".basis_amount") }
         val target = compose.onNodeWithTag("review-target:${field.path}")
-        val initialBounds = target.fetchSemanticsNode().boundsInRoot
+        val section = compose.onNodeWithText("영양 기준")
+        val initialOffset = target.fetchSemanticsNode().boundsInRoot.top - section.fetchSemanticsNode().boundsInRoot.bottom
         compose.onNode(hasSetTextAction() and hasAnyAncestor(hasTestTag("review-target:${field.path}")))
             .performTextReplacement("50")
-        assertEquals(initialBounds, target.fetchSemanticsNode().boundsInRoot)
+        assertEquals(initialOffset, target.fetchSemanticsNode().boundsInRoot.top - section.fetchSemanticsNode().boundsInRoot.bottom, 1f)
         compose.onNode(hasSetTextAction() and hasText("Test cereal")).performTextReplacement("BULK PRODUCT")
         compose.onNodeWithText("변경 2개").assertIsDisplayed()
         compose.onNodeWithContentDescription("상품명 값 적용").assertDoesNotExist()
@@ -176,5 +177,30 @@ class DesktopReviewerUxTest {
         val file = File("build/reports/reviewer-ux/$name.png")
         file.parentFile.mkdirs()
         ImageIO.write(output, "png", file)
+    }
+
+    @Test fun requestedWindowShowsCategoriesAndNutrientUnits() = withUiTest(1737, 1328) {
+        val c = controller()
+        show(c, 1737, 1328)
+        compose.onNodeWithText("영양성분", substring = false).assertIsDisplayed()
+        compose.onNodeWithText("상품 정보", substring = false).assertIsDisplayed()
+        val path = canonicalReviewFieldGroups(c.state.value.envelope!!).visibleFields.single { it.path.endsWith(".nutrients.calories_kcal") }.path
+        compose.onNode(hasText("kcal") and hasAnyAncestor(hasTestTag("review-target:$path")), useUnmergedTree = true).assertIsDisplayed()
+        capture("presentation-1737-nutrition")
+    }
+
+    @Test fun displayedPurchaseTimeEditsRetainOffsetInStoredData() = withUiTest(1737, 1328) {
+        val c = controller()
+        val sample = File("../examples/yeonsik-ocr.v4.purchase.example.json").readText()
+            .replace("\"ordered_at\": null", "\"ordered_at\": \"2026-09-11T12:34:56+09:00\"")
+        runBlocking { c.importJson(sample) }
+        show(c, 1737, 1328)
+        val input = compose.onNode(hasSetTextAction() and hasAnyAncestor(hasTestTag("review-target:purchase_records[purchase-1].ordered_at")))
+        input.performScrollTo().assertTextContains("2026-09-11-12:34:56")
+        capture("presentation-1737-purchase")
+        input.performTextReplacement("2026-09-11-12:35:57")
+        compose.onNodeWithText("변경사항 모두 적용").performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { !c.state.value.busy && c.state.value.reviewDrafts.isEmpty() }
+        assertEquals("2026-09-11T12:35:57+09:00", c.state.value.envelope!!.purchaseRecords.single().orderedAt)
     }
 }

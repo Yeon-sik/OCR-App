@@ -160,7 +160,7 @@ fun ReviewWorkspace(
                 state.bundleMetadata.verificationEventRecorded) &&
             revisionReady && selectedProjections.isNotEmpty() && state.reviewFieldErrors.isEmpty()
 
-        CompositionLocalProvider(LocalReviewNavigation provides navigation) {
+        CompositionLocalProvider(LocalReviewNavigation provides navigation, LocalReviewEnvelope provides envelope) {
             Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 ReviewHeader(
                     state = state,
@@ -344,7 +344,7 @@ internal fun reviewSummaryFacts(envelope: YeonsikOcrEnvelope, rows: List<ReviewR
     }
     if (envelope.receipt != null || envelope.purchaseRecords.isNotEmpty() || envelope.priceObservations.isNotEmpty()) {
         add("판매처" to (envelope.receipt?.merchant?.name ?: envelope.purchaseRecords.firstOrNull()?.seller ?: envelope.merchantCandidate?.name ?: "미확인"))
-        rows.firstOrNull { it.item in setOf("구매일", "주문일·시각", "결제일·시각") }?.let { add("날짜" to it.value) }
+        rows.firstOrNull { it.item in setOf("구매일", "주문일·시각", "결제일·시각") }?.let { add("날짜" to reviewTimestampText(it.value)) }
         rows.firstOrNull { it.item in setOf("최종 결제금액", "총 주문금액", "실제 결제금액") }?.let { add("금액" to it.value) }
     }
     if (isEmpty()) envelope.merchantCandidate?.let { add("상점" to it.name) }
@@ -430,7 +430,7 @@ private fun HumanReviewRow(row: ReviewRow) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space3), verticalAlignment = Alignment.Top) {
             Text(row.item, modifier = Modifier.weight(0.34f), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
             Column(Modifier.weight(0.66f), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space1)) {
-                Text(row.value, style = MaterialTheme.typography.bodyMedium)
+                Text(reviewTimestampText(row.value), style = MaterialTheme.typography.bodyMedium)
                 row.confidence?.let { Text("인식 신뢰도: $it", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall) }
                 if (row.evidence.isNotEmpty()) {
                     Text(
@@ -574,7 +574,7 @@ private fun EditableCanonicalSection(
                 ReviewTarget("conflict:${fact.productClientKey}:${fact.field}") { ProductFactConflict(fact, busy, onEdit) }
             }
         }
-        ReviewFieldGrid(fields.filterNot { ".option_items[" in it.path }) { field ->
+        CategorizedReviewFields(fields.filterNot { ".option_items[" in it.path }) { field ->
                 AccessibleField(field, CanonicalFieldRegistry.isModified(field, edits),
                     edits.firstOrNull { it.fieldPath == field.path }?.previousValue, fieldErrors[field.path], busy,
                     onApply = { value -> onEdit { it.updateField(field.path, value) } })
@@ -583,7 +583,7 @@ private fun EditableCanonicalSection(
         if (emptyOptional.isNotEmpty()) {
             CollectorButton(if (showEmptyOptionalFields) "빈 선택 항목 접기" else "비어 있는 선택 항목 ${emptyOptional.size}개 보기",
                 { showEmptyOptionalFields = !showEmptyOptionalFields }, enabled = !busy, emphasized = false)
-            if (showEmptyOptionalFields) ReviewFieldGrid(emptyOptional.filterNot { ".option_items[" in it.path }) { field ->
+            if (showEmptyOptionalFields) CategorizedReviewFields(emptyOptional.filterNot { ".option_items[" in it.path }) { field ->
                     AccessibleField(field, CanonicalFieldRegistry.isModified(field, edits),
                         edits.firstOrNull { it.fieldPath == field.path }?.previousValue, fieldErrors[field.path], busy,
                         onApply = { value -> onEdit { it.updateField(field.path, value) } })
