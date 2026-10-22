@@ -21,6 +21,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.key
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -141,6 +143,14 @@ fun ReviewWorkspace(
                 selectedProjections = selectedProjections,
             )
         }
+        val navigation = remember(state.ingestionId) { ReviewNavigation() }
+        val groups = canonicalReviewFieldGroups(envelope)
+        val paths = LinkedProductReview.facts(envelope).filter { it.status == ProductFactStatus.CONFLICT }
+            .map { "conflict:${it.productClientKey}:${it.field}" } +
+            state.reviewDrafts.keys.filter { it.endsWith(".new_option") } +
+            (groups.visibleFields + groups.emptyOptionalFields.filter { it.path in state.reviewFieldErrors || it.path in state.reviewDrafts })
+                .sortedBy { reviewFieldPriority(it, state.reviewFieldErrors.keys, state.reviewDrafts.keys) }
+                .map { it.path }
         val confirmationBlocker = reviewConfirmationBlocker(state, busy, revisionReady)
         val canVerify = confirmationBlocker == null
         val canSubmit = confirmationBlocker == null && state.session != null &&
@@ -150,98 +160,104 @@ fun ReviewWorkspace(
                 state.bundleMetadata.verificationEventRecorded) &&
             revisionReady && selectedProjections.isNotEmpty() && state.reviewFieldErrors.isEmpty()
 
-        Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            ReviewHeader(
-                state = state,
-                title = reviewTitle(state, model.rows),
-                onDeveloperInfoVisibleChanged = onDeveloperInfoVisibleChanged,
-                developerInfoVisible = developerInfoVisible,
-            )
-            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                state.error?.let { ValidationMessage(it, CollectorStatusKind.ERROR) }
-                state.notice?.let { ValidationMessage(it, CollectorStatusKind.PROCESSING, recoveryHint = null) }
-
-                if (state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.FAILED) {
-                    InlineRecoveryAction(
-                        title = "증거 보관을 완료해야 합니다",
-                        message = state.bundleMetadata.archiveError ?: "증거 보관에 실패했습니다.",
-                        buttonLabel = "보관 다시 시도",
-                        busy = busy,
-                        onAction = onRetryArchive,
-                    )
-                }
-                if (state.bundleMetadata?.pendingRevision != null ||
-                    state.bundleMetadata?.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.FAILED
-                ) {
-                    InlineRecoveryAction(
-                        title = "수정본 보관을 완료해야 합니다",
-                        message = state.bundleMetadata.revisionArchiveError
-                            ?: "수정한 검수본이 아직 보관되지 않았습니다.",
-                        buttonLabel = "수정본 보관 다시 시도",
-                        busy = busy,
-                        onAction = onRetryRevision,
-                    )
-                }
-
-                if (state.bundleMetadata != null && !state.bundleMetadata.verificationEventRecorded && state.session != null &&
-                    state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint) {
-                    InlineRecoveryAction("검수 기록 저장 미완료", "검수 내용은 확정됐지만 기록 저장이 완료되지 않았습니다.",
-                        "검수 기록 다시 저장", busy, onVerify)
-                }
+        CompositionLocalProvider(LocalReviewNavigation provides navigation) {
+            Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ReviewHeader(
+                    state = state,
+                    title = reviewTitle(state, model.rows),
+                    onDeveloperInfoVisibleChanged = onDeveloperInfoVisibleChanged,
+                    developerInfoVisible = developerInfoVisible,
+                    onNextReviewItem = { navigation.next(paths) }, hasReviewItems = paths.isNotEmpty(),
+                )
                 SourceSummary(state, model.rows)
-                val ownerMetadata = state.session?.projections?.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson
-                com.pricetrace.receiptscanner.ingestion.PurchaseIdentityReview.cards(envelope,ownerMetadata).forEach { card ->
-                    PurchaseIdentityCard(card,canSubmit && card.sourceSaved,onPurchaseIdentityCommand)
-                }
-                if (state.reviewFieldErrors.isNotEmpty()) ValidationMessage(
-                    "수정 필요 ${state.reviewFieldErrors.size}개 · 아래 편집 항목을 확인하세요", CollectorStatusKind.ERROR)
-                var showAllValues by rememberSaveable { mutableStateOf(false) }
-                CollectorButton(if (showAllValues) "전체 값 접기" else "전체 값 ${model.rows.size}개 보기", { showAllValues = !showAllValues }, emphasized = false)
-                if (showAllValues) {
-                    ReceiptSection(model.rows)
-                    NutritionSection(model.rows)
-                    PurchaseAndGenericSections(model.rows)
-                }
-                EditableCanonicalSection(
-                    envelope = envelope,
-                    edits = state.reviewEdits,
-                    fieldErrors = state.reviewFieldErrors,
-                    busy = busy,
-                    onEdit = onEdit,
-                )
-                DestinationSection(
-                    state = state,
-                    destinations = model.destinations,
-                    selectedProjections = selectedProjections,
-                    busy = busy,
-                    onProjectionSelected = onProjectionSelected,
-                )
-                if (developerInfoVisible) {
-                    DeveloperInfoPanel(
+                Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    state.error?.let { ValidationMessage(it, CollectorStatusKind.ERROR) }
+
+                    if (state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.FAILED) {
+                        InlineRecoveryAction(
+                            title = "증거 보관을 완료해야 합니다",
+                            message = state.bundleMetadata.archiveError ?: "증거 보관에 실패했습니다.",
+                            buttonLabel = "보관 다시 시도",
+                            busy = busy,
+                            onAction = onRetryArchive,
+                        )
+                    }
+                    if (state.bundleMetadata?.pendingRevision != null ||
+                        state.bundleMetadata?.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.FAILED
+                    ) {
+                        InlineRecoveryAction(
+                            title = "수정본 보관을 완료해야 합니다",
+                            message = state.bundleMetadata.revisionArchiveError
+                                ?: "수정한 검수본이 아직 보관되지 않았습니다.",
+                            buttonLabel = "수정본 보관 다시 시도",
+                            busy = busy,
+                            onAction = onRetryRevision,
+                        )
+                    }
+
+                    if (state.bundleMetadata != null && !state.bundleMetadata.verificationEventRecorded && state.session != null &&
+                        state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint) {
+                        InlineRecoveryAction("검수 기록 저장 미완료", "검수 내용은 확정됐지만 기록 저장이 완료되지 않았습니다.",
+                            "검수 기록 다시 저장", busy, onVerify)
+                    }
+                    EditableCanonicalSection(
+                        envelope = envelope,
+                        edits = state.reviewEdits,
+                        fieldErrors = state.reviewFieldErrors,
+                        busy = busy,
+                        onEdit = onEdit,
+                    )
+                    val ownerMetadata = state.session?.projections?.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson
+                    com.pricetrace.receiptscanner.ingestion.PurchaseIdentityReview.cards(envelope,ownerMetadata).forEach { card ->
+                        PurchaseIdentityCard(card,canSubmit && card.sourceSaved,onPurchaseIdentityCommand)
+                    }
+                    if (state.reviewFieldErrors.isNotEmpty()) ValidationMessage(
+                        "수정 필요 ${state.reviewFieldErrors.size}개 · 다음 확인 항목에서 오류를 해결하세요", CollectorStatusKind.ERROR)
+                    var showAllValues by rememberSaveable { mutableStateOf(false) }
+                    CollectorButton(if (showAllValues) "추출 결과 접기" else "추출 결과 자세히 보기", { showAllValues = !showAllValues }, emphasized = false)
+                    if (showAllValues) {
+                        ReceiptSection(model.rows)
+                        NutritionSection(model.rows)
+                        PurchaseAndGenericSections(model.rows)
+                    }
+
+                    DestinationSection(
                         state = state,
-                        onImportJson = onImportJson,
-                        onClose = { onDeveloperInfoVisibleChanged(false) },
+                        destinations = model.destinations,
+                        selectedProjections = selectedProjections,
+                        busy = busy,
+                        onProjectionSelected = onProjectionSelected,
+                    )
+                    state.notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    if (developerInfoVisible) {
+                        androidx.compose.ui.window.Dialog(onDismissRequest = { onDeveloperInfoVisibleChanged(false) }) {
+                            Surface {
+                                Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+                                    DeveloperInfoPanel(state, onImportJson, { onDeveloperInfoVisibleChanged(false) })
+                                }
+                            }
+                        }
+                    }
+                }
+                Column(Modifier.fillMaxWidth().heightIn(max = 176.dp).verticalScroll(rememberScrollState())) {
+                    ConfirmAndSubmitSection(
+                        state = state,
+                        busy = busy,
+                        canVerify = canVerify,
+                        canSubmit = canSubmit,
+                        confirmationBlocker = confirmationBlocker,
+                        verificationBasis = verificationBasis,
+                        selectedProjections = selectedProjections,
+                        submitConfirmationOpen = submitConfirmationOpen,
+                        onVerificationBasisSelected = onVerificationBasisSelected,
+                        onVerify = onVerify,
+                        onOpenSubmitConfirmation = onOpenSubmitConfirmation,
+                        onDismissSubmitConfirmation = onDismissSubmitConfirmation,
+                        onConfirmSubmit = onConfirmSubmit,
+                        onRetryArchive = onRetryArchive,
+                        onRetryRevision = onRetryRevision,
                     )
                 }
-            }
-            Column(Modifier.fillMaxWidth().heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
-                ConfirmAndSubmitSection(
-                    state = state,
-                    busy = busy,
-                    canVerify = canVerify,
-                    canSubmit = canSubmit,
-                    confirmationBlocker = confirmationBlocker,
-                    verificationBasis = verificationBasis,
-                    selectedProjections = selectedProjections,
-                    submitConfirmationOpen = submitConfirmationOpen,
-                    onVerificationBasisSelected = onVerificationBasisSelected,
-                    onVerify = onVerify,
-                    onOpenSubmitConfirmation = onOpenSubmitConfirmation,
-                    onDismissSubmitConfirmation = onDismissSubmitConfirmation,
-                    onConfirmSubmit = onConfirmSubmit,
-                    onRetryArchive = onRetryArchive,
-                    onRetryRevision = onRetryRevision,
-                )
             }
         }
     }
@@ -289,88 +305,62 @@ fun ReviewHeader(
     title: String,
     developerInfoVisible: Boolean,
     onDeveloperInfoVisibleChanged: (Boolean) -> Unit,
+    onNextReviewItem: () -> Unit = {},
+    hasReviewItems: Boolean = false,
 ) {
-    val kind = overallStatusKind(state)
-    val statusText = overallStatusLabel(state, kind)
-    Column(verticalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space3),
-            verticalAlignment = Alignment.Top,
-        ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space1)) {
-                Text("Review", modifier = Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
-                Text(title, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(
-                    "${state.schema ?: "스키마 확인 중"} · ${state.envelope?.mode?.wireValue ?: "mode 확인 중"}",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
+    var menuOpen by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            StatusBadge(overallStatusKind(state), overallStatusLabel(state, overallStatusKind(state)))
+            androidx.compose.foundation.layout.Box {
+                androidx.compose.material3.TextButton({ menuOpen = true }) { Text("더보기") }
+                androidx.compose.material3.DropdownMenu(menuOpen, { menuOpen = false }) {
+                    androidx.compose.material3.DropdownMenuItem(text = { Text(if (developerInfoVisible) "개발자 정보 닫기" else "개발자 정보") },
+                        onClick = { menuOpen = false; onDeveloperInfoVisibleChanged(!developerInfoVisible) })
+                }
             }
-            StatusBadge(kind, statusText)
         }
-        WorkflowProgress(state, kind)
-        CollectorButton(
-            label = if (developerInfoVisible) "개발자 정보 닫기" else "개발자 정보",
-            onClick = { onDeveloperInfoVisibleChanged(!developerInfoVisible) },
-            emphasized = false,
-            modifier = Modifier.fillMaxWidth(),
-            contentDescription = if (developerInfoVisible) "개발자 정보 닫기" else "개발자 정보 열기. canonical, manifest, validation, projection 상태를 확인합니다.",
-        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            val conflicts = state.envelope?.let { LinkedProductReview.facts(it).count { fact -> fact.status == ProductFactStatus.CONFLICT } } ?: 0
+            Text("충돌 $conflicts · 입력 오류 ${state.reviewFieldErrors.size} · 미적용 ${state.reviewDrafts.size}",
+                Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+            CollectorButton("다음 확인 항목", onNextReviewItem, enabled = hasReviewItems && !state.busy, emphasized = false)
+        }
     }
 }
 
-@Composable
-private fun WorkflowProgress(state: DesktopUiState, kind: CollectorStatusKind) {
-    val verified = state.session?.verifiedCanonicalFingerprint == state.session?.canonicalFingerprint
-    val steps = listOf(
-        "1 가져오기" to CollectorStatusKind.COMPLETE,
-        "2 자동 검증" to if (state.error == null && state.envelope != null) CollectorStatusKind.COMPLETE else CollectorStatusKind.ERROR,
-        "3 검토·수정" to if (verified) CollectorStatusKind.COMPLETE else kind,
-        "4 확정·전송" to if (kind == CollectorStatusKind.COMPLETE) CollectorStatusKind.COMPLETE else CollectorStatusKind.NEUTRAL,
-    )
-    Row(
-        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2),
-    ) {
-        steps.forEach { (label, stepKind) -> StatusBadge(stepKind, label) }
+internal fun reviewSummaryFacts(envelope: YeonsikOcrEnvelope, rows: List<ReviewRow>): List<Pair<String, String>> = buildList {
+    if (envelope.productCandidates.isNotEmpty() || envelope.nutrition.isNotEmpty()) {
+        envelope.productCandidates.firstOrNull()?.let {
+            add("상품" to (it.productName + if (envelope.productCandidates.size > 1) " 외 ${envelope.productCandidates.size - 1}개" else ""))
+            add("브랜드" to (it.brand ?: "미확인"))
+        }
+        envelope.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>().firstOrNull()?.let {
+            add("영양 기준" to "${it.draft.basisAmount ?: "미확인"} ${it.draft.basisUnit}")
+        }
     }
+    if (envelope.receipt != null || envelope.purchaseRecords.isNotEmpty() || envelope.priceObservations.isNotEmpty()) {
+        add("판매처" to (envelope.receipt?.merchant?.name ?: envelope.purchaseRecords.firstOrNull()?.seller ?: envelope.merchantCandidate?.name ?: "미확인"))
+        rows.firstOrNull { it.item in setOf("구매일", "주문일·시각", "결제일·시각") }?.let { add("날짜" to it.value) }
+        rows.firstOrNull { it.item in setOf("최종 결제금액", "총 주문금액", "실제 결제금액") }?.let { add("금액" to it.value) }
+    }
+    if (isEmpty()) envelope.merchantCandidate?.let { add("상점" to it.name) }
 }
 
 @Composable
 fun SourceSummary(state: DesktopUiState, rows: List<ReviewRow>) {
     val envelope = state.envelope ?: return
-    val merchant = envelope.receipt?.merchant?.name
-        ?: envelope.merchantCandidate?.name
-        ?: envelope.purchaseRecords.firstOrNull()?.seller
-        ?: envelope.productCandidates.firstOrNull()?.productName
-        ?: "이름 미확인"
-    val date = rows.firstOrNull { it.item in setOf("구매일", "주문일·시각", "결제일·시각") }?.value ?: "날짜 미확인"
-    val amount = rows.firstOrNull { it.item in setOf("최종 결제금액", "총 주문금액", "실제 결제금액") }?.value ?: "금액 미확인"
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = CollectorTokens.panelShape,
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    ) {
-        CollectorSection(
-            title = "Source summary",
-            subtitle = "원본에서 읽은 핵심 값입니다. 수정 전 evidence inspector와 대조하세요.",
-            modifier = Modifier.padding(CollectorTokens.space3),
-        ) {
-            SummaryFact("판매처 / 대상", merchant)
-            SummaryFact("날짜", date)
-            SummaryFact("금액", amount)
-            SummaryFact("원본 증거", if (state.evidence.isEmpty()) "첨부 없음" else "${state.evidence.size}개 첨부")
-        }
-    }
+    Text(reviewSummaryFacts(envelope, rows).joinToString(" · ") { "${it.first}: ${it.second}" },
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable
 private fun SummaryFact(label: String, value: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space3)) {
-        Text(label, modifier = Modifier.weight(0.38f), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-        Text(value, modifier = Modifier.weight(0.62f), style = MaterialTheme.typography.bodyMedium)
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(label, Modifier.weight(0.38f), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        Text(value, Modifier.weight(0.62f), style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -570,83 +560,40 @@ private fun EditableCanonicalSection(
     busy: Boolean,
     onEdit: ((CanonicalReviewController) -> Boolean) -> Unit,
 ) {
-    val (visibleFields, emptyOptionalFields) = remember(envelope) { canonicalReviewFieldGroups(envelope) }
-    if (visibleFields.isEmpty() && emptyOptionalFields.isEmpty()) return
-    var editorVisible by rememberSaveable { mutableStateOf(false) }
+    val groups = remember(envelope) { canonicalReviewFieldGroups(envelope) }
+    val drafts = LocalReviewDraftActions.current?.values.orEmpty()
+    val urgentOptional = groups.emptyOptionalFields.filter { it.path in fieldErrors || it.path in drafts }
+    val fields = (groups.visibleFields + urgentOptional).sortedBy { reviewFieldPriority(it, fieldErrors.keys, drafts.keys) }
+    val emptyOptional = groups.emptyOptionalFields - urgentOptional.toSet()
     var showEmptyOptionalFields by rememberSaveable { mutableStateOf(false) }
-    CollectorSection(
-        "수정",
-        "상품명처럼 연결된 값은 한 번만 표시합니다. 필수 값과 입력된 값부터 확인하세요.",
-    ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
-            CollectorButton(
-                label = if (editorVisible) "수정 패널 닫기" else "수정 가능한 값 열기",
-                onClick = { editorVisible = !editorVisible },
-                enabled = !busy,
-                emphasized = false,
-                modifier = Modifier.weight(1f),
-            )
-            CollectorButton(
-                label = "실행 취소",
-                onClick = { onEdit { it.undo() } },
-                enabled = !busy && edits.isNotEmpty(),
-                emphasized = false,
-                modifier = Modifier.weight(1f),
-            )
-            CollectorButton(
-                label = "다시 실행",
-                onClick = { onEdit { it.redo() } },
-                enabled = !busy,
-                emphasized = false,
-                modifier = Modifier.weight(1f),
-            )
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        LinkedProductReview.facts(envelope).filter { it.status == ProductFactStatus.CONFLICT }.forEach { fact ->
+            key(fact.productClientKey, fact.field) {
+                ReviewTarget("conflict:${fact.productClientKey}:${fact.field}") { ProductFactConflict(fact, busy, onEdit) }
+            }
         }
-        if (editorVisible || fieldErrors.isNotEmpty() || LinkedProductReview.hasConflicts(envelope)) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = CollectorTokens.panelShape,
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-            ) {
-                Column(Modifier.padding(CollectorTokens.space3), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space4)) {
-                    LinkedProductReview.facts(envelope).filter { it.status == ProductFactStatus.CONFLICT }.forEach { fact ->
-                        ProductFactConflict(fact, busy, onEdit)
-                    }
-                    PurchaseOptionEditor(envelope, edits, fieldErrors, busy, onEdit)
-                    visibleFields.filterNot { ".option_items[" in it.path }.sortedBy { if (it.path in fieldErrors) 0 else 1 }.forEach { field ->
-                        AccessibleField(
-                            field = field,
-                            modified = CanonicalFieldRegistry.isModified(field, edits),
-                            initialValue = edits.firstOrNull { it.fieldPath == field.path }?.previousValue,
-                            error = fieldErrors[field.path],
-                            busy = busy,
-                            onApply = { value -> onEdit { it.updateField(field.path, value) } },
-                        )
-                    }
-                    if (emptyOptionalFields.isNotEmpty()) {
-                        CollectorButton(
-                            label = if (showEmptyOptionalFields) "빈 선택 항목 접기"
-                            else "비어 있는 선택 항목 ${emptyOptionalFields.size}개 보기",
-                            onClick = { showEmptyOptionalFields = !showEmptyOptionalFields },
-                            enabled = !busy,
-                            emphasized = false,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-                    if (showEmptyOptionalFields) {
-                        emptyOptionalFields.filterNot { ".option_items[" in it.path }.forEach { field ->
-                            AccessibleField(
-                                field = field,
-                                modified = CanonicalFieldRegistry.isModified(field, edits),
-                                initialValue = edits.firstOrNull { it.fieldPath == field.path }?.previousValue,
-                                error = fieldErrors[field.path],
-                                busy = busy,
-                                onApply = { value -> onEdit { it.updateField(field.path, value) } },
-                            )
-                        }
-                    }
+        fields.filterNot { ".option_items[" in it.path }.forEach { field ->
+            key(field.path) {
+                AccessibleField(field, CanonicalFieldRegistry.isModified(field, edits),
+                    edits.firstOrNull { it.fieldPath == field.path }?.previousValue, fieldErrors[field.path], busy,
+                    onApply = { value -> onEdit { it.updateField(field.path, value) } })
+            }
+        }
+        PurchaseOptionEditor(envelope, edits, fieldErrors, busy, onEdit)
+        if (emptyOptional.isNotEmpty()) {
+            CollectorButton(if (showEmptyOptionalFields) "빈 선택 항목 접기" else "비어 있는 선택 항목 ${emptyOptional.size}개 보기",
+                { showEmptyOptionalFields = !showEmptyOptionalFields }, enabled = !busy, emphasized = false)
+            if (showEmptyOptionalFields) emptyOptional.filterNot { ".option_items[" in it.path }.forEach { field ->
+                key(field.path) {
+                    AccessibleField(field, CanonicalFieldRegistry.isModified(field, edits),
+                        edits.firstOrNull { it.fieldPath == field.path }?.previousValue, fieldErrors[field.path], busy,
+                        onApply = { value -> onEdit { it.updateField(field.path, value) } })
                 }
             }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CollectorButton("실행 취소", { onEdit { it.undo() } }, enabled = !busy && edits.isNotEmpty() && drafts.isEmpty(), emphasized = false)
+            CollectorButton("다시 실행", { onEdit { it.redo() } }, enabled = !busy && drafts.isEmpty(), emphasized = false)
         }
     }
 }
@@ -664,19 +611,28 @@ internal fun PurchaseOptionEditor(
         record.lineItems.forEachIndexed { lineIndex, line ->
             val lineKey = line.lineKey ?: lineIndex.toString()
             val path = "purchase_records[${record.clientKey}].line_items[$lineKey].option_items"
-            var description by rememberSaveable(path) { mutableStateOf("") }
+            val actions = LocalReviewDraftActions.current
+            val draftPath = "$path.new_option"
+            var localDescription by rememberSaveable(path) { mutableStateOf("") }
+            val description = if (actions != null) actions.values[draftPath].orEmpty() else localDescription
             CollectorSection("${line.description} · 구매 옵션", "수량·금액이 원본에 없으면 비워 두세요. 실제 0원은 0을 입력하세요.") {
                 if (edits.any { it.fieldPath == path }) Text("검수자가 옵션 목록을 수정했습니다.", style = MaterialTheme.typography.bodySmall)
-                OutlinedTextField(
-                    value = description,
-                    onValueChange = { description = it },
-                    label = { Text("새 옵션 설명") },
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                CollectorButton("옵션 추가", onClick = {
-                    onEdit { it.mutatePurchaseOptions(record.clientKey, lineKey, PurchaseOptionListMutation.Add(description)) }
-                }, enabled = !busy && description.isNotBlank() && line.optionText == null, emphasized = false)
+                ReviewTarget(draftPath) {
+                    OutlinedTextField(
+                        value = description,
+                        onValueChange = { if (actions != null) actions.change(draftPath, it) else localDescription = it },
+                        label = { Text("새 옵션 설명") },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    CollectorButton("옵션 추가", onClick = {
+                        val mutation: (CanonicalReviewController) -> Boolean = { it.mutatePurchaseOptions(record.clientKey, lineKey, PurchaseOptionListMutation.Add(description)) }
+                        if (actions != null) actions.apply(draftPath, mutation) else { onEdit(mutation); localDescription = "" }
+                    }, enabled = !busy && description.isNotBlank() && line.optionText == null, emphasized = false)
+                    if (description.isNotEmpty()) CollectorButton("옵션 입력 취소", {
+                        localDescription = ""; actions?.discard?.invoke(draftPath)
+                    }, enabled = !busy, emphasized = false)
+                }
                 if (line.optionText != null) Text("기존 옵션 텍스트를 지운 뒤 구조화 옵션을 추가할 수 있습니다.")
                 fieldErrors[path]?.let { ValidationMessage(it, CollectorStatusKind.ERROR) }
                 line.optionItems.forEachIndexed { index, option ->
@@ -698,7 +654,7 @@ internal fun PurchaseOptionEditor(
                             CollectorButton("아래로", onClick = { reorder(index + 1) }, enabled = !busy && index < line.optionItems.lastIndex, emphasized = false)
                             CollectorButton("옵션 삭제", onClick = {
                                 onEdit { it.mutatePurchaseOptions(record.clientKey, lineKey, PurchaseOptionListMutation.Delete(option.optionKey)) }
-                            }, enabled = !busy, emphasized = false)
+                            }, enabled = !busy && actions?.values.orEmpty().keys.none { it.startsWith("$prefix.") }, emphasized = false)
                         }
                     }
                 }
@@ -729,67 +685,55 @@ fun AccessibleField(
     onApply: (String?) -> Unit,
 ) {
     val sourceValue = LocalDesktopSourceValue.current
-    var draft by rememberSaveable(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
-    Column(
-        modifier = Modifier.fillMaxWidth().semantics {
+    val actions = LocalReviewDraftActions.current
+    var localDraft by rememberSaveable(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
+    val draft = if (actions != null) actions.values[field.path] ?: field.value.orEmpty() else localDraft
+    val pending = draft != field.value.orEmpty()
+    fun applyValue(value: String?) {
+        if (actions != null) actions.apply(field.path) { it.updateField(field.path, value) }
+        else onApply(value)
+    }
+    ReviewTarget(field.path) {
+        Column(Modifier.fillMaxWidth().semantics {
             contentDescription = canonicalFieldContentDescription(field, modified, error)
-        },
-        verticalArrangement = Arrangement.spacedBy(CollectorTokens.space1),
-    ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
-            Text(field.label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
-            Text(
-                buildString {
-                    append(if (field.nullable) "선택" else "필수")
-                    if (modified) append(" · 수정됨")
-                },
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.labelMedium,
-            )
-        }
-        if (modified) {
-            Text(
-                "최초 값: ${initialValue ?: "없음"}",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        if (field.type == CanonicalFieldType.ENUM) {
-            EnumAccessibleField(field, error, busy, onApply)
-        } else {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2), verticalAlignment = Alignment.Top) {
-                OutlinedTextField(
-                    value = draft,
-                    onValueChange = { draft = it; sourceValue("${field.label} · 미적용 값: $it") },
-                    modifier = Modifier.weight(1f).collectorFocusOutline(CollectorTokens.controlShape).onFocusChanged { if (it.isFocused) sourceValue("${field.label} · 현재 편집값: $draft") },
-                    enabled = !busy,
-                    label = { Text("새 값") },
-                    singleLine = field.type != CanonicalFieldType.DATETIME,
-                    isError = error != null,
-                    supportingText = error?.let { message -> { Text(message) } },
-                )
-                Column(verticalArrangement = Arrangement.spacedBy(CollectorTokens.space1)) {
-                    CollectorButton(
-                        label = "적용",
-                        onClick = { onApply(draft.takeIf(String::isNotBlank)) },
-                        enabled = !busy && (field.nullable || draft.isNotBlank()),
-                        emphasized = false,
-                        contentDescription = "${field.label} 값 적용",
+        }, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(field.label, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+                Text(if (pending) "미적용" else if (modified) "수정됨" else if (field.nullable) "선택" else "필수",
+                    color = if (pending) OcrSemanticTokens.warning else MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelMedium)
+            }
+            if (modified) Text("최초 값: ${initialValue ?: "없음"}", style = MaterialTheme.typography.bodySmall)
+            if (field.type == CanonicalFieldType.ENUM) {
+                EnumAccessibleField(field, error, busy, ::applyValue)
+            } else {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = {
+                            if (actions != null) actions.change(field.path, it) else localDraft = it
+                            sourceValue("${field.label} · 미적용 값: $it")
+                        },
+                        modifier = Modifier.weight(1f).collectorFocusOutline().onFocusChanged {
+                            if (it.isFocused) sourceValue("${field.label} · 현재 편집값: $draft")
+                        },
+                        enabled = !busy, label = { Text(field.label) }, singleLine = true,
+                        isError = error != null,
                     )
-                    if (field.nullable) {
-                        CollectorButton(
-                            label = "값 지우기",
-                            onClick = { draft = ""; onApply(null) },
-                            enabled = !busy,
-                            emphasized = false,
-                            contentDescription = "${field.label} 값 지우기",
-                        )
-                    }
+                    CollectorButton("적용", { applyValue(draft.takeIf(String::isNotBlank)) },
+                        enabled = !busy && (pending || error != null) && (field.nullable || draft.isNotBlank()),
+                        emphasized = pending, contentDescription = "${field.label} 값 적용")
+                    if (pending) CollectorButton("입력 취소", {
+                        localDraft = field.value.orEmpty()
+                        if (error != null) applyValue(field.value) else actions?.discard?.invoke(field.path)
+                    }, enabled = !busy, emphasized = false, contentDescription = "${field.label} 입력 취소")
+                }
+                if (field.nullable && !pending && !field.value.isNullOrEmpty()) {
+                    CollectorButton("값 지우기", { localDraft = ""; applyValue(null) },
+                        enabled = !busy, emphasized = false, contentDescription = "${field.label} 값 지우기")
                 }
             }
-        }
-        error?.let {
-            Text("수정 방법: $it", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            error?.let { Text("수정 방법: $it", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         }
     }
 }
@@ -920,7 +864,7 @@ internal fun ConfirmAndSubmitSection(
 ) {
     val verified = state.session?.let { it.verifiedCanonicalFingerprint == it.canonicalFingerprint } == true
     val verificationRecorded = state.bundleMetadata?.verificationEventRecorded != false
-    CollectorSection("검수 확정", if (verified) "검수한 내용이 확정됐습니다. 전송할 대상을 확인하세요." else "원본과 값을 모두 확인했다면 검수를 확정하세요.") {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         confirmationBlocker?.let {
             Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
@@ -931,7 +875,6 @@ internal fun ConfirmAndSubmitSection(
             CollectorButton("수정본 보관 다시 시도", onRetryRevision, modifier = Modifier.fillMaxWidth())
         }
         if (state.bundleMetadata == null) {
-            Text("검수 기준", style = MaterialTheme.typography.labelLarge)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
                 VerificationBasis.entries.forEach { basis ->
                     CollectorButton(
@@ -946,7 +889,7 @@ internal fun ConfirmAndSubmitSection(
         } else {
             Text("검수 기준: 원본 자료와 대조", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             CollectorButton(
                 label = when {
                     verified && !verificationRecorded -> "검수 기록 다시 저장"
@@ -955,7 +898,7 @@ internal fun ConfirmAndSubmitSection(
                 },
                 onClick = onVerify,
                 enabled = canVerify && (!verified || !verificationRecorded),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.weight(1f),
                 emphasized = !verified || !verificationRecorded,
                 contentDescription = if (verified && verificationRecorded) "검수 확정 완료" else "검수 완료 · 확정하기. 원본과 값을 확인했음을 기록합니다. 아직 전송하지 않습니다.",
             )
@@ -964,29 +907,31 @@ internal fun ConfirmAndSubmitSection(
                 onClick = onOpenSubmitConfirmation,
                 enabled = canSubmit,
                 emphasized = verified && verificationRecorded,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.weight(1f),
                 contentDescription = "전송 확인을 엽니다. 선택한 ${selectedProjections.map { it.destination() }.distinct().size}곳에 전송합니다.",
             )
         }
         if (submitConfirmationOpen) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = CollectorTokens.panelShape,
-                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
-            ) {
-                Column(Modifier.padding(CollectorTokens.space3), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
-                    Text("전송 확인", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "선택한 곳에 검수된 자료를 보냅니다. 필요한 선행 작업은 기존 처리 순서를 따르며, 이미 성공한 대상은 다시 보내지 않습니다.",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    selectedProjections.groupBy { it.destination() }.forEach { (destination, projections) ->
-                        Text("${destination.label} · ${destination.contentLabel(projections.toSet())}", style = MaterialTheme.typography.labelLarge)
-                    }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
-                        CollectorButton("전송 취소", onDismissSubmitConfirmation, emphasized = false, modifier = Modifier.weight(1f))
-                        CollectorButton("전송 확인", onConfirmSubmit, enabled = canSubmit, modifier = Modifier.weight(1f))
+            androidx.compose.ui.window.Dialog(onDismissRequest = onDismissSubmitConfirmation) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = CollectorTokens.panelShape,
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+                ) {
+                    Column(Modifier.padding(CollectorTokens.space3).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
+                        Text("전송 확인", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "선택한 곳에 검수된 자료를 보냅니다. 필요한 선행 작업은 기존 처리 순서를 따르며, 이미 성공한 대상은 다시 보내지 않습니다.",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        selectedProjections.groupBy { it.destination() }.forEach { (destination, projections) ->
+                            Text("${destination.label} · ${destination.contentLabel(projections.toSet())}", style = MaterialTheme.typography.labelLarge)
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
+                            CollectorButton("전송 취소", onDismissSubmitConfirmation, emphasized = false, modifier = Modifier.weight(1f))
+                            CollectorButton("전송 확인", onConfirmSubmit, enabled = canSubmit, modifier = Modifier.weight(1f))
+                        }
                     }
                 }
             }

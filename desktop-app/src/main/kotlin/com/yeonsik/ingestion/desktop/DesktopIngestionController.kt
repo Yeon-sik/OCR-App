@@ -74,6 +74,8 @@ data class DesktopUiState(
     val bundleValidationStatus: DesktopBundleValidationStatus? = null,
     val reviewEdits: List<CanonicalReviewEdit> = emptyList(),
     val reviewFieldErrors: Map<String, String> = emptyMap(),
+    /** Unapplied editor text is not canonical data and must block approval and delivery. */
+    val reviewDrafts: Map<String, String> = emptyMap(),
     val error: String? = null,
     val notice: String? = null,
     val busy: Boolean = false,
@@ -94,6 +96,36 @@ class DesktopIngestionController(
         now = now,
     )
     private var structuredReviewController: CanonicalReviewController? = null
+    private val reviewDraftsBySession = java.util.concurrent.ConcurrentHashMap<String, Map<String, String>>()
+
+    fun updateReviewDraft(path: String, value: String) {
+        val current = _state.value
+        if (current.busy) return
+        val id = current.ingestionId ?: return
+        val original = current.envelope?.let { com.pricetrace.receiptscanner.review.CanonicalFieldRegistry.value(it, path) }.orEmpty()
+        val drafts = if (value == original) current.reviewDrafts - path else current.reviewDrafts + (path to value)
+        reviewDraftsBySession[id] = drafts
+        _state.value = current.copy(reviewDrafts = drafts)
+    }
+
+    fun discardReviewDraft(path: String) {
+        val current = _state.value
+        if (current.busy) return
+        val id = current.ingestionId ?: return
+        val drafts = current.reviewDrafts - path
+        reviewDraftsBySession[id] = drafts
+        _state.value = current.copy(reviewDrafts = drafts)
+    }
+
+    suspend fun applyReviewDraft(path: String, mutation: (CanonicalReviewController) -> Boolean) {
+        val original = _state.value
+        if (reviseStructuredReview(mutation)) {
+            val current = _state.value
+            if (current.ingestionId == original.ingestionId && current.reviewDrafts[path] == original.reviewDrafts[path]) {
+                discardReviewDraft(path)
+            }
+        }
+    }
 
     /** Lists recent local work without surfacing canonical JSON in the standard UI. */
     fun recentSessions(limit: Int = 8): List<DesktopRecentSession> = store.recentRecords(limit).map { record ->
@@ -319,7 +351,7 @@ class DesktopIngestionController(
     /** Applies one source-faithful structured edit through the shared Core mutation API. */
     suspend fun reviseStructuredReview(
         mutation: (CanonicalReviewController) -> Boolean,
-    ) {
+    ): Boolean {
         beginBusy()
         try {
             val current = _state.value
@@ -338,7 +370,7 @@ class DesktopIngestionController(
                     error = controller.state.value.error ?: "구조화 편집을 저장하지 못했습니다.",
                     notice = null,
                 )
-                return
+                return false
             }
             val edited = controller.state.value.envelope
             val editedJson = YeonsikOcrEnvelopeCodec.encodePersisted(edited)
@@ -346,7 +378,7 @@ class DesktopIngestionController(
             val editedState = current.copy(reviewFieldErrors = controller.state.value.fieldErrors, error = controller.state.value.error)
            if (newEdits.isEmpty()) {
                 _state.value = editedState.copy(notice = "변경된 canonical 필드가 없습니다.")
-               return
+               return true
            }
             val bundleMetadata = current.bundleMetadata
             if (bundleMetadata != null) {
@@ -356,13 +388,13 @@ class DesktopIngestionController(
                         error = "Evidence archive가 완료된 뒤에만 정본 revision을 저장할 수 있습니다.",
                         notice = "Archive / Retry를 먼저 완료하세요.",
                     )
-                    return
+                    return false
                 }
                 val artifactId = bundleMetadata.archiveCheckpoint.canonicalArtifactId
                     if (artifactId == null) {
                     structuredReviewController = null
                     _state.value = current.copy(error = "Evidence canonical artifact id가 없습니다.", notice = null)
-                    return
+                    return false
                 }
                 val revisionSeq = bundleMetadata.archiveCheckpoint.latestRevisionSeq + 1L
                 val request = CanonicalRevisionArchiveRequest(
@@ -378,7 +410,7 @@ class DesktopIngestionController(
                     edits = newEdits,
                 )
                 archiveAndMaterializeRevision(editedState, request, edited, controller.state.value.edits)
-                return
+                return _state.value.canonicalJson == editedJson && _state.value.bundleMetadata?.pendingRevision == null
             }
             when (val result = useCase.reviseCanonicalDraft(session.ingestionId, edited)) {
                 is IngestionStartResult.Failure -> {
@@ -387,8 +419,10 @@ class DesktopIngestionController(
                 is IngestionStartResult.Success -> publishStructuredRevision(editedState, result.session, edited, null, controller.state.value.edits)
                 is IngestionStartResult.Duplicate -> publishStructuredRevision(editedState, result.session, edited, null, controller.state.value.edits)
             }
+            return _state.value.canonicalJson == editedJson
         } catch (error: Exception) {
             _state.value = _state.value.copy(error = error.message ?: error.javaClass.simpleName, notice = null)
+            return false
         } finally {
             endBusy()
         }
@@ -669,6 +703,7 @@ class DesktopIngestionController(
         beginBusy()
         try {
             val currentState = _state.value
+            require(currentState.reviewDrafts.isEmpty()) { "미적용 수정값을 적용하거나 입력을 취소한 뒤 검수를 확정하세요." }
             require(currentState.reviewFieldErrors.isEmpty()) { "옵션·필드 편집 오류를 해결한 뒤 검수를 확정하세요." }
             val currentSession = currentState.session ?: error("검수하려면 JSON을 먼저 가져오세요.")
             if (currentSession.projections.any {
@@ -767,6 +802,7 @@ class DesktopIngestionController(
         try {
             val currentState = _state.value
             require(currentState.reviewFieldErrors.isEmpty()) { "옵션·필드 편집 오류를 해결한 뒤 전송하세요." }
+            require(currentState.reviewDrafts.isEmpty()) { "미적용 수정값을 적용하거나 입력을 취소한 뒤 전송하세요." }
             require(currentState.bundleValidationStatus != DesktopBundleValidationStatus.INVALID) { "번들이 유효하지 않습니다." }
             val session = currentState.session ?: error("전송하려면 JSON을 먼저 가져오세요.")
             val envelope = currentEnvelope()
@@ -1013,6 +1049,7 @@ class DesktopIngestionController(
             bundleValidationStatus = bundleMetadata?.validationStatus,
             reviewEdits = reviewEdits,
             reviewFieldErrors = reviewFieldErrors,
+            reviewDrafts = reviewDraftsBySession[session.ingestionId].orEmpty(),
             error = error,
             notice = notice,
             busy = true,

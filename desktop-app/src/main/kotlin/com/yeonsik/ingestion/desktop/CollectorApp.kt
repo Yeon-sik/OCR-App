@@ -173,6 +173,13 @@ fun YeonsikCollectorApp(
     val review: @Composable () -> Unit = {
         key(state.ingestionId) {
             CompositionLocalProvider(LocalDesktopSourceSelection provides selectSource,
+                LocalReviewDraftActions provides DesktopReviewDraftActions(
+                    state.reviewDrafts, controller::updateReviewDraft,
+                    { path, mutation -> runIo {
+                        controller.applyReviewDraft(path, mutation)
+                        batchCoordinator.syncActiveItem()
+                        refreshRecent()
+                    } }, controller::discardReviewDraft),
                 LocalDesktopSourceValue provides { sourceContext = it + " · 정확한 위치 정보 없음" }) {
                 ReviewWorkspace(
                     state = state,
