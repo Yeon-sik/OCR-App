@@ -110,6 +110,8 @@ class CanonicalReviewController(
     private val undoStack = ArrayDeque<Checkpoint>()
     private val redoStack = ArrayDeque<Checkpoint>()
     private var editSequence: Int = initialEdits.size
+    private var deferValidation = false
+    private var batchParsedValues: Map<String, ParsedValue> = emptyMap()
     private val reservedOptionKeys = mutableMapOf<String, MutableSet<String>>()
 
     constructor(
@@ -497,7 +499,7 @@ class CanonicalReviewController(
         provenanceJson: String = USER_MODIFIED_PROVENANCE,
     ): Boolean {
         val current = mutableState.value
-        val issues = validate(envelope)
+        val issues = if (deferValidation) emptyList() else validate(envelope)
         if (issues.isNotEmpty()) {
             val message = issues.joinToString(", ")
             mutableState.value = current.copy(
@@ -584,6 +586,15 @@ class CanonicalReviewController(
             return failField(canonicalPath, error.message ?: "연결된 canonical 필드를 적용할 수 없습니다.")
         }
         val linkedChanges = linkedFactChanges(envelope, nextEnvelope, canonicalPath)
+        val recordedPaths = linkedChanges.map { it.fieldPath }.toSet() + canonicalPath
+        val groupedChanges = if (batchParsedValues.isEmpty()) emptyList() else
+            CanonicalFieldRegistry.fields(nextEnvelope).mapNotNull { field ->
+                if (field.path in recordedPaths) null else {
+                    val previous = CanonicalFieldRegistry.value(envelope, field.path)
+                    val next = CanonicalFieldRegistry.value(nextEnvelope, field.path)
+                    if (previous == next) null else FieldChange(field.path, previous, next, field.type)
+                }
+            }
         return commitEnvelope(
             envelope = nextEnvelope,
             changes = listOf(
@@ -593,8 +604,48 @@ class CanonicalReviewController(
                     newValue = parsed.canonicalValue,
                     valueType = descriptor.type,
                 ),
-            ) + linkedChanges,
+            ) + linkedChanges + groupedChanges,
         )
+    }
+
+    /** Stage every typed edit first; publish one validated revision and one undo checkpoint. */
+    fun applyBatch(values: Map<String, String?>, mutations: List<(CanonicalReviewController) -> Boolean> = emptyList()): Boolean {
+        val original = mutableState.value
+        val parsed = linkedMapOf<String, ParsedValue>()
+        var valid = true
+        values.forEach { (path, value) ->
+            val canonical = CanonicalFieldRegistry.canonicalPath(original.envelope, path)
+            val descriptor = canonical?.let { CanonicalFieldRegistry.descriptor(original.envelope, it) }
+            if (descriptor == null) {
+                failField(path, "편집할 수 없는 항목입니다.")
+                valid = false
+            } else runCatching { parseValue(descriptor, value) }.fold(
+                onSuccess = { parsed[descriptor.path] = it },
+                onFailure = { failField(descriptor.path, it.message ?: "값 형식을 확인하세요."); valid = false },
+            )
+        }
+        if (!valid) return false
+        val staged = CanonicalReviewController(original.envelope, emptyList(), original.fieldErrors, now)
+        staged.deferValidation = true
+        staged.batchParsedValues = parsed
+        parsed.forEach { (path, value) -> if (!staged.updateField(path, value.canonicalValue)) valid = false }
+        mutations.forEach { if (!it(staged)) valid = false }
+        val result = staged.state.value
+        if (!valid) {
+            mutableState.value = original.copy(
+                fieldErrors = result.fieldErrors,
+                error = result.fieldErrors.values.distinct().joinToString(", ").ifBlank { "변경한 값을 확인하세요." },
+            )
+            return false
+        }
+        val changes = result.edits.groupBy { it.fieldPath }.values.mapNotNull { edits ->
+            val first = edits.first()
+            val last = edits.last()
+            if (first.previousValue == last.newValue) null
+            else FieldChange(first.fieldPath, first.previousValue, last.newValue, last.valueType)
+        }
+        mutableState.value = original.copy(fieldErrors = result.fieldErrors)
+        return commitEnvelope(result.envelope, changes)
     }
 
     /** One explicit user decision, committed atomically through the normal revision/audit/undo path. */
@@ -1118,7 +1169,9 @@ class CanonicalReviewController(
             field == "paid_on" -> record.copy(paidOn = value as String?)
             field == "paid_at" -> record.copy(paidAt = value as String?)
             field == "status" -> record.copy(status = enumValue(value))
-            field.startsWith("totals.") -> record.copy(totals = updatePurchaseTotals(record.totals, field.removePrefix("totals."), value as Long?))
+            field.startsWith("totals.") -> record.copy(totals = if (batchParsedValues.isEmpty())
+                updatePurchaseTotals(record.totals, field.removePrefix("totals."), value as Long?)
+                else batchPurchaseTotals(record))
             field.startsWith("payment.") -> record.copy(payment = updatePurchasePayment(record.payment, field.removePrefix("payment."), value as String?))
             field.startsWith("line_items[") -> updatePurchaseLine(record, field, parsed)
             else -> error("purchase record field is not editable")
@@ -1159,6 +1212,20 @@ class CanonicalReviewController(
                 else -> error("purchase option field is not editable")
             }
             line.copy(optionItems = line.optionItems.map { if (it === option) nextOption else it })
+        } else if (batchParsedValues.isNotEmpty()) {
+            val prefix = "purchase_records[${record.clientKey}].line_items[${match.groupValues[1]}]"
+            line.copy(
+                description = batchValue("$prefix.description", line.description),
+                sellerOverride = batchValue("$prefix.seller_override", line.sellerOverride),
+                optionText = batchValue("$prefix.option_text", line.optionText),
+                priceStatus = batchValue("$prefix.price_status", line.priceStatus),
+                merchantSku = batchValue("$prefix.merchant_sku", line.merchantSku),
+                quantity = batchValue("$prefix.quantity", line.quantity),
+                unitPriceAmountKrw = batchValue("$prefix.unit_price_amount_krw", line.unitPriceAmountKrw),
+                grossAmountKrw = batchValue("$prefix.gross_amount_krw", line.grossAmountKrw),
+                discountAmountKrw = batchValue("$prefix.discount_amount_krw", line.discountAmountKrw),
+                netAmountKrw = batchValue("$prefix.net_amount_krw", line.netAmountKrw),
+            )
         } else when (match.groupValues[2]) {
             "description" -> line.copy(description = (value as? String) ?: error("구매 행 설명은 필수입니다."))
             "seller_override" -> line.copy(sellerOverride = value as String?)
@@ -1173,6 +1240,22 @@ class CanonicalReviewController(
             else -> error("purchase line field is not editable")
         }
         return record.copy(lineItems = record.lineItems.map { if (it === line) nextLine else it })
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> batchValue(path: String, original: T): T =
+        if (batchParsedValues.containsKey(path)) batchParsedValues.getValue(path).value as T else original
+
+    private fun batchPurchaseTotals(record: PurchaseRecord): PurchaseRecordTotals {
+        val prefix = "purchase_records[${record.clientKey}].totals"
+        return record.totals.copy(
+            subtotalAmountKrw = batchValue("$prefix.subtotal_amount_krw", record.totals.subtotalAmountKrw),
+            discountAmountKrw = batchValue("$prefix.discount_amount_krw", record.totals.discountAmountKrw),
+            shippingAmountKrw = batchValue("$prefix.shipping_amount_krw", record.totals.shippingAmountKrw),
+            taxAmountKrw = batchValue("$prefix.tax_amount_krw", record.totals.taxAmountKrw),
+            grandTotalAmountKrw = batchValue("$prefix.grand_total_amount_krw", record.totals.grandTotalAmountKrw),
+            paidAmountKrw = batchValue("$prefix.paid_amount_krw", record.totals.paidAmountKrw),
+        )
     }
 
     private inline fun <reified T : Enum<T>> enumValue(value: Any?): T = enumValues<T>().firstOrNull {

@@ -57,7 +57,7 @@ class DesktopReviewerUxTest {
         compose.onNodeWithText("검수 완료 · 확정하기").assertIsNotEnabled()
         compose.onNodeWithText("미적용 입력 1개 · 적용하거나 입력을 취소하세요.").assertIsDisplayed()
         capture("after-draft-blocked")
-        compose.onNodeWithContentDescription("상품명 값 적용").performClick()
+        compose.onNodeWithText("변경사항 모두 적용").performClick()
         compose.waitUntil(timeoutMillis = 5_000) { !c.state.value.busy && c.state.value.reviewDrafts.isEmpty() }
         assertEquals("UX AUDIT DRAFT", c.state.value.envelope!!.productCandidates.single().productName)
         compose.onNodeWithText("원본 없이 직접 확인").performClick()
@@ -66,7 +66,7 @@ class DesktopReviewerUxTest {
         compose.onNodeWithText("선택한 곳에 보내기").assertIsEnabled()
         compose.onNode(hasSetTextAction() and hasText("UX AUDIT DRAFT")).performTextReplacement("PENDING AGAIN")
         compose.onNodeWithText("선택한 곳에 보내기").assertIsNotEnabled()
-        compose.onNodeWithContentDescription("상품명 입력 취소").performClick()
+        compose.onNodeWithText("변경 취소").performClick()
         compose.onNodeWithText("선택한 곳에 보내기").assertIsEnabled()
         compose.onNode(hasSetTextAction() and hasText("UX AUDIT DRAFT")).assertExists()
     }
@@ -106,16 +106,67 @@ class DesktopReviewerUxTest {
             .single { it.path.endsWith(".basis_amount") }
         compose.onNode(hasSetTextAction() and hasAnyAncestor(hasTestTag("review-target:${field.path}")))
             .performTextReplacement("invalid-number")
-        compose.onNodeWithContentDescription("${field.label} 값 적용").performClick()
+        compose.onNodeWithText("변경사항 모두 적용").performClick()
         compose.waitUntil(timeoutMillis = 5_000) { !c.state.value.busy && field.path in c.state.value.reviewFieldErrors }
         assertEquals("invalid-number", c.state.value.reviewDrafts[field.path])
         compose.onNodeWithText("검수 완료 · 확정하기").assertIsNotEnabled()
         compose.onNodeWithText("다음 확인 항목").performClick()
         compose.onNodeWithTag("review-target:${field.path}").assertIsFocused()
-        compose.onNodeWithContentDescription("${field.label} 입력 취소").performClick()
+        compose.onNodeWithText("변경 취소").performClick()
         compose.waitUntil(timeoutMillis = 5_000) { !c.state.value.busy && c.state.value.reviewDrafts.isEmpty() }
         assertTrue(c.state.value.reviewFieldErrors.isEmpty())
         compose.onNodeWithText("검수 완료 · 확정하기").assertIsEnabled()
+    }
+
+    @Test fun editsStayInPlaceAndMultipleFieldsApplyTogether() = withUiTest {
+        val c = controller()
+        show(c)
+        val field = canonicalReviewFieldGroups(c.state.value.envelope!!).visibleFields.single { it.path.endsWith(".basis_amount") }
+        val target = compose.onNodeWithTag("review-target:${field.path}")
+        val initialBounds = target.fetchSemanticsNode().boundsInRoot
+        compose.onNode(hasSetTextAction() and hasAnyAncestor(hasTestTag("review-target:${field.path}")))
+            .performTextReplacement("50")
+        assertEquals(initialBounds, target.fetchSemanticsNode().boundsInRoot)
+        compose.onNode(hasSetTextAction() and hasText("Test cereal")).performTextReplacement("BULK PRODUCT")
+        compose.onNodeWithText("변경 2개").assertIsDisplayed()
+        compose.onNodeWithContentDescription("상품명 값 적용").assertDoesNotExist()
+        compose.onNodeWithText("변경사항 모두 적용").performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { !c.state.value.busy && c.state.value.reviewDrafts.isEmpty() }
+        assertEquals("BULK PRODUCT", c.state.value.envelope!!.productCandidates.single().productName)
+        assertEquals(50.0, (c.state.value.envelope!!.nutrition.single() as IngestionNutrition.ProductLabel).draft.basisAmount!!, 0.0)
+    }
+
+    @Test fun narrowDropZoneKeepsAllTextInsideItsBounds() = withUiTest(240, 240) {
+        compose.setContent { CollectorTheme {
+            ImportDropZone(true, "파일을 여기에 놓으세요", ".yeonsik · 여러 파일 지원",
+                Modifier.requiredSize(224.dp, 148.dp), {})
+        } }
+        compose.onNodeWithText("파일을 여기에 놓으세요").assertIsDisplayed()
+        compose.onNodeWithText(".yeonsik · 여러 파일 지원").assertIsDisplayed()
+        val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
+        for (text in listOf("파일을 여기에 놓으세요", ".yeonsik · 여러 파일 지원")) {
+            val bounds = compose.onNodeWithText(text).fetchSemanticsNode().boundsInRoot
+            assertTrue(root.contains(bounds.topLeft) && root.contains(bounds.bottomRight - androidx.compose.ui.geometry.Offset(1f, 1f)))
+        }
+        capture("drop-zone-narrow")
+    }
+
+    @Test fun enteringAnEmptyOptionalFieldDoesNotMoveItToAnotherGroup() = withUiTest {
+        val c = controller()
+        show(c)
+        val groups = canonicalReviewFieldGroups(c.state.value.envelope!!)
+        val field = groups.emptyOptionalFields.first { it.type == com.pricetrace.receiptscanner.review.CanonicalFieldType.TEXT }
+        compose.onNodeWithText("비어 있는 선택 항목 ${groups.emptyOptionalFields.size}개 보기").performScrollTo().performClick()
+        val input = compose.onNode(hasSetTextAction() and hasAnyAncestor(hasTestTag("review-target:${field.path}")))
+        input.performScrollTo()
+        val marker = compose.onNodeWithText("빈 선택 항목 접기")
+        val before = compose.onNodeWithTag("review-target:${field.path}").fetchSemanticsNode().boundsInRoot.top -
+            marker.fetchSemanticsNode().boundsInRoot.bottom
+        input.performTextReplacement("OPTIONAL DRAFT")
+        val after = compose.onNodeWithTag("review-target:${field.path}").fetchSemanticsNode().boundsInRoot.top -
+            marker.fetchSemanticsNode().boundsInRoot.bottom
+        assertEquals(before, after, 1f)
+        input.assertIsFocused()
     }
 
     private fun capture(name: String) {

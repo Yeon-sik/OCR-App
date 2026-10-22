@@ -170,6 +170,7 @@ fun ReviewWorkspace(
                     onNextReviewItem = { navigation.next(paths) }, hasReviewItems = paths.isNotEmpty(),
                 )
                 SourceSummary(state, model.rows)
+                ReviewDraftToolbar(busy)
                 Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     state.error?.let { ValidationMessage(it, CollectorStatusKind.ERROR) }
 
@@ -562,33 +563,30 @@ private fun EditableCanonicalSection(
 ) {
     val groups = remember(envelope) { canonicalReviewFieldGroups(envelope) }
     val drafts = LocalReviewDraftActions.current?.values.orEmpty()
-    val urgentOptional = groups.emptyOptionalFields.filter { it.path in fieldErrors || it.path in drafts }
-    val fields = (groups.visibleFields + urgentOptional).sortedBy { reviewFieldPriority(it, fieldErrors.keys, drafts.keys) }
-    val emptyOptional = groups.emptyOptionalFields - urgentOptional.toSet()
     var showEmptyOptionalFields by rememberSaveable { mutableStateOf(false) }
+    val urgentOptional = if (showEmptyOptionalFields) emptyList() else
+        groups.emptyOptionalFields.filter { it.path in fieldErrors || it.path in drafts }
+    val fields = (groups.visibleFields + urgentOptional).sortedBy { reviewFieldPriority(it, emptySet(), emptySet()) }
+    val emptyOptional = groups.emptyOptionalFields - urgentOptional.toSet()
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         LinkedProductReview.facts(envelope).filter { it.status == ProductFactStatus.CONFLICT }.forEach { fact ->
             key(fact.productClientKey, fact.field) {
                 ReviewTarget("conflict:${fact.productClientKey}:${fact.field}") { ProductFactConflict(fact, busy, onEdit) }
             }
         }
-        fields.filterNot { ".option_items[" in it.path }.forEach { field ->
-            key(field.path) {
+        ReviewFieldGrid(fields.filterNot { ".option_items[" in it.path }) { field ->
                 AccessibleField(field, CanonicalFieldRegistry.isModified(field, edits),
                     edits.firstOrNull { it.fieldPath == field.path }?.previousValue, fieldErrors[field.path], busy,
                     onApply = { value -> onEdit { it.updateField(field.path, value) } })
-            }
         }
         PurchaseOptionEditor(envelope, edits, fieldErrors, busy, onEdit)
         if (emptyOptional.isNotEmpty()) {
             CollectorButton(if (showEmptyOptionalFields) "빈 선택 항목 접기" else "비어 있는 선택 항목 ${emptyOptional.size}개 보기",
                 { showEmptyOptionalFields = !showEmptyOptionalFields }, enabled = !busy, emphasized = false)
-            if (showEmptyOptionalFields) emptyOptional.filterNot { ".option_items[" in it.path }.forEach { field ->
-                key(field.path) {
+            if (showEmptyOptionalFields) ReviewFieldGrid(emptyOptional.filterNot { ".option_items[" in it.path }) { field ->
                     AccessibleField(field, CanonicalFieldRegistry.isModified(field, edits),
                         edits.firstOrNull { it.fieldPath == field.path }?.previousValue, fieldErrors[field.path], busy,
                         onApply = { value -> onEdit { it.updateField(field.path, value) } })
-                }
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -639,7 +637,7 @@ internal fun PurchaseOptionEditor(
                     val prefix = "$path[${option.optionKey}]"
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("옵션 ${index + 1}", fontWeight = FontWeight.SemiBold)
-                        fields.filter { it.path.startsWith("$prefix.") }.forEach { field ->
+                        ReviewFieldGrid(fields.filter { it.path.startsWith("$prefix.") }) { field ->
                             AccessibleField(field, CanonicalFieldRegistry.isModified(field, edits),
                                 edits.firstOrNull { it.fieldPath == field.path }?.previousValue, fieldErrors[field.path], busy,
                                 onApply = { value -> onEdit { it.updateField(field.path, value) } })
@@ -686,12 +684,15 @@ fun AccessibleField(
 ) {
     val sourceValue = LocalDesktopSourceValue.current
     val actions = LocalReviewDraftActions.current
+    if (actions != null) {
+        CompactDraftField(field, modified, initialValue, error, busy, actions)
+        return
+    }
     var localDraft by rememberSaveable(field.path, field.value) { mutableStateOf(field.value.orEmpty()) }
-    val draft = if (actions != null) actions.values[field.path] ?: field.value.orEmpty() else localDraft
+    val draft = localDraft
     val pending = draft != field.value.orEmpty()
     fun applyValue(value: String?) {
-        if (actions != null) actions.apply(field.path) { it.updateField(field.path, value) }
-        else onApply(value)
+        onApply(value)
     }
     ReviewTarget(field.path) {
         Column(Modifier.fillMaxWidth().semantics {
@@ -711,7 +712,7 @@ fun AccessibleField(
                     OutlinedTextField(
                         value = draft,
                         onValueChange = {
-                            if (actions != null) actions.change(field.path, it) else localDraft = it
+                            localDraft = it
                             sourceValue("${field.label} · 미적용 값: $it")
                         },
                         modifier = Modifier.weight(1f).collectorFocusOutline().onFocusChanged {
@@ -725,7 +726,7 @@ fun AccessibleField(
                         emphasized = pending, contentDescription = "${field.label} 값 적용")
                     if (pending) CollectorButton("입력 취소", {
                         localDraft = field.value.orEmpty()
-                        if (error != null) applyValue(field.value) else actions?.discard?.invoke(field.path)
+                        if (error != null) applyValue(field.value)
                     }, enabled = !busy, emphasized = false, contentDescription = "${field.label} 입력 취소")
                 }
                 if (field.nullable && !pending && !field.value.isNullOrEmpty()) {

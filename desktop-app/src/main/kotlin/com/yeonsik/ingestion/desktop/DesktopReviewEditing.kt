@@ -30,6 +30,8 @@ internal class DesktopReviewDraftActions(
     val change: (String, String) -> Unit,
     val apply: (String, (CanonicalReviewController) -> Boolean) -> Unit,
     val discard: (String) -> Unit,
+    val applyAll: () -> Unit = {},
+    val discardAll: () -> Unit = {},
 )
 
 internal val LocalReviewDraftActions = staticCompositionLocalOf<DesktopReviewDraftActions?> { null }

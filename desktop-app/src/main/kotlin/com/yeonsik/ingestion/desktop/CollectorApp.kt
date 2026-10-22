@@ -179,7 +179,12 @@ fun YeonsikCollectorApp(
                         controller.applyReviewDraft(path, mutation)
                         batchCoordinator.syncActiveItem()
                         refreshRecent()
-                    } }, controller::discardReviewDraft),
+                    } }, controller::discardReviewDraft,
+                    { runIo {
+                        controller.applyAllReviewDrafts()
+                        batchCoordinator.syncActiveItem()
+                        refreshRecent()
+                    } }, controller::discardAllReviewDrafts),
                 LocalDesktopSourceValue provides { sourceContext = it + " · 정확한 위치 정보 없음" }) {
                 ReviewWorkspace(
                     state = state,
@@ -418,8 +423,8 @@ fun InboxSidebar(
                 )
                 ImportDropZone(
                     enabled = !busy,
-                    label = ".yeonsik 파일을 여기로 끌어 놓으세요",
-                    description = "여러 파일을 한 번에 놓을 수 있으며 즉시 가져오기와 검증을 시작합니다.",
+                    label = "파일을 여기에 놓으세요",
+                    description = ".yeonsik · 여러 파일 지원",
                     modifier = Modifier.heightIn(min = 112.dp),
                     onFiles = onDropBundles,
                 )

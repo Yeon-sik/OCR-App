@@ -1,8 +1,6 @@
 package com.yeonsik.ingestion.desktop
 
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -16,17 +14,19 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.awt.SwingPanel
-import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.awtTransferable
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import java.awt.FileDialog
 import java.awt.Frame
-import java.awt.dnd.DnDConstants
-import java.awt.dnd.DropTarget
-import java.awt.dnd.DropTargetAdapter
-import java.awt.dnd.DropTargetDropEvent
 import java.awt.datatransfer.DataFlavor
 import java.io.FilenameFilter
 import java.nio.file.Path
@@ -71,10 +71,14 @@ object NativeFileDialogs {
     }
 }
 
-/**
- * A transparent AWT drop adapter is necessary on current Compose Desktop for OS-level file drops.
- * It is not a Swing UI: all visible affordance, focus information, and text remain Compose-owned.
- */
+internal fun desktopDropFiles(transferable: java.awt.datatransfer.Transferable): List<Path> = runCatching {
+    if (!transferable.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) emptyList()
+    else (transferable.getTransferData(DataFlavor.javaFileListFlavor) as? List<*>)
+        .orEmpty().filterIsInstance<java.io.File>().map { it.toPath().toAbsolutePath().normalize() }
+}.getOrDefault(emptyList())
+
+/** Compose owns both rendering and OS drag events: no native child window covers the text. */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun ImportDropZone(
     enabled: Boolean,
@@ -86,66 +90,39 @@ fun ImportDropZone(
     var dragActive by remember { mutableStateOf(false) }
     val currentEnabled by rememberUpdatedState(enabled)
     val currentFiles by rememberUpdatedState(onFiles)
-    val currentDragState by rememberUpdatedState<(Boolean) -> Unit> { dragActive = it }
-    val colors = MaterialTheme.colorScheme
-    val borderColor = when {
-        !enabled -> colors.outlineVariant
-        dragActive -> colors.primary
-        else -> colors.outline
+    val target = remember {
+        object : DragAndDropTarget {
+            override fun onEntered(event: DragAndDropEvent) { dragActive = currentEnabled }
+            override fun onExited(event: DragAndDropEvent) { dragActive = false }
+            override fun onEnded(event: DragAndDropEvent) { dragActive = false }
+            override fun onDrop(event: DragAndDropEvent): Boolean {
+                dragActive = false
+                if (!currentEnabled) return false
+                val files = desktopDropFiles(event.awtTransferable)
+                if (files.isEmpty()) return false
+                currentFiles(files)
+                return true
+            }
+        }
     }
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .heightIn(min = 148.dp)
-            .border(if (dragActive) 2.dp else 1.dp, borderColor, CollectorTokens.panelShape)
-            .semantics {
-                contentDescription = "$label. $description"
-            },
-        contentAlignment = Alignment.Center,
+    val colors = MaterialTheme.colorScheme
+    Column(
+        modifier.fillMaxWidth().heightIn(min = 112.dp)
+            .border(if (dragActive) 2.dp else 1.dp,
+                if (dragActive && enabled) colors.primary else colors.outlineVariant, CollectorTokens.panelShape)
+            .dragAndDropTarget(
+                shouldStartDragAndDrop = { currentEnabled && it.awtTransferable.isDataFlavorSupported(DataFlavor.javaFileListFlavor) },
+                target = target,
+            )
+            .semantics { contentDescription = "$label. $description" }
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
     ) {
-        Text(
-            if (dragActive) "여기에 놓으면 즉시 가져와 검증합니다" else label,
-            modifier = Modifier.padding(CollectorTokens.space4),
+        Text(if (dragActive && enabled) "여기에 놓으세요" else label,
             color = if (enabled) colors.onSurface else colors.onSurfaceVariant,
-            style = MaterialTheme.typography.titleMedium,
-        )
-        SwingPanel(
-            modifier = Modifier.fillMaxSize(),
-            factory = {
-                javax.swing.JPanel().apply {
-                    isOpaque = false
-                    background = java.awt.Color(0, 0, 0, 0)
-                    dropTarget = DropTarget(this, object : DropTargetAdapter() {
-                        override fun dragEnter(event: java.awt.dnd.DropTargetDragEvent) {
-                            if (currentEnabled && event.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
-                                currentDragState(true)
-                            }
-                        }
-
-                        override fun dragExit(event: java.awt.dnd.DropTargetEvent) {
-                            currentDragState(false)
-                        }
-
-                        override fun drop(event: DropTargetDropEvent) {
-                            currentDragState(false)
-                            if (!currentEnabled || !event.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
-                                event.rejectDrop()
-                                return
-                            }
-                            try {
-                                event.acceptDrop(DnDConstants.ACTION_COPY)
-                                val files = (event.transferable.getTransferData(DataFlavor.javaFileListFlavor) as List<*>)
-                                    .filterIsInstance<java.io.File>()
-                                    .map { it.toPath().toAbsolutePath().normalize() }
-                                currentFiles(files)
-                                event.dropComplete(true)
-                            } catch (_: Exception) {
-                                event.dropComplete(false)
-                            }
-                        }
-                    })
-                }
-            },
-        )
+            style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center)
+        Text(description, color = colors.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
     }
 }

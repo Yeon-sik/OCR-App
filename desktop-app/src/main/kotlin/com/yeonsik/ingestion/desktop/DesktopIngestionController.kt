@@ -114,7 +114,46 @@ class DesktopIngestionController(
         val id = current.ingestionId ?: return
         val drafts = current.reviewDrafts - path
         reviewDraftsBySession[id] = drafts
-        _state.value = current.copy(reviewDrafts = drafts)
+        val errors = current.reviewFieldErrors - path
+        structuredReviewController = null
+        _state.value = current.copy(reviewDrafts = drafts, reviewFieldErrors = errors,
+            error = errors.values.distinct().joinToString(", ").takeIf { it.isNotEmpty() })
+    }
+
+    fun discardAllReviewDrafts() {
+        val current = _state.value
+        if (current.busy) return
+        val id = current.ingestionId ?: return
+        reviewDraftsBySession[id] = emptyMap()
+        structuredReviewController = null
+        _state.value = current.copy(reviewDrafts = emptyMap(), reviewFieldErrors = emptyMap(), error = null)
+    }
+
+    suspend fun applyAllReviewDrafts() {
+        val original = _state.value
+        if (original.busy || original.reviewDrafts.isEmpty()) return
+        val fields = original.reviewDrafts.filterKeys { !it.endsWith(".option_items.new_option") }
+            .mapValues { (_, value) -> value.takeIf { it.isNotBlank() } }
+        val mutations = original.reviewDrafts.filterKeys { it.endsWith(".option_items.new_option") }.map { (path, value) ->
+            val mutation: (CanonicalReviewController) -> Boolean = { controller ->
+                if (path.endsWith(".option_items.new_option")) {
+                    controller.mutatePurchaseOptions(
+                        path.substringAfter("purchase_records[").substringBefore(']'),
+                        path.substringAfter(".line_items[").substringBefore(']'),
+                        com.pricetrace.receiptscanner.review.PurchaseOptionListMutation.Add(value),
+                    )
+                } else controller.updateField(path, value.takeIf { it.isNotBlank() })
+            }
+            mutation
+        }
+        if (reviseStructuredReview { it.applyBatch(fields, mutations) }) {
+            val current = _state.value
+            if (current.ingestionId == original.ingestionId) {
+                val remaining = current.reviewDrafts.filter { (path, value) -> original.reviewDrafts[path] != value }
+                reviewDraftsBySession[requireNotNull(current.ingestionId)] = remaining
+                _state.value = current.copy(reviewDrafts = remaining)
+            }
+        }
     }
 
     suspend fun applyReviewDraft(path: String, mutation: (CanonicalReviewController) -> Boolean) {
