@@ -33,6 +33,8 @@ compose.desktop {
         nativeDistributions {
             packageName = "Yeonsik Ingestion Console"
             packageVersion = "0.1.0"
+            // Required by the packaged desktop dependency graph (suggestRuntimeModules).
+            modules("java.instrument", "java.prefs", "jdk.unsupported")
         }
     }
 }

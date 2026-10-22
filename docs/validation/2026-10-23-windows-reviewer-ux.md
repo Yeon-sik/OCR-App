@@ -78,3 +78,22 @@ UI 테스트는 실제 `YeonsikCollectorApp`과 실제 컨트롤러를 사용한
 - 원본 이미지의 필드별 위치 강조와 실제 이미지 대조 E2E, 서버 보관·전송 E2E는 검증하지 않았다.
 - 미적용 입력은 앱 실행 중 세션별로 유지된다. 앱 종료/재시작을 넘는 초안 보존은 구현하지 않았다.
 - 긴 다품목 문서의 실사용 처리 시간과 키보드 전용 작업 효율은 별도 사용자 검증이 필요하다. 이번 점수 상승을 처리 시간 단축률로 해석하지 않는다.
+
+## 후속 Windows 배포 검증 (2026-10-23)
+
+사용자의 기존 데이터 유지 요청에 따라 위 개선 코드를 독립 실행형 Windows 앱으로 빌드하고 실행했다. 위 한계 중 설치·실행과 실제 원본 이미지 표시 여부는 아래 증거로 갱신한다. 실제 서버 전송, DPI/다중 모니터, 스크린리더는 여전히 미검증이다.
+
+- 기존 Android Studio JBR 대신 로컬 OpenJDK 24.0.1의 `jpackage`/`jlink`를 사용했다. `:desktop-app:suggestModules` 결과에 따라 `java.instrument`, `java.prefs`, `jdk.unsupported`를 배포 런타임에 명시했다.
+- `:desktop-app:createDistributable :desktop-app:test` 빌드 성공. 같은 JDK에서 61개 통과, 기존 3개 건너뜀, 실패 0개.
+- `%LOCALAPPDATA%\Programs\Yeonsik Collector\Yeonsik Ingestion Console.exe`에 런타임을 포함한 앱 이미지를 배치했다. MSI 등록 설치는 아니며, 바탕화면과 시작 메뉴의 `Yeonsik Collector (OCR)` 바로가기로 실행한다.
+- 배포 파일 206개의 SHA-256이 빌드 산출물과 일치했다.
+- 기존 `%LOCALAPPDATA%\YeonsikIngestionConsole`의 세션·원본·설정 60개 파일을 하위 `backups/windows-ux-a3c47cb-*`에 먼저 백업했다. 창 배치 설정도 해당 앱의 Java Preferences 키만 별도로 백업했다.
+- 실행 후 원본 60개 파일 모두 SHA-256 동일, 변경 0개, 누락 0개, 저장 세션 18개 유지. 설정 파일은 덮어쓰지 않았다.
+- 배포 EXE의 실제 `Yeonsik Collector` 창에서 기존 최근 세션, 검수값 및 영수증 원본 이미지가 표시되는 것을 확인했다. 실제 자료의 수정·확정·전송은 수행하지 않았다.
+- 파일별 백업/배포 해시와 실행 후 비교 결과는 로컬 백업 폴더에만 보관한다. 사용자 자료나 실제 화면 캡처를 저장소에 추가하지 않는다.
+
+동일 배포 빌드 명령(설치된 `jpackage` 포함 JDK 경로 지정):
+
+```powershell
+.\gradlew.bat :desktop-app:createDistributable :desktop-app:test "-Dorg.gradle.java.home=$env:USERPROFILE/.jdks/openjdk-24.0.1" --offline --console=plain
+```
