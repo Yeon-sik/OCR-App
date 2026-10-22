@@ -723,6 +723,9 @@ class AndroidCanonicalJsonValidator(
             }
         }
         val envelope = requireNotNull(state.envelope) { "Import JSON before confirmation." }
+        require(!com.pricetrace.receiptscanner.review.LinkedProductReview.hasConflicts(envelope)) {
+            "상품 정보의 서로 다른 값을 먼저 확인하세요."
+        }
         val ingestionId = requireNotNull(state.ingestionId) { "Ingestion id is missing." }
         val confirmation = useCase.confirm(
             ingestionId = ingestionId,

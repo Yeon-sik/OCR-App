@@ -158,6 +158,10 @@ import com.pricetrace.receiptscanner.review.ReviewDestinationBadge
 import com.pricetrace.receiptscanner.review.CanonicalEditableField
 import com.pricetrace.receiptscanner.review.CanonicalFieldRegistry
 import com.pricetrace.receiptscanner.review.CanonicalFieldType
+import com.pricetrace.receiptscanner.review.LinkedProductReview
+import com.pricetrace.receiptscanner.review.ProductFactField
+import com.pricetrace.receiptscanner.review.ProductFactReview
+import com.pricetrace.receiptscanner.review.ProductFactStatus
 import com.pricetrace.receiptscanner.review.CanonicalReviewEdit
 import com.pricetrace.receiptscanner.review.ReviewRow
 import com.pricetrace.receiptscanner.review.ReviewViewModel
@@ -208,6 +212,11 @@ fun ReceiptOcrContent(
     onCanonicalReviewFoodServiceRoleChanged: (String, FoodServiceRole) -> Unit = { _, _ -> },
     onCanonicalReviewOptionParentChanged: (String, String?) -> Unit = { _, _ -> },
     onCanonicalReviewEventChanged: (String, Boolean) -> Unit = { _, _ -> },
+    onResolveCanonicalProductFact: (String, ProductFactField, String?) -> Unit = { _, _, _ -> },
+    onProductReviewFieldChanged: (String, String?) -> Unit = { _, _ -> },
+    onResolveProductFact: (String, ProductFactField, String?) -> Unit = { _, _, _ -> },
+    onProductReviewUndo: () -> Unit = {},
+    onProductReviewRedo: () -> Unit = {},
     onCanonicalReviewUndo: () -> Unit = {},
     onCanonicalReviewRedo: () -> Unit = {},
     onSelectSession: (String) -> Unit = {},
@@ -253,6 +262,7 @@ fun ReceiptOcrContent(
     isSubmittingCanonicalNutrition: Boolean = false,
     onSubmitCanonicalNutrition: () -> Unit = {},
     onShowCanonicalNutritionReview: () -> Unit = {},
+    onSelectCanonicalNutritionReview: (String) -> Unit = {},
     onShowProductCandidateReview: () -> Unit = {},
     onConfirmCanonicalNutritionReview: () -> Unit = {},
     onConfirmCanonicalNutritionArtifact: (String) -> Unit = {},
@@ -473,6 +483,7 @@ fun ReceiptOcrContent(
                     onRevisionRetry = onCanonicalBundleRevisionRetry,
                     onReviewMerchantNameChanged = onCanonicalReviewMerchantNameChanged,
                     onReviewFieldChanged = onCanonicalReviewFieldChanged,
+                    onResolveProductFact = onResolveCanonicalProductFact,
                     onPurchaseOptionsChanged = onCanonicalPurchaseOptionsChanged,
                     onReviewLineDescriptionChanged = onCanonicalReviewLineDescriptionChanged,
                     onReviewLineTypeChanged = onCanonicalReviewLineTypeChanged,
@@ -497,6 +508,15 @@ fun ReceiptOcrContent(
                 }
                 AppScreen.PRODUCT_CANDIDATE_REVIEW -> ProductCandidateReviewScreen(
                     candidates = productCandidates,
+                    nutrition = uiState.canonicalNutritionArtifacts,
+                    reviewBusy = uiState.isProductReviewEditing,
+                    fieldErrors = uiState.productReviewFieldErrors,
+                    canUndo = uiState.productReviewCanUndo,
+                    canRedo = uiState.productReviewCanRedo,
+                    onFieldChanged = onProductReviewFieldChanged,
+                    onResolve = onResolveProductFact,
+                    onUndo = onProductReviewUndo,
+                    onRedo = onProductReviewRedo,
                     verifiedKeys = productCandidateVerifiedKeys,
                     signedInEmail = uiState.priceTraceSignedInEmail,
                     isSubmitting = isSubmittingProductCandidates,
@@ -765,6 +785,19 @@ fun ReceiptOcrContent(
                         isSigningIn = uiState.isNutritionSigningIn,
                         isPublishing = uiState.isNutritionPublishing,
                         isCanonicalReview = uiState.isCanonicalIngestion,
+                        productFacts = uiState.canonicalNutritionArtifacts.filterIsInstance<IngestionNutrition.ProductLabel>()
+                            .singleOrNull { if (uiState.canonicalNutritionReviewKey != null) it.clientKey == uiState.canonicalNutritionReviewKey
+                                else it.draft.documentId == draft.documentId }?.let { label ->
+                                LinkedProductReview.facts(uiState.productCandidates, uiState.canonicalNutritionArtifacts)
+                                    .filter { it.productClientKey == label.productClientKey && it.linked }
+                            }.orEmpty(),
+                        onOpenProductReview = onShowProductCandidateReview,
+                        labels = uiState.canonicalNutritionArtifacts.filterIsInstance<IngestionNutrition.ProductLabel>(),
+                        selectedLabelKey = uiState.canonicalNutritionReviewKey,
+                        onSelectLabel = onSelectCanonicalNutritionReview,
+                        productVerified = uiState.canonicalNutritionArtifacts.filterIsInstance<IngestionNutrition.ProductLabel>()
+                            .singleOrNull { if (uiState.canonicalNutritionReviewKey != null) it.clientKey == uiState.canonicalNutritionReviewKey
+                                else it.draft.documentId == draft.documentId }?.productClientKey in uiState.productCandidateVerifiedKeys,
                         onBack = onBack,
                         onProductNameChanged = onNutritionProductNameChanged,
                         onBrandChanged = onNutritionBrandChanged,
@@ -972,6 +1005,7 @@ private fun CanonicalJsonValidatorScreen(
     onRevisionRetry: () -> Unit,
     onReviewMerchantNameChanged: (String) -> Unit,
     onReviewFieldChanged: ((String, String?) -> Unit)?,
+    onResolveProductFact: (String, ProductFactField, String?) -> Unit,
     onPurchaseOptionsChanged: ((String, String, com.pricetrace.receiptscanner.review.PurchaseOptionListMutation) -> Unit)?,
     onReviewLineDescriptionChanged: (String, String) -> Unit,
     onReviewLineTypeChanged: (String, ReceiptLineType) -> Unit,
@@ -981,13 +1015,14 @@ private fun CanonicalJsonValidatorScreen(
     onReviewUndo: () -> Unit,
     onReviewRedo: () -> Unit,
 ) {
+    var pendingProductPaths by remember(state.ingestionId) { mutableStateOf(emptySet<String>()) }
     var technicalOpen by rememberSaveable { mutableStateOf(false) }
     var reviewTab by remember { mutableStateOf(ReviewTab.STRUCTURED) }
     val plan = state.plan
     val eligible = state.envelope?.let(CanonicalProjectionPlanner::deliveryProjections).orEmpty().sortedBy(IngestionProjection::wireValue)
     val disabled = plan?.disabled.orEmpty().sortedBy(IngestionProjection::wireValue)
     val bundleActive = state.bundle != null || state.bundleValidationStatus != null
-    val revisionReady = state.reviewFieldErrors.isEmpty() && (state.bundle?.let { bundle ->
+    val revisionReady = pendingProductPaths.isEmpty() && state.envelope?.let(LinkedProductReview::hasConflicts) != true && state.reviewFieldErrors.isEmpty() && (state.bundle?.let { bundle ->
         bundle.pendingRevision == null &&
             (state.reviewEdits.isEmpty() || bundle.revisionArchiveStatus == AndroidCanonicalRevisionArchiveStatus.ARCHIVED)
     } ?: true)
@@ -1100,6 +1135,8 @@ private fun CanonicalJsonValidatorScreen(
                     fieldErrors = state.reviewFieldErrors,
                     onReviewMerchantNameChanged = onReviewMerchantNameChanged,
                    onReviewFieldChanged = onReviewFieldChanged,
+                    onResolveProductFact = onResolveProductFact,
+                    onPendingProductFactChanged = { path, pending -> pendingProductPaths = if (pending) pendingProductPaths + path else pendingProductPaths - path },
                     onPurchaseOptionsChanged = onPurchaseOptionsChanged,
                     busy = state.busy,
                     onReviewLineDescriptionChanged = onReviewLineDescriptionChanged,
@@ -1354,6 +1391,8 @@ private fun AppReviewTable(
     fieldErrors: Map<String, String>,
     onReviewMerchantNameChanged: (String) -> Unit,
     onReviewFieldChanged: ((String, String?) -> Unit)?,
+    onResolveProductFact: (String, ProductFactField, String?) -> Unit,
+    onPendingProductFactChanged: (String, Boolean) -> Unit,
     onPurchaseOptionsChanged: ((String, String, com.pricetrace.receiptscanner.review.PurchaseOptionListMutation) -> Unit)?,
     busy: Boolean,
     onReviewLineDescriptionChanged: (String, String) -> Unit,
@@ -1398,6 +1437,8 @@ private fun AppReviewTable(
                 edits = reviewEdits,
                 fieldErrors = fieldErrors,
                 onFieldChanged = fieldChanged,
+                onResolveProductFact = onResolveProductFact,
+                onPendingProductFactChanged = onPendingProductFactChanged,
                 onPurchaseOptionsChanged = onPurchaseOptionsChanged,
                 busy = busy,
                 onUndo = onReviewUndo,
@@ -1405,7 +1446,11 @@ private fun AppReviewTable(
             )
         }
         if (model.rows.isEmpty()) Text("표시할 인식 정보가 없습니다.")
-        else model.rows.forEach { row -> AppReviewTableRow(row) }
+        else {
+            var detailsOpen by rememberSaveable { mutableStateOf(false) }
+            TextButton(onClick = { detailsOpen = !detailsOpen }) { Text(if (detailsOpen) "상세 값 접기" else "상세 값 보기") }
+            if (detailsOpen) model.rows.forEach { row -> AppReviewTableRow(row) }
+        }
     }
 }
 
@@ -1415,16 +1460,20 @@ private fun CanonicalTypedReviewEditor(
     edits: List<CanonicalReviewEdit>,
     fieldErrors: Map<String, String>,
     onFieldChanged: (String, String?) -> Unit,
+    onResolveProductFact: (String, ProductFactField, String?) -> Unit,
+    onPendingProductFactChanged: (String, Boolean) -> Unit,
     onPurchaseOptionsChanged: ((String, String, com.pricetrace.receiptscanner.review.PurchaseOptionListMutation) -> Unit)?,
     busy: Boolean,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
 ) {
-    val fields = CanonicalFieldRegistry.fields(envelope)
-    Card(Modifier.fillMaxWidth().testTag("canonical_typed_review_editor")) {
+    val facts = LinkedProductReview.facts(envelope)
+    val identityPaths = facts.flatMap { it.sources }.map { it.path }.toSet()
+    val fields = LinkedProductReview.displayFields(envelope).filterNot { it.path in identityPaths }
+    Column(Modifier.fillMaxWidth().testTag("canonical_typed_review_editor")) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("schema-aware 구조화 편집", style = MaterialTheme.typography.titleMedium)
+                Text("인식 정보 수정", style = MaterialTheme.typography.titleMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     TextButton(onClick = onUndo) { Text("실행 취소") }
                     TextButton(onClick = onRedo) { Text("다시 실행") }
@@ -1435,6 +1484,10 @@ private fun CanonicalTypedReviewEditor(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
+            envelope.productCandidates.forEach { product ->
+                ProductInformationCard(product, facts.filter { it.productClientKey == product.clientKey },
+                    busy, fieldErrors, onFieldChanged, onResolveProductFact, onPendingProductFactChanged)
+            }
             if (onPurchaseOptionsChanged != null) {
                 CanonicalPurchaseOptionEditor(envelope, edits, fieldErrors, busy, onFieldChanged, onPurchaseOptionsChanged)
             }
@@ -1843,6 +1896,15 @@ private fun MerchantCandidateReviewScreen(
 @Composable
 private fun ProductCandidateReviewScreen(
     candidates: List<ProductCandidate>,
+    nutrition: List<IngestionNutrition>,
+    reviewBusy: Boolean,
+    fieldErrors: Map<String, String>,
+    canUndo: Boolean,
+    canRedo: Boolean,
+    onFieldChanged: (String, String?) -> Unit,
+    onResolve: (String, ProductFactField, String?) -> Unit,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
     verifiedKeys: Set<String>,
     signedInEmail: String?,
     isSubmitting: Boolean,
@@ -1856,6 +1918,9 @@ private fun ProductCandidateReviewScreen(
     onSubmit: () -> Unit,
     onOpenNutritionReview: () -> Unit,
 ) {
+    var pendingPaths by remember(candidates.map { it.clientKey }) { mutableStateOf(emptySet<String>()) }
+    val facts = LinkedProductReview.facts(candidates, nutrition)
+    val hasConflicts = facts.any { it.status == ProductFactStatus.CONFLICT }
     val allVerified = candidates.isNotEmpty() && candidates.all { it.clientKey in verifiedKeys }
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("product_candidate_review"),
@@ -1864,8 +1929,8 @@ private fun ProductCandidateReviewScreen(
     ) {
         item {
             ScreenHeader(
-                "상품 후보 검수",
-                "상품 사진에서 보이는 사실만 확인합니다. 상품 identity는 PriceTrace가 resolve합니다.",
+                "상품 정보",
+                "상품명과 브랜드를 한 번 확인한 뒤 영양성분을 검수하세요.",
                 onBack,
             )
         }
@@ -1878,78 +1943,53 @@ private fun ProductCandidateReviewScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        items(candidates, key = { it.clientKey }) { candidate ->
-            val sourceIds = candidate.effectiveSourceAttachmentIds
-            Card(
-                modifier = Modifier.fillMaxWidth().testTag("product_candidate_${candidate.clientKey}"),
-            ) {
-                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text(candidate.productName, style = MaterialTheme.typography.titleMedium)
-                    candidate.brand?.let { Text("브랜드 · $it") }
-                    candidate.manufacturer?.let { Text("제조사 · $it") }
-                    candidate.variant?.let { Text("variant · $it") }
-                    candidate.specification?.let { Text("규격 · $it") }
-                    candidate.contentAmount?.let { amount ->
-                        Text("내용량 · ${formatNutritionNumber(amount)} ${candidate.contentUnit.orEmpty()}")
-                    }
-                    candidate.packageCount?.let { Text("포장 수량 · $it") }
-                    if (candidate.barcodes.isNotEmpty()) {
-                        Text("바코드 · " + candidate.barcodes.joinToString { "${it.scheme}:${it.value}" })
-                    }
-                    Text("confidence · ${candidate.confidence}")
-                    Text("source attachment IDs · ${sourceIds.joinToString().ifBlank { "없음" }}")
-                    Text(
-                        if (candidate.clientKey in verifiedKeys) "검수 완료" else "검수 대기",
-                        color = if (candidate.clientKey in verifiedKeys) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.error
-                        },
-                    )
-                }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onUndo, enabled = canUndo && !reviewBusy, modifier = Modifier.testTag("product_review_undo")) { Text("실행 취소") }
+                TextButton(onRedo, enabled = canRedo && !reviewBusy, modifier = Modifier.testTag("product_review_redo")) { Text("다시 실행") }
             }
         }
-        item {
-            Text(
-                "PriceTrace에는 기존 product-candidate 내부 contract와 로컬 근거 참조만 전송합니다. StandardProduct/CatalogProduct ID는 생성하지 않습니다.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
+        items(candidates, key = { it.clientKey }) { candidate ->
+            ProductInformationCard(candidate, facts.filter { it.productClientKey == candidate.clientKey },
+                reviewBusy, fieldErrors, onFieldChanged, onResolve,
+                onPendingChanged = { path, pending -> pendingPaths = if (pending) pendingPaths + path else pendingPaths - path })
         }
         if (hasNutritionArtifacts) {
             item {
                 OutlinedButton(
                     onClick = onOpenNutritionReview,
+                    enabled = allVerified && !reviewBusy && !hasConflicts && pendingPaths.isEmpty(),
                     modifier = Modifier.fillMaxWidth().testTag("open_nutrition_review_from_product_candidate"),
                 ) {
-                    Text("연결된 영양 정보 검수")
+                    Text("영양성분 검수로 이동")
                 }
             }
         }
         item {
+            if (pendingPaths.isNotEmpty()) Text("상품 정보의 수정 적용을 먼저 완료하세요.", color = ReceiptWarning)
             if (!allVerified) {
                 Button(
                     onClick = onConfirm,
-                    enabled = candidates.isNotEmpty() && !isSubmitting,
+                    enabled = candidates.isNotEmpty() && !isSubmitting && !reviewBusy && !hasConflicts && fieldErrors.isEmpty() && pendingPaths.isEmpty(),
                     modifier = Modifier.fillMaxWidth().testTag("confirm_product_candidates"),
                 ) {
-                    Text("상품 후보 검수 완료")
+                    Text("상품 정보 확인 완료")
                 }
             }
             OutlinedButton(
                 onClick = onSubmit,
-                enabled = allVerified && signedInEmail != null && !isSubmitting,
+                enabled = allVerified && signedInEmail != null && !isSubmitting && !reviewBusy && !hasConflicts && fieldErrors.isEmpty() && pendingPaths.isEmpty(),
                 modifier = Modifier.fillMaxWidth().testTag("submit_product_candidates"),
             ) {
                 if (isSubmitting) BusyIndicator()
-                Text("PriceTrace에 product candidate 제출")
+                Text("PriceTrace에 상품 정보 보내기")
             }
             Text(
                 when {
                     signedInEmail == null -> "PriceTrace 연결 설정에서 로그인 후 제출할 수 있습니다."
                     submittedCandidateId != null -> "제출 완료 · $submittedCandidateId"
                     lastError != null -> "재시도 필요 · $lastError"
-                    allVerified -> "검수 완료 상태입니다. 제출 버튼을 눌러 서버 candidate RPC를 호출하세요."
+                    allVerified -> "상품 정보 확인을 완료했습니다. 전송 버튼으로 보낼 수 있습니다."
                     else -> "검수 완료 전에는 외부 제출이 차단됩니다."
                 },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2755,7 +2795,7 @@ private fun CanonicalProductCandidateReviewEntry(
                 onClick = onOpen,
                 modifier = Modifier.fillMaxWidth().testTag("open_product_candidate_review"),
             ) {
-                Text("상품 후보 원본 검수 열기")
+                Text("상품 정보 확인하기")
             }
         }
     }
@@ -3022,6 +3062,12 @@ private fun NutritionReviewScreen(
     isSigningIn: Boolean,
     isPublishing: Boolean,
     isCanonicalReview: Boolean = false,
+    productFacts: List<ProductFactReview> = emptyList(),
+    labels: List<IngestionNutrition.ProductLabel> = emptyList(),
+    selectedLabelKey: String? = null,
+    onSelectLabel: (String) -> Unit = {},
+    productVerified: Boolean = false,
+    onOpenProductReview: () -> Unit = {},
     onBack: () -> Unit,
     onProductNameChanged: (String) -> Unit,
     onBrandChanged: (String) -> Unit,
@@ -3044,6 +3090,7 @@ private fun NutritionReviewScreen(
     onApplyAi: (String) -> Unit,
     onDismissAi: (String) -> Unit,
 ) {
+    var aiPanelOpen by rememberSaveable(draft.documentId) { mutableStateOf(false) }
     var basisAmount by remember(draft.documentId, draft.basisAmount) {
         mutableStateOf(formatNutritionNumber(draft.basisAmount))
     }
@@ -3065,6 +3112,34 @@ private fun NutritionReviewScreen(
                 onBack,
             )
         }
+        if (labels.size > 1) {
+            item {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    labels.forEachIndexed { index, label ->
+                        TextButton(onClick = { onSelectLabel(label.clientKey) }, enabled = label.clientKey != selectedLabelKey,
+                            modifier = Modifier.testTag("nutrition_select_${label.clientKey}")) { Text("영양 라벨 ${index + 1} · ${label.draft.productName}") }
+                    }
+                }
+            }
+        }
+        if (productFacts.isNotEmpty()) {
+            item {
+                Column(Modifier.fillMaxWidth().testTag("nutrition_product_context"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(productFacts.sortedByDescending { it.field == ProductFactField.BRAND }
+                        .mapNotNull { it.primarySource.value?.takeIf(String::isNotBlank) }.joinToString(" · "),
+                        style = MaterialTheme.typography.titleMedium)
+                    Text("${formatNutritionNumber(draft.basisAmount)} ${draft.basisUnit} 기준", style = MaterialTheme.typography.bodySmall)
+                    if (productFacts.any { it.status == ProductFactStatus.CONFLICT }) {
+                        Text("상품 정보 확인 필요", color = ReceiptWarning)
+                        TextButton(onClick = onOpenProductReview, modifier = Modifier.testTag("nutrition_resolve_product")) { Text("상품 정보에서 해결") }
+                    } else {
+                        Text(if (productVerified) "상품 정보에서 확인됨" else "상품 정보에서 확인하세요", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        TextButton(onClick = onOpenProductReview) { Text("상품 정보 수정") }
+                    }
+                }
+            }
+        }
         pages.firstOrNull()?.let { page ->
             item { EvidenceImage(page, resolvePageFile(page.storageKey), emptyList(), zoomEnabled = true) }
         }
@@ -3078,45 +3153,34 @@ private fun NutritionReviewScreen(
                 }
             }
         }
-        item {
-            NutritionAiReviewPanel(
-                provider = aiProvider,
-                candidates = aiCandidates,
-                rejectedCount = aiRejectedCount,
-                isLoading = isAiLoading,
-                assessment = aiAssessment,
-                onSaveApiKey = onSaveGeminiApiKey,
-                onClearApiKey = onClearGeminiApiKey,
-                onRequest = onRequestAi,
-                onApply = onApplyAi,
-                onDismiss = onDismissAi,
-            )
-        }
 
-        item { SectionTitle("상품 정보") }
-        item {
-            Text(
-                "상품명과 브랜드는 OCR로 자동 입력하지 않습니다. 원본 라벨을 보고 직접 입력한 뒤 확정하세요.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        item {
-            OutlinedTextField(
-                value = draft.productName,
-                onValueChange = onProductNameChanged,
-                label = { Text("상품명 *") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().testTag("nutrition_product_name"),
-            )
-        }
-        item {
-            OutlinedTextField(
-                value = draft.brand.orEmpty(),
-                onValueChange = onBrandChanged,
-                label = { Text("브랜드 (선택)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().testTag("nutrition_brand"),
-            )
+
+        if (productFacts.isEmpty()) {
+            item { SectionTitle("상품 정보") }
+            item {
+                Text(
+                    "원본 라벨에서 상품명과 브랜드를 확인하세요.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            item {
+                OutlinedTextField(
+                    value = draft.productName,
+                    onValueChange = onProductNameChanged,
+                    label = { Text("상품명 *") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("nutrition_product_name"),
+                )
+            }
+            item {
+                OutlinedTextField(
+                    value = draft.brand.orEmpty(),
+                    onValueChange = onBrandChanged,
+                    label = { Text("브랜드 (선택)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("nutrition_brand"),
+                )
+            }
         }
         item {
             NutritionOptionSelector(
@@ -3174,6 +3238,27 @@ private fun NutritionReviewScreen(
                     .testTag("nutrition_${field.wireKey}"),
             )
         }
+        if (isCanonicalReview) {
+            item { TextButton(onClick = { aiPanelOpen = !aiPanelOpen }, modifier = Modifier.testTag("nutrition_ai_details")) {
+                Text(if (aiPanelOpen) "AI 성분표 대조 접기" else "AI로 성분표 대조하기")
+            } }
+        }
+        if (!isCanonicalReview || aiPanelOpen || isAiLoading || aiCandidates.isNotEmpty() || aiAssessment != null) {
+        item {
+            NutritionAiReviewPanel(
+                provider = aiProvider,
+                candidates = aiCandidates,
+                rejectedCount = aiRejectedCount,
+                isLoading = isAiLoading,
+                assessment = aiAssessment,
+                onSaveApiKey = onSaveGeminiApiKey,
+                onClearApiKey = onClearGeminiApiKey,
+                onRequest = onRequestAi,
+                onApply = onApplyAi,
+                onDismiss = onDismissAi,
+            )
+        }
+        }
         if (validationErrors.isNotEmpty()) {
             item {
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
@@ -3184,7 +3269,7 @@ private fun NutritionReviewScreen(
                 }
             }
         }
-        item {
+        if (!isCanonicalReview) item {
             NutritionConnectionCard(
                 supabaseUrl = supabaseUrl,
                 isPublishableKeyConfigured = isPublishableKeyConfigured,
@@ -3199,7 +3284,7 @@ private fun NutritionReviewScreen(
             if (!isCanonicalReview) Text("보낼 곳 · Fitness\n보낼 내용 · 상품명과 검수한 영양성분. 이 버튼은 검수를 확정한 뒤 바로 전송합니다.", modifier = Modifier.testTag("nutrition_delivery_summary"))
             Button(
                 onClick = if (isCanonicalReview) onConfirmCanonicalReview else onConfirmAndPublish,
-                enabled = validationErrors.isEmpty() && (isCanonicalReview || signedInEmail != null) &&
+                enabled = validationErrors.isEmpty() && productFacts.none { it.status == ProductFactStatus.CONFLICT } && (isCanonicalReview || signedInEmail != null) &&
                     !isSigningIn && !isPublishing,
                 modifier = Modifier.fillMaxWidth().testTag("confirm_publish_nutrition"),
             ) {

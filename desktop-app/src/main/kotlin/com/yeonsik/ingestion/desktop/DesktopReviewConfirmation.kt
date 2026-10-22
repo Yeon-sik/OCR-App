@@ -27,6 +27,7 @@ internal fun reviewConfirmationBlocker(state: DesktopUiState, busy: Boolean, rev
     state.session == null -> "검토할 자료를 먼저 가져오세요."
     state.bundleValidationStatus == DesktopBundleValidationStatus.INVALID ||
         state.bundleMetadata?.validationStatus == DesktopBundleValidationStatus.INVALID -> "번들 오류를 해결한 뒤 다시 가져오세요."
+    state.envelope?.let(com.pricetrace.receiptscanner.review.LinkedProductReview::hasConflicts) == true -> "상품 정보의 서로 다른 값을 먼저 확인하세요."
     state.reviewFieldErrors.isNotEmpty() -> "입력 오류 ${state.reviewFieldErrors.size}개를 수정하면 검수를 확정할 수 있습니다."
     state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVING -> "원본을 보관하고 있습니다. 완료되면 검수를 확정할 수 있습니다."
     state.bundleMetadata != null && state.bundleMetadata.archiveStatus != DesktopEvidenceArchiveStatus.ARCHIVED -> "원본 보관이 완료되지 않았습니다. 원본 보관을 다시 시도하세요."

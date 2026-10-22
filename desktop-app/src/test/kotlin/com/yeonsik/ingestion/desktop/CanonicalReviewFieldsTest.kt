@@ -23,25 +23,25 @@ class CanonicalReviewFieldsTest {
         assertEquals("상품명", fields.single { it.path == "product_candidates[product-1].product_name" }.label)
         assertFalse(fields.any { it.path == "nutrition[label-1].product_name" })
         assertEquals(
-            CanonicalFieldRegistry.fields(envelope).map { it.path }.toSet() - "nutrition[label-1].product_name",
+            CanonicalFieldRegistry.fields(envelope).map { it.path }.toSet() - setOf("nutrition[label-1].product_name", "nutrition[label-1].brand"),
             fields.map { it.path }.toSet(),
         )
     }
 
     @Test
-    fun differingOrUnlinkedLabelNamesStayEditable() {
+    fun conflictingLabelsHaveOneExplicitDecisionAndUnlinkedLabelsStayEditable() {
         val envelope = packagedEnvelope()
         val label = envelope.nutrition.single() as IngestionNutrition.ProductLabel
-        listOf(
-            label.copy(draft = label.draft.copy(productName = "라벨 이름")),
-            label.copy(productClientKey = null),
-        ).forEach { separateLabel ->
-            val groups = canonicalReviewFieldGroups(envelope.copy(nutrition = listOf(separateLabel)))
-            assertEquals(
-                "라벨 상품명",
-                groups.visibleFields.single { it.path == "nutrition[label-1].product_name" }.label,
-            )
-        }
+        val conflict = envelope.copy(nutrition = listOf(label.copy(draft = label.draft.copy(productName = "라벨 이름", brand = "Other brand"))))
+        val groups = canonicalReviewFieldGroups(conflict)
+        val fields = groups.visibleFields + groups.emptyOptionalFields
+        assertFalse(fields.any { it.path.endsWith(".product_name") || it.path.endsWith(".brand") || it.path.endsWith(".brand_name") })
+        assertEquals(2, com.pricetrace.receiptscanner.review.LinkedProductReview.facts(conflict).count {
+            it.status == com.pricetrace.receiptscanner.review.ProductFactStatus.CONFLICT
+        })
+        val independent = canonicalReviewFieldGroups(envelope.copy(nutrition = listOf(label.copy(productClientKey = null))))
+        assertEquals("라벨 상품명", independent.visibleFields.single { it.path == "nutrition[label-1].product_name" }.label)
+        assertTrue(independent.visibleFields.any { it.path == "nutrition[label-1].brand" })
     }
 
     @Test

@@ -13,6 +13,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -51,6 +54,10 @@ import com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelope
 import com.pricetrace.receiptscanner.review.CanonicalEditableField
 import com.pricetrace.receiptscanner.review.CanonicalFieldRegistry
 import com.pricetrace.receiptscanner.review.CanonicalFieldType
+import com.pricetrace.receiptscanner.review.LinkedProductReview
+import com.pricetrace.receiptscanner.review.ProductFactReview
+import com.pricetrace.receiptscanner.review.ProductFactStatus
+import com.pricetrace.receiptscanner.review.ProductFactField
 import com.pricetrace.receiptscanner.review.CanonicalReviewController
 import com.pricetrace.receiptscanner.review.PurchaseOptionListMutation
 import com.pricetrace.receiptscanner.review.ReviewDestinationBadge
@@ -504,32 +511,15 @@ internal data class CanonicalReviewFieldGroups(
 )
 
 internal fun canonicalReviewFieldGroups(envelope: YeonsikOcrEnvelope): CanonicalReviewFieldGroups {
-    val fields = CanonicalFieldRegistry.fields(envelope)
-    val nutritionLabels = envelope.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>()
-    val linkedProductLabelPaths = nutritionLabels
-        .mapNotNull { nutrition ->
-            val product = envelope.productCandidates.singleOrNull { it.clientKey == nutrition.productClientKey }
-                ?: return@mapNotNull null
-            if (product.productName != nutrition.draft.productName) return@mapNotNull null
-            "nutrition[${nutrition.clientKey}].product_name"
-        }
-        .toSet()
-    val displayFields = fields.filterNot { it.path in linkedProductLabelPaths }.map { field ->
+    val displayFields = LinkedProductReview.displayFields(envelope).map { field ->
         val productIndex = envelope.productCandidates.indexOfFirst {
             field.path == "product_candidates[${it.clientKey}].product_name"
         }
-        val nutritionIndex = nutritionLabels.indexOfFirst {
-            field.path == "nutrition[${it.clientKey}].product_name"
-        }
+        val labels = envelope.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>()
+        val labelIndex = labels.indexOfFirst { field.path == "nutrition[${it.clientKey}].product_name" }
         when {
-            productIndex >= 0 -> field.copy(
-                label = if (envelope.productCandidates.size == 1) "상품명"
-                else "상품 ${productIndex + 1} · 판매 상품명",
-            )
-            nutritionIndex >= 0 -> field.copy(
-                label = if (nutritionLabels.size == 1) "라벨 상품명"
-                else "영양 라벨 ${nutritionIndex + 1} · 상품명",
-            )
+            productIndex >= 0 -> field.copy(label = if (envelope.productCandidates.size == 1) "상품명" else "상품 ${productIndex + 1} · 상품명")
+            labelIndex >= 0 -> field.copy(label = if (labels.size == 1) "라벨 상품명" else "영양 라벨 ${labelIndex + 1} · 상품명")
             else -> field
         }
     }
@@ -537,6 +527,39 @@ internal fun canonicalReviewFieldGroups(envelope: YeonsikOcrEnvelope): Canonical
         visibleFields = displayFields.filter { !it.nullable || !it.value.isNullOrBlank() },
         emptyOptionalFields = displayFields.filter { it.nullable && it.value.isNullOrBlank() },
     )
+}
+
+@Composable
+private fun ProductFactConflict(
+    fact: ProductFactReview,
+    busy: Boolean,
+    onEdit: ((CanonicalReviewController) -> Boolean) -> Unit,
+) {
+    var selection by rememberSaveable(fact.productClientKey, fact.field, fact.sources) { mutableStateOf<String?>(null) }
+    var value by rememberSaveable(fact.productClientKey, fact.field, fact.sources) { mutableStateOf("") }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
+        Text("${fact.field.label} 확인 필요 · 서로 다른 값이 있습니다", color = MaterialTheme.colorScheme.error)
+        Column(Modifier.selectableGroup()) {
+            fact.sources.forEach { source ->
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    .selectable(selection == source.path, enabled = !busy, role = Role.RadioButton,
+                        onClick = { selection = source.path; value = source.value.orEmpty() }),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selection == source.path, onClick = null, enabled = !busy)
+                    Text("${source.label} · ${source.value ?: "미확인"}")
+                }
+            }
+            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                .selectable(selection == "manual", enabled = !busy, role = Role.RadioButton, onClick = { selection = "manual" }),
+                verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(selection == "manual", onClick = null, enabled = !busy)
+                Text("직접 수정")
+            }
+        }
+        if (selection == "manual") OutlinedTextField(value, { value = it }, label = { Text(fact.field.label) }, enabled = !busy)
+        CollectorButton("${fact.field.label} 확정", { onEdit { it.resolveLinkedProductFact(fact.productClientKey, fact.field, value.takeIf(String::isNotBlank)) } },
+            enabled = !busy && selection != null && (fact.field != ProductFactField.NAME || value.isNotBlank()))
+    }
 }
 
 @Composable
@@ -578,7 +601,7 @@ private fun EditableCanonicalSection(
                 modifier = Modifier.weight(1f),
             )
         }
-        if (editorVisible || fieldErrors.isNotEmpty()) {
+        if (editorVisible || fieldErrors.isNotEmpty() || LinkedProductReview.hasConflicts(envelope)) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = CollectorTokens.panelShape,
@@ -586,6 +609,9 @@ private fun EditableCanonicalSection(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             ) {
                 Column(Modifier.padding(CollectorTokens.space3), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space4)) {
+                    LinkedProductReview.facts(envelope).filter { it.status == ProductFactStatus.CONFLICT }.forEach { fact ->
+                        ProductFactConflict(fact, busy, onEdit)
+                    }
                     PurchaseOptionEditor(envelope, edits, fieldErrors, busy, onEdit)
                     visibleFields.filterNot { ".option_items[" in it.path }.sortedBy { if (it.path in fieldErrors) 0 else 1 }.forEach { field ->
                         AccessibleField(

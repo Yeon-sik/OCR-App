@@ -770,6 +770,9 @@ class DesktopIngestionController(
             require(currentState.bundleValidationStatus != DesktopBundleValidationStatus.INVALID) { "번들이 유효하지 않습니다." }
             val session = currentState.session ?: error("전송하려면 JSON을 먼저 가져오세요.")
             val envelope = currentEnvelope()
+            require(!com.pricetrace.receiptscanner.review.LinkedProductReview.hasConflicts(envelope)) {
+                "상품 정보의 서로 다른 값을 먼저 확인하세요."
+            }
             currentState.bundleMetadata?.let { metadata ->
                 require(metadata.validationStatus == DesktopBundleValidationStatus.VALID) { "번들이 유효하지 않습니다." }
                 require(metadata.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED) {

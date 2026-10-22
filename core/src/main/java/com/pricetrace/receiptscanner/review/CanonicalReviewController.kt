@@ -597,6 +597,29 @@ class CanonicalReviewController(
         )
     }
 
+    /** One explicit user decision, committed atomically through the normal revision/audit/undo path. */
+    fun resolveLinkedProductFact(productClientKey: String, field: ProductFactField, value: String?): Boolean {
+        val original = mutableState.value.envelope
+        val fact = LinkedProductReview.facts(original).singleOrNull {
+            it.productClientKey == productClientKey && it.field == field && it.linked
+        } ?: return fail("연결된 상품 정보를 찾지 못했습니다.")
+        var edited = original
+        val changes = mutableListOf<FieldChange>()
+        for (source in fact.sources) {
+            val descriptor = CanonicalFieldRegistry.descriptor(original, source.path) ?: return fail("수정할 값을 찾지 못했습니다.")
+            val parsed = runCatching { parseValue(descriptor, value) }.getOrElse {
+                return failField(source.path, it.message ?: "값을 확인하세요.")
+            }
+            if (source.value != parsed.canonicalValue) {
+                edited = runCatching { applyTypedField(edited, source.path, parsed) }.getOrElse {
+                    return failField(source.path, it.message ?: "값을 적용하지 못했습니다.")
+                }
+                changes.add(FieldChange(source.path, source.value, parsed.canonicalValue, descriptor.type))
+            }
+        }
+        return commitEnvelope(edited, changes)
+    }
+
     /** Naming alias for clients that model a UI action as a canonical field mutation. */
     fun applyTypedMutation(fieldPath: String, value: String?): Boolean = updateField(fieldPath, value)
 
@@ -665,24 +688,15 @@ class CanonicalReviewController(
         applied: YeonsikOcrEnvelope,
         path: String,
     ): YeonsikOcrEnvelope {
-        val productMatch = productPath.matchEntire(path)
-        if (productMatch != null && productMatch.groupValues[2] == "product_name") {
-            val productClientKey = productMatch.groupValues[1]
-            val previousProduct = original.productCandidates.singleOrNull { it.clientKey == productClientKey }
-                ?: return applied
-            val nextProduct = applied.productCandidates.singleOrNull { it.clientKey == productClientKey }
-                ?: return applied
-            val linkedNutrition = applied.nutrition.map { item ->
-                if (item is IngestionNutrition.ProductLabel &&
-                    item.productClientKey == productClientKey &&
-                    item.draft.productName == previousProduct.productName
-                ) {
-                    item.copy(draft = item.draft.copy(productName = nextProduct.productName))
-                } else {
-                    item
+        val fact = LinkedProductReview.facts(original).singleOrNull { fact -> fact.sources.any { it.path == path } }
+        if (fact != null && path == fact.primarySource.path) {
+            val previous = fact.sources.single { it.path == path }.value
+            val next = CanonicalFieldRegistry.value(applied, path)
+            return fact.sources.filter { it.path != path && LinkedProductReview.sameObservedText(it.value, previous) }
+                .fold(applied) { envelope, source ->
+                    val descriptor = requireNotNull(CanonicalFieldRegistry.descriptor(envelope, source.path))
+                    applyTypedField(envelope, source.path, parseValue(descriptor, next))
                 }
-            }
-            return applied.copy(nutrition = linkedNutrition)
         }
 
         val lineMatch = receiptLinePath.matchEntire(path)
@@ -734,30 +748,11 @@ class CanonicalReviewController(
         if (path.startsWith("receipt.merchant.")) {
             addAll(merchantCandidateChanges(original, applied))
         }
-        val productMatch = productPath.matchEntire(path)
-        if (productMatch != null && productMatch.groupValues[2] == "product_name") {
-            val productClientKey = productMatch.groupValues[1]
-            val previousProduct = original.productCandidates.singleOrNull { it.clientKey == productClientKey }
-            val nextProduct = applied.productCandidates.singleOrNull { it.clientKey == productClientKey }
-            if (previousProduct != null && nextProduct != null) {
-                original.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>()
-                    .filter { it.productClientKey == productClientKey && it.draft.productName == previousProduct.productName }
-                    .forEach { previousNutrition ->
-                        val nextNutrition = applied.nutrition.singleOrNull { it.clientKey == previousNutrition.clientKey }
-                            as? IngestionNutrition.ProductLabel ?: return@forEach
-                        if (previousNutrition.draft.productName != nextNutrition.draft.productName) {
-                            add(
-                                FieldChange(
-                                    fieldPath = "nutrition[${previousNutrition.clientKey}].product_name",
-                                    previousValue = previousNutrition.draft.productName,
-                                    newValue = nextNutrition.draft.productName,
-                                    valueType = CanonicalFieldType.TEXT,
-                                ),
-                            )
-                        }
-                    }
+        LinkedProductReview.facts(original).singleOrNull { fact -> fact.sources.any { it.path == path } }
+            ?.sources?.filter { it.path != path }?.forEach { source ->
+                val next = CanonicalFieldRegistry.value(applied, source.path)
+                if (source.value != next) add(FieldChange(source.path, source.value, next, CanonicalFieldType.TEXT))
             }
-        }
         val lineMatch = receiptLinePath.matchEntire(path)
         if (lineMatch != null && lineMatch.groupValues[2] == "description") {
             original.nutrition.forEachIndexed { index, oldItem ->

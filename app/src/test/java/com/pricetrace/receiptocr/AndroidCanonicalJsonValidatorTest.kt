@@ -55,6 +55,51 @@ import com.pricetrace.receiptscanner.ingestion.YeonsikBundleManifestCodec
 
 class AndroidCanonicalJsonValidatorTest {
     @Test
+    fun linkedProductConflictsBlockConfirmUntilOneAuditedResolutionAndUndoRedoPreserveSources() = runBlocking {
+        val validator = AndroidCanonicalJsonValidator(CanonicalIngestionUseCase(InMemoryIngestionSessionStore()))
+        val imported = validator.importJson(linkedProductJson(), AndroidCanonicalJsonValidatorState())
+        var state = validator.reviseStructuredReview(imported) { it.updateField("nutrition[product-1].brand", "Label brand") }
+        assertTrue(com.pricetrace.receiptscanner.review.LinkedProductReview.hasConflicts(requireNotNull(state.envelope)))
+        assertTrue(runCatching { validator.confirm(state) }.isFailure)
+        val before = state
+        state = validator.reviseStructuredReview(state) {
+            it.resolveLinkedProductFact("product-1", com.pricetrace.receiptscanner.review.ProductFactField.BRAND, "Chosen brand")
+        }
+        assertEquals(null, state.error)
+        assertFalse(com.pricetrace.receiptscanner.review.LinkedProductReview.hasConflicts(requireNotNull(state.envelope)))
+        assertEquals(setOf("product_candidates[product-1].brand_name", "nutrition[product-1].brand"),
+            state.reviewEdits.takeLast(2).map { it.fieldPath }.toSet())
+        assertEquals(imported.envelope!!.source, state.envelope!!.source)
+        val resolved = state
+        state = validator.reviseStructuredReview(state) { it.undo() }
+        assertEquals(before.envelope!!.productCandidates, state.envelope!!.productCandidates)
+        assertEquals(before.envelope!!.nutrition, state.envelope!!.nutrition)
+        assertTrue(runCatching { validator.confirm(state) }.isFailure)
+        state = validator.reviseStructuredReview(state) { it.redo() }
+        assertEquals(resolved.envelope!!.nutrition, state.envelope!!.nutrition)
+        assertEquals(resolved.envelope!!.productCandidates, state.envelope!!.productCandidates)
+        assertTrue(state.session!!.revisionSeq > imported.session!!.revisionSeq)
+    }
+
+    @Test
+    fun unifiedBrandEditsUseCanonicalRevisionAndClearVerificationWithoutRewritingEvidence() = runBlocking {
+        val validator = AndroidCanonicalJsonValidator(CanonicalIngestionUseCase(InMemoryIngestionSessionStore()))
+        var state = validator.importJson(linkedProductJson(), AndroidCanonicalJsonValidatorState())
+        val before = state.envelope!!
+        state = validator.reviseStructuredReview(state) { it.updateField("product_candidates[product-1].brand_name", "Updated brand") }
+        assertEquals(null, state.error)
+        val edited = state.envelope!!
+        assertEquals("Updated brand", edited.productCandidates.single().brand)
+        assertEquals("Updated brand", (edited.nutrition.single() as com.pricetrace.receiptscanner.ingestion.IngestionNutrition.ProductLabel).draft.brand)
+        assertEquals(2, state.reviewEdits.size)
+        assertEquals(before.source, edited.source)
+        assertEquals(before.productCandidates.single().evidence, edited.productCandidates.single().evidence)
+        assertEquals(null, state.session!!.verifiedCanonicalFingerprint)
+        assertEquals(before.schemaVersion, edited.schemaVersion)
+        assertEquals(before.targets, edited.targets)
+    }
+
+    @Test
     fun invalidV2ModeDiagnosticReachesAndroidJsonAndBundleErrorsWithoutRepair() = runBlocking {
         val root = Json.parseToJsonElement(readExample("yeonsik-ocr.v2.packaged-product.text-lookup.example.json")).jsonObject
         val invalid = kotlinx.serialization.json.JsonObject(root + ("mode" to JsonPrimitive("merchant"))).toString()
@@ -1078,6 +1123,15 @@ class AndroidCanonicalJsonValidatorTest {
             zip.closeEntry()
         }
         return output.toByteArray()
+    }
+
+    private fun linkedProductJson(): String {
+        val envelope = YeonsikOcrV2Json.decode(readExample("yeonsik-ocr.v2.packaged-product.example.json"), "linked-android")
+        val label = envelope.nutrition.single() as com.pricetrace.receiptscanner.ingestion.IngestionNutrition.ProductLabel
+        return com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec.encodePersisted(envelope.copy(
+            schemaVersion = com.pricetrace.receiptscanner.ingestion.YEONSIK_OCR_V3_SCHEMA,
+            nutrition = listOf(label.copy(productClientKey = "product-1")),
+        ))
     }
 
     private fun readExample(name: String): String {

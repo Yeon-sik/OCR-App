@@ -907,7 +907,7 @@ class ReceiptUiInstrumentedTest {
         composeRule.onNodeWithTag("product_candidate_review").assertIsDisplayed()
         composeRule.onNodeWithTag("product_candidate_review").performScrollToNode(hasTestTag("product_candidate_product-1"))
         composeRule.onNodeWithText("Test Drink").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("브랜드 · Test Brand").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("product_fact_product-1_BRAND_input").performScrollTo().assertTextContains("Test Brand")
         composeRule.onNodeWithTag("product_candidate_review").performScrollToNode(hasTestTag("confirm_product_candidates"))
         composeRule.onNodeWithTag("confirm_product_candidates").assertIsEnabled().performClick()
         composeRule.runOnIdle {

@@ -111,6 +111,8 @@ import com.pricetrace.receiptscanner.preflight.ReceiptPreflightDecision
 import com.pricetrace.receiptscanner.preflight.ReceiptPreflightEvaluator
 import com.pricetrace.receiptscanner.preflight.ReceiptPreflightRoute
 import com.pricetrace.receiptscanner.review.ReceiptReviewController
+import com.pricetrace.receiptscanner.review.LinkedProductReview
+import com.pricetrace.receiptscanner.review.ProductFactField
 import com.pricetrace.receiptscanner.review.CanonicalReviewController
 import com.pricetrace.receiptscanner.review.toFieldCorrection
 import com.pricetrace.receiptscanner.storage.PriceObservationQueueEntry
@@ -187,6 +189,7 @@ data class ReceiptAppUiState(
     val canonicalNutritionArtifacts: List<IngestionNutrition> = emptyList(),
     val canonicalNutritionVerifiedCount: Int = 0,
     val canonicalNutritionVerifiedKeys: Set<String> = emptySet(),
+    val canonicalNutritionReviewKey: String? = null,
     val canonicalConsumptionArtifacts: List<IngestionConsumption> = emptyList(),
     val canonicalConsumptionVerifiedCount: Int = 0,
     val isConsumptionVerifying: Boolean = false,
@@ -200,6 +203,10 @@ data class ReceiptAppUiState(
     val isSubmittingProductCandidates: Boolean = false,
     val productCandidateId: String? = null,
     val productCandidateLastError: String? = null,
+    val isProductReviewEditing: Boolean = false,
+    val productReviewFieldErrors: Map<String, String> = emptyMap(),
+    val productReviewCanUndo: Boolean = false,
+    val productReviewCanRedo: Boolean = false,
     val isPreparingScanner: Boolean = false,
     val isImportingPages: Boolean = false,
     val isProcessingOcr: Boolean = false,
@@ -368,6 +375,7 @@ class ReceiptAppViewModel(
     private val persistenceMutex = Mutex()
     private val canonicalRevisionMutex = Mutex()
     private val persistedEditIds = mutableSetOf<String>()
+    private var productReviewState: AndroidCanonicalJsonValidatorState? = null
     private var reviewController: ReceiptReviewController? = null
     private var preflightPages: List<ReceiptPage> = emptyList()
     private var nutritionPersistenceJob: Job? = null
@@ -840,6 +848,83 @@ class ReceiptAppViewModel(
 
     fun updateCanonicalMerchantName(value: String) =
         runCanonicalStructuredEdit { it.updateMerchantName(value) }
+
+    fun resolveCanonicalProductFact(key: String, field: ProductFactField, value: String?) =
+        runCanonicalStructuredEdit { it.resolveLinkedProductFact(key, field, value) }
+
+    fun updateProductReviewField(path: String, value: String?) =
+        runProductFactEdit { it.updateField(path, value) }
+
+    fun resolveProductFact(key: String, field: ProductFactField, value: String?) =
+        runProductFactEdit { it.resolveLinkedProductFact(key, field, value) }
+
+    fun undoProductReview() = runProductFactEdit { it.undo() }
+    fun redoProductReview() = runProductFactEdit { it.redo() }
+
+    private fun runProductFactEdit(mutation: (CanonicalReviewController) -> Boolean) {
+        val current = mutableUiState.value
+        val documentId = current.currentDocumentId ?: return
+        if (!current.isCanonicalIngestion || current.isProductReviewEditing) return
+        mutableUiState.value = current.copy(isProductReviewEditing = true)
+        viewModelScope.launch {
+            try {
+                nutritionPersistenceJob?.join()
+                canonicalRevisionMutex.withLock {
+                    val envelope = loadIngestionEnvelope(documentId) ?: error("검수할 상품 정보를 찾지 못했습니다.")
+                    val session = container.ingestionSessionStore.get(ingestionIdFor(documentId))
+                    val previous = productReviewState?.takeIf { it.localDocumentId == documentId }
+                    val before = if (previous?.envelope == envelope) previous else AndroidCanonicalJsonValidatorState(
+                        localDocumentId = documentId, ingestionId = ingestionIdFor(documentId), envelope = envelope,
+                        session = session, reviewEdits = previous?.reviewEdits.orEmpty(),
+                        canonicalJson = YeonsikOcrEnvelopeCodec.encodePersisted(envelope),
+                    )
+                    var canUndo = false
+                    var canRedo = false
+                    val updated = canonicalJsonValidator.reviseStructuredReview(before) { controller ->
+                        val applied = mutation(controller)
+                        canUndo = controller.state.value.canUndo
+                        canRedo = controller.state.value.canRedo
+                        applied
+                    }
+                    if (updated.error == null) {
+                        fileStore.writeText(requireNotNull(session).envelopeStorageKey, updated.canonicalJson)
+                    }
+                    productReviewState = updated
+                    val edited = updated.envelope ?: envelope
+                    val latestSession = container.ingestionSessionStore.get(ingestionIdFor(documentId))
+                    if (mutableUiState.value.currentDocumentId != documentId) return@withLock
+                    val selectedKey = mutableUiState.value.canonicalNutritionReviewKey
+                    val selectedDraftId = mutableUiState.value.nutritionDraft?.documentId
+                    val selectedDraft = edited.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>()
+                        .singleOrNull { if (selectedKey != null) it.clientKey == selectedKey else it.draft.documentId == selectedDraftId }?.draft
+                    mutableUiState.value = mutableUiState.value.copy(
+                        productCandidates = edited.productCandidates,
+                        canonicalNutritionArtifacts = edited.nutrition,
+                        nutritionDraft = selectedDraft ?: mutableUiState.value.nutritionDraft,
+                        nutritionValidationErrors = selectedDraft?.let { NutritionLabelValidator.validate(it).errors }
+                            ?: mutableUiState.value.nutritionValidationErrors,
+                        productCandidateVerifiedKeys = edited.productCandidates.filter {
+                            IngestionArtifactKeys.productCandidate(it.clientKey) in latestSession?.verifiedArtifactFingerprints.orEmpty()
+                        }.map { it.clientKey }.toSet(),
+                        canonicalNutritionVerifiedKeys = latestSession?.let { verifiedNutritionKeys(it, edited) }.orEmpty(),
+                        canonicalNutritionVerifiedCount = latestSession?.let { verifiedNutritionCount(it, edited) } ?: 0,
+                        productReviewFieldErrors = updated.reviewFieldErrors,
+                        productReviewCanUndo = canUndo,
+                        productReviewCanRedo = canRedo,
+                        message = updated.error,
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableUiState.value = mutableUiState.value.copy(message = error.message ?: "상품 정보 저장에 실패했습니다.")
+            } finally {
+                if (mutableUiState.value.currentDocumentId == documentId) {
+                    mutableUiState.value = mutableUiState.value.copy(isProductReviewEditing = false)
+                }
+            }
+        }
+    }
 
     fun updateCanonicalField(fieldPath: String, value: String?) =
         runCanonicalStructuredEdit { it.updateField(fieldPath, value) }
@@ -1918,7 +2003,7 @@ class ReceiptAppViewModel(
 
     fun confirmProductCandidates() {
         val state = mutableUiState.value
-        if (!state.isCanonicalIngestion || state.isSubmittingProductCandidates || state.productCandidates.isEmpty()) return
+        if (!state.isCanonicalIngestion || state.isProductReviewEditing || state.isSubmittingProductCandidates || state.productCandidates.isEmpty()) return
         val documentId = state.currentDocumentId ?: return
         val candidateKeys = state.productCandidates.map { it.clientKey }.toSet()
         if (state.productCandidateVerifiedKeys.containsAll(candidateKeys)) return
@@ -1928,6 +2013,10 @@ class ReceiptAppViewModel(
                 mutableUiState.value = mutableUiState.value.copy(
                     message = "확정할 product candidate artifact를 찾지 못했습니다.",
                 )
+                return@launch
+            }
+            if (LinkedProductReview.hasConflicts(envelope)) {
+                mutableUiState.value = mutableUiState.value.copy(message = "상품 정보의 서로 다른 값을 먼저 확인하세요.")
                 return@launch
             }
             val gate = canonicalProjectionEvidenceGate(
@@ -2162,14 +2251,19 @@ class ReceiptAppViewModel(
     }
 
     /** Opens the nutrition artifact review without publishing anything to Fitness. */
-    fun showCanonicalNutritionReview() {
+    fun showCanonicalNutritionReview() = openCanonicalNutritionReview(null)
+
+    fun selectCanonicalNutritionReview(key: String) = openCanonicalNutritionReview(key)
+
+    private fun openCanonicalNutritionReview(selectedKey: String?) {
         val state = mutableUiState.value
         if (!state.isCanonicalIngestion || state.canonicalNutritionCount <= 0) return
         val documentId = state.currentDocumentId
             ?: state.receipt?.document?.requireLocalDocumentId()
             ?: return
-        nutritionPersistenceJob?.cancel()
+
         viewModelScope.launch {
+            nutritionPersistenceJob?.join()
             val envelope = loadIngestionEnvelope(documentId)
             if (envelope == null || envelope.nutrition.isEmpty()) {
                 mutableUiState.value = mutableUiState.value.copy(
@@ -2182,15 +2276,22 @@ class ReceiptAppViewModel(
             val consumptionVerifiedCount = ingestionSession?.let {
                 verifiedConsumptionCount(it, envelope)
             } ?: 0
-            val productLabel = envelope.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>().firstOrNull()
+            val labels = envelope.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>()
+            val productLabel = if (selectedKey == null) labels.firstOrNull() else labels.singleOrNull { it.clientKey == selectedKey }
+            if (selectedKey != null && productLabel == null) {
+                mutableUiState.value = mutableUiState.value.copy(message = "선택한 영양 라벨을 찾지 못했습니다.")
+                return@launch
+            }
             if (productLabel != null) {
                 mutableUiState.value = nutritionState(
                     draft = productLabel.draft,
                     ocrDocument = state.ocrDocument,
-                    message = "상품 라벨을 원본과 대조한 뒤 별도로 확정하세요. Fitness 저장은 확정 후 별도 버튼으로 실행합니다.",
+                    message = "기준량과 영양성분을 원본과 대조하세요. 저장은 검수 확정 후 진행합니다.",
                     sessionDocumentId = documentId,
                 ).copy(
                     isCanonicalIngestion = true,
+                    canonicalNutritionReviewKey = productLabel.clientKey,
+                    productCandidates = envelope.productCandidates,
                     canonicalNutritionCount = envelope.nutrition.size,
                     canonicalNutritionArtifacts = envelope.nutrition,
                     canonicalNutritionVerifiedCount = verifiedCount,
@@ -2219,11 +2320,12 @@ class ReceiptAppViewModel(
     /** Opens the product candidate review without publishing anything to PriceTrace. */
     fun showProductCandidateReview() {
         val state = mutableUiState.value
-        if (!state.isCanonicalIngestion) return
+        if (!state.isCanonicalIngestion || state.isProductReviewEditing) return
         val documentId = state.currentDocumentId
             ?: state.receipt?.document?.requireLocalDocumentId()
             ?: return
         viewModelScope.launch {
+            nutritionPersistenceJob?.join()
             val envelope = loadIngestionEnvelope(documentId)
             if (envelope == null || envelope.productCandidates.isEmpty()) {
                 mutableUiState.value = mutableUiState.value.copy(
@@ -2263,7 +2365,7 @@ class ReceiptAppViewModel(
                     verifiedConsumptionCount(it, envelope)
                 } ?: 0,
                 isConsumptionVerifying = false,
-                message = "상품 후보를 원본과 대조한 뒤 별도로 확정하세요. ProductLabel 검수는 다음 단계에서 진행합니다.",
+                message = "상품명과 브랜드를 한 번 확인하세요. 다음 단계에서는 영양성분을 검수합니다.",
             )
         }
     }
@@ -2512,6 +2614,7 @@ class ReceiptAppViewModel(
                         }
                         mutableUiState.value = mutableUiState.value.copy(
                             screen = nextScreen,
+                            productCandidates = latestEnvelope.productCandidates,
                             canonicalNutritionCount = latestEnvelope.nutrition.size,
                             canonicalNutritionArtifacts = latestEnvelope.nutrition,
                             canonicalNutritionVerifiedCount = latestSession?.let {
@@ -2567,12 +2670,18 @@ class ReceiptAppViewModel(
                 val envelope = loadIngestionEnvelope(documentId)
                 val artifact = envelope?.nutrition
                     ?.filterIsInstance<IngestionNutrition.ProductLabel>()
-                    ?.firstOrNull { it.draft.documentId == draft.documentId || it.clientKey == draft.documentId }
+                    ?.singleOrNull { if (state.canonicalNutritionReviewKey != null) it.clientKey == state.canonicalNutritionReviewKey
+                        else it.draft.documentId == draft.documentId || it.clientKey == draft.documentId }
                 if (envelope == null || artifact == null) {
                     mutableUiState.value = mutableUiState.value.copy(
                         isNutritionPublishing = false,
                         message = "확정할 ProductLabel artifact를 찾지 못했습니다.",
                     )
+                    return@launch
+                }
+                if (LinkedProductReview.hasConflicts(envelope)) {
+                    mutableUiState.value = mutableUiState.value.copy(isNutritionPublishing = false,
+                        message = "상품 정보의 서로 다른 값을 먼저 확인하세요.")
                     return@launch
                 }
                 val verified = draft.asUserVerified(OffsetDateTime.now().toString())
@@ -2581,7 +2690,7 @@ class ReceiptAppViewModel(
                     uploadStatus = "local_only",
                     sessionDocumentId = documentId,
                 )
-                when (val revision = syncCanonicalNutritionRevision(documentId, verified)) {
+                when (val revision = syncCanonicalNutritionRevision(documentId, verified, artifact.clientKey)) {
                     is IngestionStartResult.Failure -> {
                         mutableUiState.value = mutableUiState.value.copy(
                             isNutritionPublishing = false,
@@ -2601,9 +2710,9 @@ class ReceiptAppViewModel(
                     is IngestionStartResult.Success,
                     is IngestionStartResult.Duplicate -> {
                         val productVerification = if (envelope.productCandidates.any {
-                                it.clientKey == artifact.clientKey
+                                it.clientKey == artifact.productClientKey
                             }) {
-                            markIngestionProductCandidatesVerified(documentId, setOf(artifact.clientKey))
+                            markIngestionProductCandidatesVerified(documentId, setOf(requireNotNull(artifact.productClientKey)))
                         } else {
                             null
                         }
@@ -2988,24 +3097,23 @@ class ReceiptAppViewModel(
             ingestionOrchestrator.reviseCanonicalDraft(ingestionIdFor(documentId), updated)
         }
 
-    private suspend fun syncCanonicalNutritionRevision(documentId: String, draft: NutritionLabelDraft): IngestionStartResult? =
-        canonicalRevisionMutex.withLock {
-            val envelope = loadIngestionEnvelope(documentId) ?: return@withLock null
-            var replaced = false
-            val nutrition = envelope.nutrition.map { item ->
-                if (item is IngestionNutrition.ProductLabel &&
-                    (item.draft.documentId == draft.documentId || item.clientKey == draft.documentId || envelope.nutrition.size == 1)
-                ) {
-                    replaced = true
-                    item.copy(draft = draft)
-                } else item
-            }
-            if (!replaced) return@withLock IngestionStartResult.Failure(listOf("nutrition_artifact_not_found"))
-            val updated = envelope.copy(nutrition = nutrition)
-            val key = "${documentId}/ingestion/yeonsik-ocr.json"
-            fileStore.writeText(key, YeonsikOcrEnvelopeCodec.encode(updated))
-            ingestionOrchestrator.reviseCanonicalDraft(ingestionIdFor(documentId), updated)
-        }
+    private suspend fun syncCanonicalNutritionRevision(
+        documentId: String,
+        draft: NutritionLabelDraft,
+        nutritionClientKey: String? = null,
+    ): IngestionStartResult? = canonicalRevisionMutex.withLock {
+        val envelope = loadIngestionEnvelope(documentId) ?: return@withLock null
+        val label = envelope.nutrition.filterIsInstance<IngestionNutrition.ProductLabel>().singleOrNull {
+            if (nutritionClientKey != null) it.clientKey == nutritionClientKey
+            else it.draft.documentId == draft.documentId || it.clientKey == draft.documentId
+        } ?: return@withLock IngestionStartResult.Failure(listOf("nutrition_artifact_not_found_or_ambiguous"))
+        val updated = envelope.copy(nutrition = envelope.nutrition.map { item ->
+            if (item.clientKey == label.clientKey) label.copy(draft = draft) else item
+        })
+        val key = "${documentId}/ingestion/yeonsik-ocr.json"
+        fileStore.writeText(key, YeonsikOcrEnvelopeCodec.encode(updated))
+        ingestionOrchestrator.reviseCanonicalDraft(ingestionIdFor(documentId), updated)
+    }
 
     private suspend fun syncCanonicalConsumptionRevision(
         documentId: String,
@@ -4882,6 +4990,7 @@ class ReceiptAppViewModel(
     private fun persistNutritionDraft(draft: NutritionLabelDraft) {
         nutritionPersistenceJob?.cancel()
         val sessionDocumentId = mutableUiState.value.currentDocumentId ?: draft.documentId
+        val nutritionClientKey = mutableUiState.value.canonicalNutritionReviewKey
         nutritionPersistenceJob = viewModelScope.launch {
             try {
                 persistNutritionDraftNow(
@@ -4890,7 +4999,7 @@ class ReceiptAppViewModel(
                     sessionDocumentId = sessionDocumentId,
                 )
                 if (loadIngestionEnvelope(sessionDocumentId) != null) {
-                    when (val revision = syncCanonicalNutritionRevision(sessionDocumentId, draft)) {
+                    when (val revision = syncCanonicalNutritionRevision(sessionDocumentId, draft, nutritionClientKey)) {
                         is IngestionStartResult.Failure -> {
                             mutableUiState.value = mutableUiState.value.copy(
                                 message = "수정된 canonical nutrition을 저장하지 못했습니다. 다시 검수해야 합니다: ${revision.issues.joinToString()}",
