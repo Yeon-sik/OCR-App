@@ -3,6 +3,7 @@ package com.yeonsik.ingestion.desktop
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -32,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -153,25 +155,34 @@ fun ReviewWorkspace(
                 .map { it.path }
         val confirmationBlocker = reviewConfirmationBlocker(state, busy, revisionReady)
         val canVerify = confirmationBlocker == null
-        val canSubmit = confirmationBlocker == null && state.session != null &&
+        val canUseVerifiedSource = confirmationBlocker == null && state.session != null &&
             state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint &&
             (state.bundleMetadata == null ||
                 state.bundleMetadata.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED &&
                 state.bundleMetadata.verificationEventRecorded) &&
             revisionReady && selectedProjections.isNotEmpty() && state.reviewFieldErrors.isEmpty()
+        val canSubmit = canUseVerifiedSource && pendingDeliveryProjections(state, selectedProjections).isNotEmpty()
 
         CompositionLocalProvider(LocalReviewNavigation provides navigation, LocalReviewEnvelope provides envelope) {
-            Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          BoxWithConstraints(Modifier.fillMaxSize()) {
+            val compact = maxHeight < 620.dp
+            Column(Modifier.fillMaxSize().padding(if (compact) 8.dp else 12.dp), verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp)) {
                 ReviewHeader(
                     state = state,
                     title = reviewTitle(state, model.rows),
                     onDeveloperInfoVisibleChanged = onDeveloperInfoVisibleChanged,
                     developerInfoVisible = developerInfoVisible,
                     onNextReviewItem = { navigation.next(paths) }, hasReviewItems = paths.isNotEmpty(),
+                    compact = compact,
                 )
-                SourceSummary(state, model.rows)
-                ReviewDraftToolbar(busy)
-                Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (!compact) SourceSummary(state, model.rows)
+                ReviewDraftToolbar(busy, compact, if (paths.isNotEmpty()) ({ navigation.next(paths) }) else null, state.draftSaveError)
+                Column(Modifier.weight(1f).fillMaxWidth().testTag("review-scroll").verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (compact) {
+                        Text("입력 오류 ${state.reviewFieldErrors.size} · 미적용 ${state.reviewDrafts.size}", style = MaterialTheme.typography.bodySmall)
+                    }
+                    state.draftRestoreNotice?.takeIf { state.reviewDrafts.isNotEmpty() }?.let { Text(it, color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall) }
+                    state.draftSaveError?.let { ValidationMessage(it, CollectorStatusKind.ERROR, compact = true, recoveryHint = null) }
                     state.error?.let { ValidationMessage(it, CollectorStatusKind.ERROR) }
 
                     if (state.bundleMetadata?.archiveStatus == DesktopEvidenceArchiveStatus.FAILED) {
@@ -210,7 +221,7 @@ fun ReviewWorkspace(
                     )
                     val ownerMetadata = state.session?.projections?.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson
                     com.pricetrace.receiptscanner.ingestion.PurchaseIdentityReview.cards(envelope,ownerMetadata).forEach { card ->
-                        PurchaseIdentityCard(card,canSubmit && card.sourceSaved,onPurchaseIdentityCommand)
+                        PurchaseIdentityCard(card,canUseVerifiedSource && card.sourceSaved,onPurchaseIdentityCommand)
                     }
                     if (state.reviewFieldErrors.isNotEmpty()) ValidationMessage(
                         "수정 필요 ${state.reviewFieldErrors.size}개 · 다음 확인 항목에서 오류를 해결하세요", CollectorStatusKind.ERROR)
@@ -257,9 +268,11 @@ fun ReviewWorkspace(
                         onConfirmSubmit = onConfirmSubmit,
                         onRetryArchive = onRetryArchive,
                         onRetryRevision = onRetryRevision,
+                        compact = compact,
                     )
                 }
             }
+          }
         }
     }
 }
@@ -308,6 +321,7 @@ fun ReviewHeader(
     onDeveloperInfoVisibleChanged: (Boolean) -> Unit,
     onNextReviewItem: () -> Unit = {},
     hasReviewItems: Boolean = false,
+    compact: Boolean = false,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -323,7 +337,7 @@ fun ReviewHeader(
                 }
             }
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (!compact) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             val conflicts = state.envelope?.let { LinkedProductReview.facts(it).count { fact -> fact.status == ProductFactStatus.CONFLICT } } ?: 0
             Text("충돌 $conflicts · 입력 오류 ${state.reviewFieldErrors.size} · 미적용 ${state.reviewDrafts.size}",
                 Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
@@ -475,12 +489,7 @@ fun DestinationStatus(badge: ReviewDestinationBadge) {
         "CashOS" -> "CO"
         else -> "FT"
     }
-    val status = when (badge.status) {
-        ReviewDestinationStatus.PLANNED -> "전송 예정"
-        ReviewDestinationStatus.UNSELECTED -> "선택 해제"
-        ReviewDestinationStatus.CONDITION_UNMET -> "조건 미충족"
-        ReviewDestinationStatus.NOT_APPLICABLE -> "대상 아님"
-    }
+    val status = reviewDestinationLabel(badge)
     Surface(
         modifier = Modifier.semantics {
             contentDescription = "$destination, $status${badge.reason?.let { ", 이유: $it" }.orEmpty()}"
@@ -511,7 +520,7 @@ internal fun canonicalReviewFieldGroups(envelope: YeonsikOcrEnvelope): Canonical
         when {
             productIndex >= 0 -> field.copy(label = if (envelope.productCandidates.size == 1) "상품명" else "상품 ${productIndex + 1} · 상품명")
             labelIndex >= 0 -> field.copy(label = if (labels.size == 1) "라벨 상품명" else "영양 라벨 ${labelIndex + 1} · 상품명")
-            else -> field
+            else -> reviewerField(field, envelope)
         }
     }
     return CanonicalReviewFieldGroups(
@@ -574,7 +583,7 @@ private fun EditableCanonicalSection(
                 ReviewTarget("conflict:${fact.productClientKey}:${fact.field}") { ProductFactConflict(fact, busy, onEdit) }
             }
         }
-        CategorizedReviewFields(fields.filterNot { ".option_items[" in it.path }) { field ->
+        CategorizedReviewFields(fields.filterNot { ".option_items[" in it.path }, fieldErrors.keys) { field ->
                 AccessibleField(field, CanonicalFieldRegistry.isModified(field, edits),
                     edits.firstOrNull { it.fieldPath == field.path }?.previousValue, fieldErrors[field.path], busy,
                     onApply = { value -> onEdit { it.updateField(field.path, value) } })
@@ -583,7 +592,7 @@ private fun EditableCanonicalSection(
         if (emptyOptional.isNotEmpty()) {
             CollectorButton(if (showEmptyOptionalFields) "빈 선택 항목 접기" else "비어 있는 선택 항목 ${emptyOptional.size}개 보기",
                 { showEmptyOptionalFields = !showEmptyOptionalFields }, enabled = !busy, emphasized = false)
-            if (showEmptyOptionalFields) CategorizedReviewFields(emptyOptional.filterNot { ".option_items[" in it.path }) { field ->
+            if (showEmptyOptionalFields) CategorizedReviewFields(emptyOptional.filterNot { ".option_items[" in it.path }, fieldErrors.keys) { field ->
                     AccessibleField(field, CanonicalFieldRegistry.isModified(field, edits),
                         edits.firstOrNull { it.fieldPath == field.path }?.previousValue, fieldErrors[field.path], busy,
                         onApply = { value -> onEdit { it.updateField(field.path, value) } })
@@ -812,6 +821,7 @@ internal fun DestinationSection(
         } else {
             groups.forEach { (destination, group) ->
                 val keys = group.map { it.projection }.toSet()
+                val pendingKeys = group.filter { it.status != ProjectionStatus.UPLOADED }.map { it.projection }.toSet()
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = CollectorTokens.panelShape,
@@ -824,9 +834,9 @@ internal fun DestinationSection(
                         horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2),
                     ) {
                         Checkbox(
-                            checked = keys.all { it in selectedProjections },
-                            onCheckedChange = { checked -> keys.filter { (it in selectedProjections) != checked }.forEach(onProjectionSelected) },
-                            enabled = !busy,
+                            checked = pendingKeys.isEmpty() || pendingKeys.all { it in selectedProjections },
+                            onCheckedChange = { checked -> pendingKeys.filter { (it in selectedProjections) != checked }.forEach(onProjectionSelected) },
+                            enabled = !busy && pendingKeys.isNotEmpty(),
                             modifier = Modifier.collectorFocusOutline(),
                         )
                         Column(Modifier.weight(1f)) {
@@ -862,6 +872,7 @@ internal fun ConfirmAndSubmitSection(
     onConfirmSubmit: () -> Unit,
     onRetryArchive: () -> Unit,
     onRetryRevision: () -> Unit,
+    compact: Boolean = false,
 ) {
     val verified = state.session?.let { it.verifiedCanonicalFingerprint == it.canonicalFingerprint } == true
     val verificationRecorded = state.bundleMetadata?.verificationEventRecorded != false
@@ -875,7 +886,20 @@ internal fun ConfirmAndSubmitSection(
                 state.bundleMetadata?.revisionArchiveStatus == DesktopCanonicalRevisionArchiveStatus.FAILED)) {
             CollectorButton("수정본 보관 다시 시도", onRetryRevision, modifier = Modifier.fillMaxWidth())
         }
-        if (state.bundleMetadata == null) {
+        if (state.bundleMetadata == null && compact) {
+            var basisMenu by remember { mutableStateOf(false) }
+            androidx.compose.foundation.layout.Box {
+                androidx.compose.material3.TextButton({ basisMenu = true }, enabled = !busy && !verified) {
+                    Text("검수 기준: ${DesktopUiLabels.verificationBasis(verificationBasis)}${if (verified) "" else " · 변경"}", style = MaterialTheme.typography.labelSmall)
+                }
+                androidx.compose.material3.DropdownMenu(basisMenu, { basisMenu = false }) {
+                    VerificationBasis.entries.forEach { basis ->
+                        androidx.compose.material3.DropdownMenuItem(text = { Text(DesktopUiLabels.verificationBasis(basis)) },
+                            onClick = { onVerificationBasisSelected(basis); basisMenu = false })
+                    }
+                }
+            }
+        } else if (state.bundleMetadata == null) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
                 VerificationBasis.entries.forEach { basis ->
                     CollectorButton(
@@ -904,12 +928,16 @@ internal fun ConfirmAndSubmitSection(
                 contentDescription = if (verified && verificationRecorded) "검수 확정 완료" else "검수 완료 · 확정하기. 원본과 값을 확인했음을 기록합니다. 아직 전송하지 않습니다.",
             )
             CollectorButton(
-                label = if (state.session?.projections?.any { it.projection in selectedProjections && it.status == ProjectionStatus.FAILED } == true) "선택한 실패 항목 다시 보내기" else "선택한 곳에 보내기",
+                label = when {
+                    deliveryStates(state).let { it.isNotEmpty() && it.all { p -> p.status == ProjectionStatus.UPLOADED } } -> "전송 완료"
+                    state.session?.projections?.any { it.projection in selectedProjections && it.status == ProjectionStatus.FAILED } == true -> "선택한 실패 항목 다시 보내기"
+                    else -> "선택한 곳에 보내기"
+                },
                 onClick = onOpenSubmitConfirmation,
                 enabled = canSubmit,
                 emphasized = verified && verificationRecorded,
                 modifier = Modifier.weight(1f),
-                contentDescription = "전송 확인을 엽니다. 선택한 ${selectedProjections.map { it.destination() }.distinct().size}곳에 전송합니다.",
+                contentDescription = "미전송 대상 ${pendingDeliveryProjections(state, selectedProjections).map { it.destination() }.distinct().size}곳. 전송 확인을 엽니다.",
             )
         }
         if (submitConfirmationOpen) {
@@ -926,7 +954,7 @@ internal fun ConfirmAndSubmitSection(
                             "선택한 곳에 검수된 자료를 보냅니다. 필요한 선행 작업은 기존 처리 순서를 따르며, 이미 성공한 대상은 다시 보내지 않습니다.",
                             style = MaterialTheme.typography.bodyMedium,
                         )
-                        selectedProjections.groupBy { it.destination() }.forEach { (destination, projections) ->
+                        pendingDeliveryProjections(state, selectedProjections).groupBy { it.destination() }.forEach { (destination, projections) ->
                             Text("${destination.label} · ${destination.contentLabel(projections.toSet())}", style = MaterialTheme.typography.labelLarge)
                         }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
@@ -1063,8 +1091,9 @@ private fun deliveryStates(state: DesktopUiState) = state.session?.projections.o
 }
 
 private fun overallStatusKind(state: DesktopUiState): CollectorStatusKind = when {
-    state.error != null -> CollectorStatusKind.ERROR
+    state.error != null || state.draftSaveError != null -> CollectorStatusKind.ERROR
     state.busy -> CollectorStatusKind.PROCESSING
+    state.reviewDrafts.isNotEmpty() -> CollectorStatusKind.REVIEW
     deliveryStates(state).isNotEmpty() && deliveryStates(state).all { it.status == ProjectionStatus.UPLOADED } -> CollectorStatusKind.COMPLETE
     else -> CollectorStatusKind.REVIEW
 }
@@ -1073,7 +1102,7 @@ private fun overallStatusLabel(state: DesktopUiState, kind: CollectorStatusKind)
     CollectorStatusKind.COMPLETE -> "모든 활성 대상 전송 완료"
     CollectorStatusKind.ERROR -> "오류"
     CollectorStatusKind.PROCESSING -> "처리 중"
-    CollectorStatusKind.REVIEW -> if (state.session != null && state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint) "검수 확정 · 전송 조건 확인" else "검수 필요"
+    CollectorStatusKind.REVIEW -> if (state.reviewDrafts.isNotEmpty()) "변경사항 검수 필요" else if (state.session != null && state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint) "검수 확정 · 전송 조건 확인" else "검수 필요"
     CollectorStatusKind.NEUTRAL -> "대기"
 }
 

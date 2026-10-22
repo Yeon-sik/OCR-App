@@ -89,6 +89,7 @@ class DesktopReviewerUxTest {
     @Test fun minimumWindowRetainsFieldDraftAcrossSourceTabAndExposesBothActions() = withUiTest(800, 560) {
         val c = controller()
         show(c, 800, 560)
+        assertTrue("At least 220px for review content", compose.onNodeWithTag("review-scroll").fetchSemanticsNode().boundsInRoot.height >= 220f)
         compose.onNodeWithText("검수 완료 · 확정하기").assertIsDisplayed()
         compose.onNodeWithText("선택한 곳에 보내기").assertIsDisplayed()
         compose.onNode(hasSetTextAction() and hasText("Test cereal")).performTextReplacement("KEPT DRAFT")
@@ -111,7 +112,7 @@ class DesktopReviewerUxTest {
         assertEquals("invalid-number", c.state.value.reviewDrafts[field.path])
         compose.onNodeWithText("검수 완료 · 확정하기").assertIsNotEnabled()
         compose.onNodeWithText("다음 확인 항목").performClick()
-        compose.onNodeWithTag("review-target:${field.path}").assertIsFocused()
+        compose.onNode(hasSetTextAction() and hasAnyAncestor(hasTestTag("review-target:${field.path}"))).assertIsFocused()
         compose.onNodeWithText("변경 취소").performClick()
         compose.waitUntil(timeoutMillis = 5_000) { !c.state.value.busy && c.state.value.reviewDrafts.isEmpty() }
         assertTrue(c.state.value.reviewFieldErrors.isEmpty())

@@ -185,7 +185,13 @@ fun YeonsikCollectorApp(
                         batchCoordinator.syncActiveItem()
                         refreshRecent()
                     } }, controller::discardAllReviewDrafts),
-                LocalDesktopSourceValue provides { sourceContext = it + " · 정확한 위치 정보 없음" }) {
+                LocalDesktopSourceValue provides { sourceContext = it + " · 정확한 위치 정보 없음" },
+                LocalReviewFieldSource provides { path, value ->
+                    val ids = state.envelope?.let { reviewFieldSources(it, path) }.orEmpty()
+                    val match = state.evidence.firstOrNull { it.attachmentId in ids || it.pageId in ids }
+                    sourceContext = value + if (match == null) " · 연결된 원본 정보 없음 · 원본을 직접 선택해 대조하세요" else " · 연결 원본 · 정확한 위치 정보 없음"
+                    if (match != null) selectedEvidenceId = match.attachmentId
+                }) {
                 ReviewWorkspace(
                     state = state,
                     selectedProjections = effectiveSelectedProjections,
@@ -262,7 +268,7 @@ fun YeonsikCollectorApp(
                 selectedEvidenceId = selectedEvidenceId,
                 busy = anyBusy,
                 onTypeSelected = { evidenceType = it },
-                onEvidenceSelected = { selectedEvidenceId = it },
+                onEvidenceSelected = { selectedEvidenceId = it; sourceContext = "직접 선택한 원본 · 검수 항목과 대조하세요" },
                 onChooseEvidence = {
                     if (state.session != null && !anyBusy) {
                         NativeFileDialogs.chooseEvidence().takeIf { it.isNotEmpty() }?.let { paths ->

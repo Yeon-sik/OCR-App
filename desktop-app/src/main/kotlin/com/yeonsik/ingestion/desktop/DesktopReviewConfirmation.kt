@@ -25,6 +25,7 @@ internal fun removeInheritedBundleEdits(record: DesktopSessionRecord): DesktopSe
 internal fun reviewConfirmationBlocker(state: DesktopUiState, busy: Boolean, revisionReady: Boolean): String? = when {
     busy -> "처리 중입니다. 완료되면 검수를 확정할 수 있습니다."
     state.session == null -> "검토할 자료를 먼저 가져오세요."
+    state.draftSaveError != null -> state.draftSaveError
     state.reviewDrafts.isNotEmpty() -> "미적용 입력 ${state.reviewDrafts.size}개 · 적용하거나 입력을 취소하세요."
     state.bundleValidationStatus == DesktopBundleValidationStatus.INVALID ||
         state.bundleMetadata?.validationStatus == DesktopBundleValidationStatus.INVALID -> "번들 오류를 해결한 뒤 다시 가져오세요."

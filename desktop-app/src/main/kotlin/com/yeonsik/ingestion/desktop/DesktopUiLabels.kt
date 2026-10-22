@@ -101,3 +101,19 @@ internal fun deliveryProgressLabel(statuses: List<ProjectionStatus>): String {
     val active = statuses.filterNot { it == ProjectionStatus.DISABLED }
     return "전송 완료 ${active.count { it == ProjectionStatus.UPLOADED }}/${active.size} · 실패 ${active.count { it == ProjectionStatus.FAILED }} · 확인 필요 ${active.count { it == ProjectionStatus.BLOCKED }}"
 }
+
+internal fun reviewDestinationLabel(badge: com.pricetrace.receiptscanner.review.ReviewDestinationBadge): String {
+    val active = badge.projectionStatuses.filterNot { it == ProjectionStatus.DISABLED }
+    return when {
+        badge.status == com.pricetrace.receiptscanner.review.ReviewDestinationStatus.NOT_APPLICABLE -> badge.status.label
+        active.isNotEmpty() && active.all { it == ProjectionStatus.UPLOADED } -> "전송 완료"
+        active.any { it == ProjectionStatus.UPLOADED } -> "일부 완료 ${active.count { it == ProjectionStatus.UPLOADED }}/${active.size}"
+        active.any { it == ProjectionStatus.FAILED } -> "전송 실패 · 재시도 필요"
+        else -> badge.status.label
+    }
+}
+
+internal fun pendingDeliveryProjections(state: DesktopUiState, selected: Set<com.pricetrace.receiptscanner.ingestion.IngestionProjection>) =
+    state.session?.projections.orEmpty().filter { it.projection in selected && it.status != ProjectionStatus.UPLOADED &&
+        it.projection in state.envelope?.let(com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner::deliveryProjections).orEmpty() }
+        .map { it.projection }.toSet()

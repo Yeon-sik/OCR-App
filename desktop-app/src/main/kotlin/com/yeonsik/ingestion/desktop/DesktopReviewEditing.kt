@@ -10,6 +10,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.testTag
 import com.pricetrace.receiptscanner.review.CanonicalReviewController
 import com.pricetrace.receiptscanner.review.CanonicalEditableField
@@ -52,17 +53,18 @@ internal class ReviewNavigation {
 internal val LocalReviewNavigation = staticCompositionLocalOf<ReviewNavigation?> { null }
 
 @Composable
-internal fun ReviewTarget(path: String, content: @Composable ColumnScope.() -> Unit) {
+internal fun ReviewTarget(path: String, inputFocus: FocusRequester? = null, onFocused: () -> Unit = {}, content: @Composable ColumnScope.() -> Unit) {
     val navigation = LocalReviewNavigation.current
     val bringIntoView = remember { BringIntoViewRequester() }
     val focus = remember { FocusRequester() }
     LaunchedEffect(navigation?.requestNumber) {
         if (navigation?.requestedPath == path) {
             bringIntoView.bringIntoView()
-            focus.requestFocus()
+            (inputFocus ?: focus).requestFocus()
         }
     }
     Column(Modifier.fillMaxWidth().testTag("review-target:$path")
-        .bringIntoViewRequester(bringIntoView).focusRequester(focus).collectorFocusOutline().focusable(),
+        .bringIntoViewRequester(bringIntoView).onFocusChanged { if (it.hasFocus) onFocused() }
+        .focusRequester(focus).collectorFocusOutline().focusable(),
         content = content)
 }

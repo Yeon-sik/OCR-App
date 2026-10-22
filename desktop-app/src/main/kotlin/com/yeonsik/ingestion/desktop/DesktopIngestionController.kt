@@ -76,6 +76,8 @@ data class DesktopUiState(
     val reviewFieldErrors: Map<String, String> = emptyMap(),
     /** Unapplied editor text is not canonical data and must block approval and delivery. */
     val reviewDrafts: Map<String, String> = emptyMap(),
+    val draftSaveError: String? = null,
+    val draftRestoreNotice: String? = null,
     val error: String? = null,
     val notice: String? = null,
     val busy: Boolean = false,
@@ -97,36 +99,73 @@ class DesktopIngestionController(
     )
     private var structuredReviewController: CanonicalReviewController? = null
     private val reviewDraftsBySession = java.util.concurrent.ConcurrentHashMap<String, Map<String, String>>()
+    internal var draftStore = DesktopReviewDraftStore(store.directory.resolve("drafts"))
+    private val draftFingerprints = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val draftSaveErrors = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val draftReadErrors = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private fun saveDrafts(state: DesktopUiState) {
+        val id = state.ingestionId ?: return
+        val fingerprint = state.session?.canonicalFingerprint ?: return
+        draftFingerprints[id] = fingerprint
+        try {
+            draftStore.save(id, fingerprint, state.reviewDrafts)
+            draftSaveErrors.remove(id)
+        } catch (_: Exception) {
+            draftSaveErrors[id] = "초안을 저장하지 못했습니다. 저장 공간과 폴더 권한을 확인한 뒤 다시 시도하세요."
+        }
+        _state.value = _state.value.copy(draftSaveError = draftSaveErrors[id])
+    }
+
+    /** Synchronous atomic writes finish before closing; errors keep the window open. */
+    fun flushReviewDrafts(): Boolean {
+        reviewDraftsBySession.forEach { (id, values) ->
+            try {
+                draftStore.save(id, draftFingerprints.getValue(id), values)
+                draftSaveErrors.remove(id)
+            } catch (_: Exception) { draftSaveErrors[id] = "초안 저장에 실패했습니다. 앱을 열어 둔 채 다시 시도하세요." }
+        }
+        val currentId = _state.value.ingestionId
+        _state.value = _state.value.copy(draftSaveError = currentId?.let { draftReadErrors[it] ?: draftSaveErrors[it] }
+            ?: draftSaveErrors.values.firstOrNull())
+        return draftSaveErrors.isEmpty()
+    }
 
     fun updateReviewDraft(path: String, value: String) {
         val current = _state.value
         if (current.busy) return
         val id = current.ingestionId ?: return
+        if (current.draftSaveError != null && !reviewDraftsBySession.containsKey(id)) return
         val original = current.envelope?.let { com.pricetrace.receiptscanner.review.CanonicalFieldRegistry.value(it, path) }.orEmpty()
         val drafts = if (value == original) current.reviewDrafts - path else current.reviewDrafts + (path to value)
         reviewDraftsBySession[id] = drafts
         _state.value = current.copy(reviewDrafts = drafts)
+        saveDrafts(_state.value)
     }
 
     fun discardReviewDraft(path: String) {
         val current = _state.value
         if (current.busy) return
         val id = current.ingestionId ?: return
+        if (draftReadErrors.containsKey(id)) return
         val drafts = current.reviewDrafts - path
         reviewDraftsBySession[id] = drafts
         val errors = current.reviewFieldErrors - path
         structuredReviewController = null
         _state.value = current.copy(reviewDrafts = drafts, reviewFieldErrors = errors,
             error = errors.values.distinct().joinToString(", ").takeIf { it.isNotEmpty() })
+        saveDrafts(_state.value)
     }
 
     fun discardAllReviewDrafts() {
         val current = _state.value
         if (current.busy) return
         val id = current.ingestionId ?: return
+        if (draftReadErrors.containsKey(id)) return
         reviewDraftsBySession[id] = emptyMap()
         structuredReviewController = null
-        _state.value = current.copy(reviewDrafts = emptyMap(), reviewFieldErrors = emptyMap(), error = null)
+        _state.value = current.copy(reviewDrafts = emptyMap(), reviewFieldErrors = emptyMap(), error = null, draftRestoreNotice = null)
+        saveDrafts(_state.value)
     }
 
     suspend fun applyAllReviewDrafts() {
@@ -152,6 +191,7 @@ class DesktopIngestionController(
                 val remaining = current.reviewDrafts.filter { (path, value) -> original.reviewDrafts[path] != value }
                 reviewDraftsBySession[requireNotNull(current.ingestionId)] = remaining
                 _state.value = current.copy(reviewDrafts = remaining)
+                saveDrafts(_state.value)
             }
         }
     }
@@ -197,7 +237,8 @@ class DesktopIngestionController(
 
     /** Restores a persisted session at launch without turning an empty Inbox into an error. */
     suspend fun restoreLatestIfAvailable(): Boolean {
-        val record = store.latestRecord() ?: return false
+        val draftId = runCatching { draftStore.latestSessionId() }.getOrNull()
+        val record = draftId?.let(store::loadRecord) ?: store.latestRecord() ?: return false
         beginBusy()
         return try {
             loadRecord(record, "최근 로컬 수집을 불러왔습니다.")
@@ -742,6 +783,7 @@ class DesktopIngestionController(
         beginBusy()
         try {
             val currentState = _state.value
+            require(currentState.draftSaveError == null) { currentState.draftSaveError.orEmpty() }
             require(currentState.reviewDrafts.isEmpty()) { "미적용 수정값을 적용하거나 입력을 취소한 뒤 검수를 확정하세요." }
             require(currentState.reviewFieldErrors.isEmpty()) { "옵션·필드 편집 오류를 해결한 뒤 검수를 확정하세요." }
             val currentSession = currentState.session ?: error("검수하려면 JSON을 먼저 가져오세요.")
@@ -840,6 +882,7 @@ class DesktopIngestionController(
         beginBusy()
         try {
             val currentState = _state.value
+            require(currentState.draftSaveError == null) { currentState.draftSaveError.orEmpty() }
             require(currentState.reviewFieldErrors.isEmpty()) { "옵션·필드 편집 오류를 해결한 뒤 전송하세요." }
             require(currentState.reviewDrafts.isEmpty()) { "미적용 수정값을 적용하거나 입력을 취소한 뒤 전송하세요." }
             require(currentState.bundleValidationStatus != DesktopBundleValidationStatus.INVALID) { "번들이 유효하지 않습니다." }
@@ -871,6 +914,10 @@ class DesktopIngestionController(
                 selectedProjections.intersect(plan.eligible)
             }
             if (selected.isEmpty()) error("전송할 수 있는 대상이 선택되지 않았습니다.")
+            if (session.projections.filter { it.projection in selected }.let { it.isNotEmpty() && it.all { p -> p.status == ProjectionStatus.UPLOADED } }) {
+                _state.value = currentState.copy(notice = "선택한 대상은 모두 전송 완료되었습니다.", error = null)
+                return
+            }
             val authenticationTargets = selected + selected.flatMap { plan.dependencies[it].orEmpty() }
             val authenticationErrors = bundle.ensureAuthenticated(authenticationTargets, envelope)
             if (authenticationErrors.isNotEmpty()) {
@@ -1074,6 +1121,22 @@ class DesktopIngestionController(
         reviewEdits: List<CanonicalReviewEdit> = _state.value.takeIf { it.ingestionId == session.ingestionId }?.reviewEdits.orEmpty(),
         reviewFieldErrors: Map<String, String> = emptyMap(),
     ) {
+        var draftRestoreNotice = _state.value.takeIf { it.ingestionId == session.ingestionId }?.draftRestoreNotice
+        var draftReadError: String? = null
+        if (!reviewDraftsBySession.containsKey(session.ingestionId)) {
+            try {
+                val saved = draftStore.load(session.ingestionId)
+                draftReadErrors.remove(session.ingestionId)
+                reviewDraftsBySession[session.ingestionId] = saved?.values.orEmpty()
+                draftFingerprints[session.ingestionId] = saved?.fingerprint ?: session.canonicalFingerprint
+                if (!saved?.values.isNullOrEmpty()) draftRestoreNotice =
+                    if (saved.fingerprint == session.canonicalFingerprint) "저장된 초안 ${saved.values.size}개를 복원했습니다. 확인 후 모두 적용하세요."
+                    else "저장된 자료가 변경되었습니다. 복원한 초안을 원본과 대조한 뒤 적용하거나 취소하세요."
+            } catch (_: Exception) {
+                draftReadError = "저장된 초안을 읽지 못했습니다. 초안 파일을 보존했습니다. 복구 후 다시 여세요."
+                draftReadErrors[session.ingestionId] = draftReadError
+            }
+        }
         _state.value = DesktopUiState(
             rawJson = rawJson,
             canonicalJson = canonicalJson,
@@ -1089,6 +1152,8 @@ class DesktopIngestionController(
             reviewEdits = reviewEdits,
             reviewFieldErrors = reviewFieldErrors,
             reviewDrafts = reviewDraftsBySession[session.ingestionId].orEmpty(),
+            draftSaveError = draftReadError ?: draftSaveErrors[session.ingestionId],
+            draftRestoreNotice = draftRestoreNotice,
             error = error,
             notice = notice,
             busy = true,
