@@ -21,6 +21,20 @@ import org.junit.Test
 import java.nio.file.Files
 
 class DesktopSessionStoreTest {
+    @Test fun `brand sidecar survives restart and old session defaults empty without changing canonical`() = runBlocking {
+        val directory=Files.createTempDirectory("brand-sidecar")
+        val draft=com.pricetrace.receiptscanner.ingestion.ProductBrandResolutionDraft("p",com.pricetrace.receiptscanner.ingestion.ProductBrandFactField.BRAND,"Observed",
+            com.pricetrace.receiptscanner.ingestion.ProductBrandSelectionIntent.SELECTED,"00000000-0000-4000-8000-000000000001","Canonical")
+        val session=sampleSession().copy(brandResolutionDrafts=listOf(draft))
+        DesktopSessionStore(directory).saveRecord(DesktopSessionRecord(session,"{}","{\"brand\":\"Observed\"}",emptyList()))
+        val restored=requireNotNull(DesktopSessionStore(directory).loadRecord(session.ingestionId))
+        assertEquals(listOf(draft),restored.session.brandResolutionDrafts)
+        assertFalse(restored.canonicalJson.contains(draft.brandId!!))
+        val file=directory.resolve("desktop-test.json")
+        val root=Json.parseToJsonElement(Files.readString(file)).jsonObject
+        Files.writeString(file,JsonObject(root+("session" to JsonObject(root.getValue("session").jsonObject-"brand_resolution_drafts"))).toString())
+        assertTrue(requireNotNull(DesktopSessionStore(directory).loadRecord(session.ingestionId)).session.brandResolutionDrafts.isEmpty())
+    }
     @Test fun `resolver selections survive file store restart outside canonical`() = runBlocking {
         val directory = Files.createTempDirectory("yeonsik-identity-restart")
         val id = "00000000-0000-4000-8000-000000000021"

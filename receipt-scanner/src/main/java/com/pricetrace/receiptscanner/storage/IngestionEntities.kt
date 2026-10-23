@@ -31,6 +31,7 @@ internal data class IngestionSessionEntity(
     @ColumnInfo(name = "verified_artifact_fingerprints_json") val verifiedArtifactFingerprintsJson: String = "{}",
     @ColumnInfo(name = "import_fingerprint") val importFingerprint: String?,
     @ColumnInfo(name = "bundle_fingerprint") val bundleFingerprint: String? = null,
+    @ColumnInfo(name = "brand_resolution_drafts_json", defaultValue = "'[]'") val brandResolutionDraftsJson: String = "[]",
 )
 
 @Entity(tableName = "ingestion_projections", primaryKeys = ["ingestion_id", "projection"], indices = [Index("status")])
@@ -78,6 +79,7 @@ internal fun IngestionSessionEntity.toDomain(
     verifiedArtifactFingerprints = decodeArtifactFingerprints(verifiedArtifactFingerprintsJson),
     importFingerprint = importFingerprint ?: canonicalFingerprint,
     bundleFingerprint = bundleFingerprint,
+    brandResolutionDrafts = com.pricetrace.receiptscanner.ingestion.ProductBrandResolutionJson.decode(brandResolutionDraftsJson),
 )
 
 internal fun IngestionProjectionEntity.toDomain() = ProjectionState(
@@ -127,6 +129,7 @@ internal fun IngestionSession.toEntity() = IngestionSessionEntity(
     verifiedArtifactFingerprintsJson = encodeArtifactFingerprints(verifiedArtifactFingerprints),
     importFingerprint = importFingerprint,
     bundleFingerprint = bundleFingerprint,
+    brandResolutionDraftsJson = com.pricetrace.receiptscanner.ingestion.ProductBrandResolutionJson.encode(brandResolutionDrafts),
 )
 
 private fun encodeArtifactFingerprints(value: Map<String, String>): String =

@@ -91,6 +91,20 @@ class DesktopIngestionController(
 ) {
     private val _state = MutableStateFlow(DesktopUiState())
     val state: StateFlow<DesktopUiState> = _state.asStateFlow()
+    fun isProductBrandSearchConfigured()=bundle.priceTraceCanonicalGateway.isBrandSearchConfigured()
+    suspend fun searchProductBrands(query: String)=bundle.priceTraceCanonicalGateway.searchBrands(query)
+    suspend fun selectProductBrand(draft: com.pricetrace.receiptscanner.ingestion.ProductBrandResolutionDraft) {
+        beginBusy()
+        try {
+            val current=_state.value
+            require(current.reviewFieldErrors.isEmpty() && current.reviewDrafts.isEmpty()) { "관측값 수정을 먼저 적용하세요." }
+            val session=requireNotNull(current.session)
+            val saved=useCase.setProductBrandResolution(session.ingestionId,currentEnvelope(),draft)
+            persistRecord(saved,current.rawJson,current.canonicalJson,current.evidence)
+            _state.value=current.copy(session=saved,notice="브랜드 연결 선택을 저장했습니다. 제출 시 PriceTrace에 반영됩니다.",error=null)
+        } catch(error: Exception) { _state.value=_state.value.copy(error=error.message,notice=null) }
+        finally { endBusy() }
+    }
 
     private val useCase = CanonicalIngestionUseCase(
         store = store,

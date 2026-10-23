@@ -1322,4 +1322,6 @@ data class IngestionSession(
     val importFingerprint: String = canonicalFingerprint,
     /** Non-null only for a .yeonsik bundle; separates identical canonical JSON with different evidence. */
     val bundleFingerprint: String? = null,
+    /** Local workflow sidecar. Never encoded in the canonical source envelope. */
+    val brandResolutionDrafts: List<ProductBrandResolutionDraft> = emptyList(),
 )

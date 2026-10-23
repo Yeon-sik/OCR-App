@@ -354,6 +354,7 @@ class DesktopSessionStore(
     }
 
     private fun encodeSession(session: IngestionSession): JsonObject = buildJsonObject {
+        put("brand_resolution_drafts", Json.parseToJsonElement(com.pricetrace.receiptscanner.ingestion.ProductBrandResolutionJson.encode(session.brandResolutionDrafts)))
         put("ingestion_id", JsonPrimitive(session.ingestionId))
         put("local_document_id", JsonPrimitive(session.localDocumentId))
         put("envelope_storage_key", JsonPrimitive(session.envelopeStorageKey))
@@ -375,6 +376,7 @@ class DesktopSessionStore(
     }
 
     private fun decodeSession(root: JsonObject): IngestionSession = IngestionSession(
+        brandResolutionDrafts = com.pricetrace.receiptscanner.ingestion.ProductBrandResolutionJson.decode(root["brand_resolution_drafts"]?.toString() ?: "[]"),
         ingestionId = root.string("ingestion_id"),
         localDocumentId = root.string("local_document_id"),
         envelopeStorageKey = root.string("envelope_storage_key"),

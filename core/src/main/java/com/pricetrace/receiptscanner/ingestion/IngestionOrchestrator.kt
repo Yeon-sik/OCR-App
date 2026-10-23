@@ -54,6 +54,7 @@ data class ProjectionRequest(
     val recoverCanonicalImport: Boolean = false,
     /** Set by Core only after the receipt artifact matches its durable local approval. */
     val receiptUserVerified: Boolean = false,
+    val brandResolutionDrafts: List<ProductBrandResolutionDraft> = emptyList(),
 )
 
 sealed interface ProjectionSubmission {
@@ -179,6 +180,20 @@ class IngestionOrchestrator(
     private val submitters: Map<IngestionProjection, IngestionProjectionSubmitter>,
     private val now: () -> String = { OffsetDateTime.now().toString() },
 ) {
+    suspend fun setProductBrandResolution(ingestionId: String, envelope: YeonsikOcrEnvelope, draft: ProductBrandResolutionDraft): IngestionSession {
+        val session = requireNotNull(store.get(ingestionId))
+        require(session.canonicalFingerprint == fingerprint(envelope)) { "brand_resolution_source_revision_changed" }
+        require(envelope.productCandidates.any(draft::matches)) { "stale_brand_resolution_draft" }
+        val drafts = currentBrandDrafts(session.brandResolutionDrafts,envelope.productCandidates)
+            .filterNot { it.productClientKey==draft.productClientKey && it.sourceField==draft.sourceField } + draft
+        val updated=session.copy(brandResolutionDrafts=drafts,updatedAt=now(),projections=session.projections.map { state ->
+            if(state.projection==IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE && state.status!=ProjectionStatus.DISABLED)
+                state.copy(status=ProjectionStatus.PENDING,lastError=null,updatedAt=now()) else state
+        })
+        store.save(updated)
+        return updated
+    }
+
     suspend fun start(
         ingestionId: String,
         localDocumentId: String,
@@ -562,6 +577,7 @@ class IngestionOrchestrator(
                 it.acceptedReceiptFactsFingerprint == acceptedReceiptFactsFingerprint(it.projection, envelope)
         }
         val revised = current.copy(
+            brandResolutionDrafts = currentBrandDrafts(current.brandResolutionDrafts, envelope.productCandidates),
             canonicalFingerprint = nextFingerprint,
             revisionSeq = current.revisionSeq + 1,
             reviewStatus = IngestionReviewStatus.NEEDS_REVIEW,
@@ -979,6 +995,7 @@ class IngestionOrchestrator(
                         PurchaseNutritionIdentity.sourceAccepted(envelope, it.metadataJson))) }
                 .associate { it.projection to it.metadataJson!! },
             previousMetadataJson = current.metadataJson,
+            brandResolutionDrafts = currentBrandDrafts(session.brandResolutionDrafts,envelope.productCandidates),
             recoverCanonicalImport = projection == IngestionProjection.FITNESS_NUTRITION &&
                 diningOutItems(envelope).isNotEmpty() && current.completionContractVersion == 0 &&
                 (current.metadataJson != null || current.remoteId != null),
@@ -2253,6 +2270,7 @@ class IngestionOrchestrator(
         val preserved = session.verifiedArtifactFingerprints.filter { (key, value) -> nextArtifacts[key] == value }
         val affectedArtifactKeys = changedArtifactKeys(session.verifiedArtifactFingerprints, nextArtifacts)
         val updated = session.copy(
+            brandResolutionDrafts = currentBrandDrafts(session.brandResolutionDrafts,envelope.productCandidates),
             reviewStatus = IngestionReviewStatus.NEEDS_REVIEW,
             verifiedCanonicalFingerprint = null,
             verifiedAt = null,

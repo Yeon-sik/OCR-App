@@ -199,6 +199,7 @@ data class ReceiptAppUiState(
     val merchantCandidateId: String? = null,
     val merchantCandidateLastError: String? = null,
     val productCandidates: List<ProductCandidate> = emptyList(),
+    val productBrandResolutionDrafts: List<com.pricetrace.receiptscanner.ingestion.ProductBrandResolutionDraft> = emptyList(),
     val productCandidateVerifiedKeys: Set<String> = emptySet(),
     val isSubmittingProductCandidates: Boolean = false,
     val productCandidateId: String? = null,
@@ -855,6 +856,29 @@ class ReceiptAppViewModel(
     fun updateProductReviewField(path: String, value: String?) =
         runProductFactEdit { it.updateField(path, value) }
 
+    fun isProductBrandSearchConfigured() = container.priceTraceCanonicalGateway.isBrandSearchConfigured()
+    suspend fun searchProductBrands(query: String) = container.priceTraceCanonicalGateway.searchBrands(query)
+    fun selectProductBrand(draft: com.pricetrace.receiptscanner.ingestion.ProductBrandResolutionDraft) {
+        val canonicalMode=mutableUiState.value.screen==AppScreen.CANONICAL_JSON_VALIDATOR
+        val canonicalBefore=mutableCanonicalJsonValidatorState.value
+        val documentId=if(canonicalMode) canonicalBefore.localDocumentId else mutableUiState.value.currentDocumentId
+        if(documentId==null || mutableUiState.value.isProductReviewEditing || mutableUiState.value.isSubmittingProductCandidates || canonicalBefore.busy) return
+        mutableUiState.value=mutableUiState.value.copy(isProductReviewEditing=true)
+        viewModelScope.launch {
+            try { canonicalRevisionMutex.withLock {
+                val envelope=if(canonicalMode) requireNotNull(canonicalBefore.envelope) else requireNotNull(loadIngestionEnvelope(documentId))
+                val id=if(canonicalMode) requireNotNull(canonicalBefore.session).ingestionId else ingestionIdFor(documentId)
+                val saved=ingestionOrchestrator.setProductBrandResolution(id,envelope,draft)
+                if(canonicalMode && mutableCanonicalJsonValidatorState.value.session?.ingestionId==id)
+                    mutableCanonicalJsonValidatorState.value=mutableCanonicalJsonValidatorState.value.copy(session=saved,notice="브랜드 연결 선택을 저장했습니다. 제출 시 PriceTrace에 반영됩니다.")
+                if(!canonicalMode && mutableUiState.value.currentDocumentId==documentId)
+                    mutableUiState.value=mutableUiState.value.copy(productBrandResolutionDrafts=saved.brandResolutionDrafts,productCandidateId=null,productCandidateLastError=null)
+            } } catch(cancelled: CancellationException) { throw cancelled }
+            catch(error: Exception) { mutableUiState.value=mutableUiState.value.copy(message=error.message ?: "브랜드 연결 저장 실패") }
+            finally { mutableUiState.value=mutableUiState.value.copy(isProductReviewEditing=false) }
+        }
+    }
+
     fun resolveProductFact(key: String, field: ProductFactField, value: String?) =
         runProductFactEdit { it.resolveLinkedProductFact(key, field, value) }
 
@@ -899,6 +923,8 @@ class ReceiptAppViewModel(
                         .singleOrNull { if (selectedKey != null) it.clientKey == selectedKey else it.draft.documentId == selectedDraftId }?.draft
                     mutableUiState.value = mutableUiState.value.copy(
                         productCandidates = edited.productCandidates,
+                        productBrandResolutionDrafts = latestSession?.brandResolutionDrafts.orEmpty(),
+                        productCandidateId = null,
                         canonicalNutritionArtifacts = edited.nutrition,
                         nutritionDraft = selectedDraft ?: mutableUiState.value.nutritionDraft,
                         nutritionValidationErrors = selectedDraft?.let { NutritionLabelValidator.validate(it).errors }
@@ -1214,9 +1240,10 @@ class ReceiptAppViewModel(
                 screen = AppScreen.PRODUCT_CANDIDATE_REVIEW,
                 currentDocumentId = documentId,
                 productCandidates = envelope.productCandidates,
+                productBrandResolutionDrafts = ingestionSession?.brandResolutionDrafts.orEmpty(),
                 productCandidateVerifiedKeys = verifiedKeys,
                 isSubmittingProductCandidates = false,
-                productCandidateId = projection?.remoteId,
+                productCandidateId = projection?.takeIf { it.status == ProjectionStatus.UPLOADED }?.remoteId,
                 productCandidateLastError = projection?.lastError,
                 canonicalNutritionCount = envelope.nutrition.size,
                 canonicalNutritionArtifacts = envelope.nutrition,
@@ -2292,6 +2319,7 @@ class ReceiptAppViewModel(
                     isCanonicalIngestion = true,
                     canonicalNutritionReviewKey = productLabel.clientKey,
                     productCandidates = envelope.productCandidates,
+                    productBrandResolutionDrafts = ingestionSession?.brandResolutionDrafts.orEmpty(),
                     canonicalNutritionCount = envelope.nutrition.size,
                     canonicalNutritionArtifacts = envelope.nutrition,
                     canonicalNutritionVerifiedCount = verifiedCount,
@@ -2341,6 +2369,7 @@ class ReceiptAppViewModel(
                 screen = AppScreen.PRODUCT_CANDIDATE_REVIEW,
                 currentDocumentId = documentId,
                 productCandidates = envelope.productCandidates,
+                productBrandResolutionDrafts = ingestionSession?.brandResolutionDrafts.orEmpty(),
                 productCandidateVerifiedKeys = ingestionSession?.let { session ->
                     envelope.productCandidates
                         .filter {
@@ -2350,7 +2379,7 @@ class ReceiptAppViewModel(
                         .toSet()
                 }.orEmpty(),
                 isSubmittingProductCandidates = false,
-                productCandidateId = projection?.remoteId ?: state.productCandidateId,
+                productCandidateId = projection?.takeIf { it.status == ProjectionStatus.UPLOADED }?.remoteId ?: state.productCandidateId,
                 productCandidateLastError = projection?.lastError,
                 canonicalNutritionCount = envelope.nutrition.size,
                 canonicalNutritionArtifacts = envelope.nutrition,

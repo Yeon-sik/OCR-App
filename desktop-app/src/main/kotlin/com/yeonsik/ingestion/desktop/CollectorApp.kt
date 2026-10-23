@@ -193,6 +193,8 @@ fun YeonsikCollectorApp(
                     if (match != null) selectedEvidenceId = match.attachmentId
                 }) {
                 ReviewWorkspace(
+                    brandSearchConfigured=controller.isProductBrandSearchConfigured(),searchProductBrands=controller::searchProductBrands,
+                    onProductBrandChanged={ draft -> runIo { controller.selectProductBrand(draft); batchCoordinator.syncActiveItem(); refreshRecent() } },
                     state = state,
                     selectedProjections = effectiveSelectedProjections,
                     busy = anyBusy,

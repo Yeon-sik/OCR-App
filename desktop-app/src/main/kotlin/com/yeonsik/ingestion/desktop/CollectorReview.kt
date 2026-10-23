@@ -97,6 +97,9 @@ fun ReviewWorkspace(
     onImportJson: () -> Unit,
     onOwnerRestaurantSelected: (com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.OwnerRestaurantSelection) -> Unit = {},
     onPurchaseIdentityCommand: (com.pricetrace.receiptscanner.ingestion.PurchaseIdentityCommand) -> Unit = {},
+    brandSearchConfigured: Boolean = false,
+    searchProductBrands: suspend (String) -> List<com.pricetrace.receiptscanner.ingestion.PriceTraceBrandMatch> = { emptyList() },
+    onProductBrandChanged: (com.pricetrace.receiptscanner.ingestion.ProductBrandResolutionDraft) -> Unit = {},
 ) {
     Surface(
         modifier = Modifier.fillMaxSize().onPreviewKeyEvent { event ->
@@ -219,6 +222,8 @@ fun ReviewWorkspace(
                         busy = busy,
                         onEdit = onEdit,
                     )
+                    envelope.productCandidates.forEach { product -> ProductBrandResolutionEditor(product,
+                        state.session?.brandResolutionDrafts.orEmpty(),brandSearchConfigured,busy,searchProductBrands,onProductBrandChanged) }
                     val ownerMetadata = state.session?.projections?.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson
                     com.pricetrace.receiptscanner.ingestion.PurchaseIdentityReview.cards(envelope,ownerMetadata).forEach { card ->
                         PurchaseIdentityCard(card,canUseVerifiedSource && card.sourceSaved,onPurchaseIdentityCommand)

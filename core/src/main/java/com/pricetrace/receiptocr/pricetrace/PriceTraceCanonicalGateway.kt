@@ -37,6 +37,7 @@ import com.pricetrace.receiptscanner.ingestion.ProjectionRequest
 import com.pricetrace.receiptscanner.ingestion.ProjectionSubmission
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -66,6 +67,33 @@ class PriceTraceCanonicalGateway(
     private val store: PriceTraceSupabaseStore,
     private val transport: PriceObservationHttpTransport = HttpsPriceObservationHttpTransport(),
 ) {
+    fun isBrandSearchConfigured(): Boolean = store.read().isConnectionConfigured
+    suspend fun searchBrands(query: String): List<PriceTraceBrandMatch> = PriceTraceBrandClient(transport).search(store.read(), query)
+
+    suspend fun setProductBrandResolution(authorityKey: String, draft: ProductBrandResolutionDraft): PriceTraceCanonicalOutcome = readAcceptedResponse { config ->
+        val selected = if (draft.intent == ProductBrandSelectionIntent.CLEAR) null else requireNotNull(draft.brandId)
+        val response = PriceTraceBrandClient(transport).call(config,"set_product_candidate_brand_resolution_v1",buildJsonObject {
+            put("p_client_key",authorityKey); put("p_source_field",draft.sourceField.wire); put("p_observed_value",draft.observedValue.trim())
+            put("p_brand_id",selected?.let(::JsonPrimitive) ?: JsonNull); put("p_user_verified",true)
+        })
+        if (response.statusCode !in 200..299) return@readAcceptedResponse PriceTraceCanonicalOutcome.Failure(classify(response),response.body)
+        val row = json.parseToJsonElement(response.body).jsonObject
+        require(row.keys==setOf("product_client_key","request_fingerprint","source_field","observed_value","brand_id","cleared") &&
+            row["cleared"]?.jsonPrimitive?.booleanOrNull==(selected==null) && row["cleared"]?.jsonPrimitive?.isString==false) { "invalid_brand_resolution_mutation_shape" }
+        require(row["product_client_key"]?.jsonPrimitive?.contentOrNull==authorityKey &&
+            row["source_field"]?.jsonPrimitive?.contentOrNull==draft.sourceField.wire &&
+            row["observed_value"]?.jsonPrimitive?.contentOrNull==draft.observedValue.trim() &&
+            row["brand_id"]?.jsonPrimitive?.contentOrNull==selected &&
+            row["request_fingerprint"]?.jsonPrimitive?.contentOrNull?.matches(Regex("[0-9a-f]{64}"))==true) { "brand_resolution_response_mismatch" }
+        PriceTraceCanonicalOutcome.Success(row)
+    }
+
+    suspend fun readProductBrandResolutions(authorityKey: String, candidate: ProductCandidate): PriceTraceCanonicalOutcome = readAcceptedResponse { config ->
+        val response=PriceTraceBrandClient(transport).call(config,"get_product_candidate_brand_resolutions_v1",buildJsonObject { put("p_client_key",authorityKey) })
+        if(response.statusCode !in 200..299) return@readAcceptedResponse PriceTraceCanonicalOutcome.Failure(classify(response),response.body)
+        PriceTraceCanonicalOutcome.Success(buildJsonObject { put("rows",JsonArray(PriceTraceBrandClient.parseResolutions(response.body,authorityKey,candidate))) })
+    }
+
     /** Reads PT's saved response without reconstructing or submitting legacy receipt facts. */
     suspend fun readAcceptedReceiptResponse(receiptId: String): PriceTraceCanonicalOutcome =
         readAcceptedResponse { config ->
@@ -451,30 +479,32 @@ class PriceTraceCanonicalGateway(
     suspend fun submitProductCandidates(
         idempotencyKey: String,
         candidates: List<ProductCandidate>,
+        acceptedAuthorityKeys: Map<String,String> = emptyMap(),
     ): PriceTraceCanonicalOutcome {
         val initial = store.read()
         if (!initial.isSignedIn) return PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
-        val first = submitProductCandidatesOnce(idempotencyKey, candidates, initial)
+        val first = submitProductCandidatesOnce(idempotencyKey, candidates, initial, acceptedAuthorityKeys)
         if (first !is PriceTraceCanonicalOutcome.Failure || first.kind != PriceObservationFailureKind.AUTHENTICATION) {
             return first
         }
         val refreshed = refresh(initial) ?: return first
-        return submitProductCandidatesOnce(idempotencyKey, candidates, refreshed)
+        return submitProductCandidatesOnce(idempotencyKey, candidates, refreshed, acceptedAuthorityKeys)
     }
 
     /** Publishes receipt-independent v3 price facts through PriceTrace's identity boundary. */
     suspend fun submitStandalonePriceObservations(
         idempotencyKey: String,
         envelope: YeonsikOcrEnvelope,
+        acceptedAuthorityKeys: Map<String,String> = emptyMap(),
     ): PriceTraceCanonicalOutcome {
         val initial = store.read()
         if (!initial.isSignedIn) return PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
-        val first = submitStandaloneOnce(idempotencyKey, envelope, initial)
+        val first = submitStandaloneOnce(idempotencyKey, envelope, initial, acceptedAuthorityKeys)
         if (first !is PriceTraceCanonicalOutcome.Failure || first.kind != PriceObservationFailureKind.AUTHENTICATION) {
             return first
         }
         val refreshed = refresh(initial) ?: return first
-        return submitStandaloneOnce(idempotencyKey, envelope, refreshed)
+        return submitStandaloneOnce(idempotencyKey, envelope, refreshed, acceptedAuthorityKeys)
     }
 
     /** Publishes one or more purchase records through PriceTrace's confirmed V4 RPC. */
@@ -482,6 +512,7 @@ class PriceTraceCanonicalGateway(
         idempotencyKey: String,
         envelope: YeonsikOcrEnvelope,
         contract: PriceTracePurchaseObservationV4Contract = PriceTracePurchaseObservationV4Contract(),
+        acceptedAuthorityKeys: Map<String,String> = emptyMap(),
     ): PriceTraceCanonicalOutcome {
         if (envelope.purchaseRecords.any { it.priceTraceSourceEligible } &&
             envelope.purchaseRecords.none { it.priceTraceSubmissionEligible }
@@ -494,14 +525,14 @@ class PriceTraceCanonicalGateway(
         }
         val initial = store.read()
         if (!initial.isSignedIn) return PriceTraceCanonicalOutcome.Failure(PriceObservationFailureKind.NOT_CONFIGURED)
-        val first = submitPurchaseV4Once(idempotencyKey, envelope, initial, contract)
+        val first = submitPurchaseV4Once(idempotencyKey, envelope, initial, contract, acceptedAuthorityKeys)
         if (first !is PriceTraceCanonicalOutcome.Failure ||
             first.kind != PriceObservationFailureKind.AUTHENTICATION
         ) {
             return first
         }
         val refreshed = refresh(initial) ?: return first
-        return submitPurchaseV4Once(idempotencyKey, envelope, refreshed, contract)
+        return submitPurchaseV4Once(idempotencyKey, envelope, refreshed, contract, acceptedAuthorityKeys)
     }
 
     /** Reads the exact PriceTrace product revision required by the cross-service link contract. */
@@ -749,14 +780,17 @@ class PriceTraceCanonicalGateway(
         idempotencyKey: String,
         candidates: List<ProductCandidate>,
         config: PriceTraceSupabaseConfig,
+        acceptedAuthorityKeys: Map<String,String>,
     ): PriceTraceCanonicalOutcome = try {
         require(candidates.isNotEmpty()) { "product_candidates_required" }
         val responses = mutableListOf<JsonObject>()
         candidates.forEach { candidate ->
-            val candidateKey = StableIds.sha256("$idempotencyKey|candidate=${candidate.clientKey}")
+            val revision = PriceTraceCandidatePayload.revision(candidate)
+            val authorityKey = acceptedAuthorityKeys[candidate.clientKey] ?: revision.authorityClientKey
+            val candidateKey = StableIds.sha256("$idempotencyKey|candidate=$authorityKey")
             val body = buildJsonObject {
                 put("p_idempotency_key", JsonPrimitive(candidateKey))
-                put("p_candidate", productCandidateJson(candidate))
+                put("p_candidate", PriceTraceCandidatePayload.wire(candidate, authorityKey))
             }.encode()
             // The RPC is a PriceTrace-owned contract. The OCR-App sends facts only;
             // CatalogProduct IDs and product revisions are accepted only from its response.
@@ -769,12 +803,24 @@ class PriceTraceCanonicalGateway(
                     response.body.takeIf(String::isNotBlank),
                 )
             }
-            responses += decodeResponse(response.body)
+            val decoded = decodeResponse(response.body)
+            listOf("clientKey", "productClientKey").forEach { field ->
+                if (field in decoded) {
+                    val echo = decoded[field] as? JsonPrimitive
+                    require(echo?.isString == true && echo.content == authorityKey) { "candidate_authority_echo_mismatch" }
+                }
+            }
+            responses += JsonObject(decoded + mapOf("clientKey" to JsonPrimitive(candidate.clientKey),
+                "productClientKey" to JsonPrimitive(candidate.clientKey),
+                "priceTraceAuthorityClientKey" to JsonPrimitive(authorityKey),
+                "sourceRevisionFingerprint" to JsonPrimitive(revision.sourceRevisionFingerprint)))
         }
         val products = candidates.zip(responses).mapNotNull { (candidate, response) ->
             response.requiredStringOrNull("catalogProductId", "catalog_product_id")?.let { catalogId ->
                 buildJsonObject {
                     put("clientKey", JsonPrimitive(candidate.clientKey))
+                    put("priceTraceAuthorityClientKey", response.getValue("priceTraceAuthorityClientKey"))
+                    put("sourceRevisionFingerprint", response.getValue("sourceRevisionFingerprint"))
                     put("catalogProductId", JsonPrimitive(catalogId))
                     put("productRevision", response["productRevision"] ?: response["product_revision"] ?: JsonNull)
                 }
@@ -800,6 +846,7 @@ class PriceTraceCanonicalGateway(
         idempotencyKey: String,
         envelope: YeonsikOcrEnvelope,
         config: PriceTraceSupabaseConfig,
+        acceptedAuthorityKeys: Map<String,String>,
     ): PriceTraceCanonicalOutcome = try {
         require(envelope.priceObservations.isNotEmpty()) { "standalone_price_observation_missing" }
         require(envelope.merchantCandidate != null) { "merchant_candidate_missing" }
@@ -816,7 +863,7 @@ class PriceTraceCanonicalGateway(
                     path = "/rest/v1/rpc/ingest_verified_standalone_price_observation_v1",
                     body = buildJsonObject {
                         put("p_idempotency_key", JsonPrimitive(observationKey))
-                        put("p_observation", standaloneObservationJson(observation, envelope))
+                        put("p_observation", standaloneObservationJson(observation, envelope, acceptedAuthorityKeys))
                     }.encode(),
                 ),
             )
@@ -851,6 +898,7 @@ class PriceTraceCanonicalGateway(
         envelope: YeonsikOcrEnvelope,
         config: PriceTraceSupabaseConfig,
         contract: PriceTracePurchaseObservationV4Contract,
+        acceptedAuthorityKeys: Map<String,String>,
     ): PriceTraceCanonicalOutcome = try {
         val records = envelope.purchaseRecords.filter { it.priceTraceSubmissionEligible }
         require(records.isNotEmpty()) { "purchase_price_observation_missing" }
@@ -858,7 +906,10 @@ class PriceTraceCanonicalGateway(
             val recordKey = StableIds.sha256("$idempotencyKey|purchase_record=${record.clientKey}")
             val payload = PriceTracePurchaseObservationV4Payload(
                 contract = contract,
-                purchaseRecord = record,
+                purchaseRecord = record.copy(lineItems = record.lineItems.map { line ->
+                    val candidate = envelope.productCandidates.singleOrNull { it.clientKey == line.productClientKey }
+                    if (candidate == null) line else line.copy(productClientKey = effectiveAuthorityKey(candidate, acceptedAuthorityKeys))
+                }),
                 verificationBasis = envelope.review.verificationBasis,
             )
             val response = transport.execute(
@@ -918,6 +969,7 @@ class PriceTraceCanonicalGateway(
     private fun standaloneObservationJson(
         observation: StandalonePriceObservation,
         envelope: YeonsikOcrEnvelope,
+        acceptedAuthorityKeys: Map<String,String>,
     ): JsonObject = buildJsonObject {
         put("schema_version", JsonPrimitive("receipt-independent-price-observation.v3"))
         put("contract_version", JsonPrimitive("price-observation.v3"))
@@ -952,7 +1004,7 @@ class PriceTraceCanonicalGateway(
                 val candidate = envelope.productCandidates.singleOrNull {
                     it.clientKey == observation.productClientKey
                 } ?: error("retail_product_candidate_missing")
-                put("product", retailProductObservationJson(candidate))
+                put("product", retailProductObservationJson(candidate, effectiveAuthorityKey(candidate, acceptedAuthorityKeys)))
             }
             StandalonePriceObservationKind.RESTAURANT_PURCHASE -> {
                 put("item", buildJsonObject {
@@ -985,8 +1037,8 @@ class PriceTraceCanonicalGateway(
         }
     }
 
-    private fun retailProductObservationJson(candidate: ProductCandidate): JsonObject = buildJsonObject {
-        put("product_client_key", JsonPrimitive(candidate.clientKey))
+    private fun retailProductObservationJson(candidate: ProductCandidate, authorityKey: String): JsonObject = buildJsonObject {
+        put("product_client_key", JsonPrimitive(authorityKey))
         put("merchant_sku", candidate.merchantSku?.let(::JsonPrimitive) ?: JsonNull)
         put("product_name", JsonPrimitive(candidate.productName))
         put("brand", candidate.brand?.let(::JsonPrimitive) ?: JsonNull)
@@ -995,93 +1047,13 @@ class PriceTraceCanonicalGateway(
         put("specification", candidate.specification?.let(::JsonPrimitive) ?: JsonNull)
         put("variant", candidate.variant?.let(::JsonPrimitive) ?: JsonNull)
         put("identifiers", JsonArray(candidate.barcodes.map { barcode -> buildJsonObject {
-            put("scheme", JsonPrimitive(priceTraceIdentifierScheme(barcode)))
+            put("scheme", JsonPrimitive(PriceTraceCandidatePayload.priceTraceIdentifierScheme(barcode)))
             put("value", JsonPrimitive(barcode.value.filterNot { it == ' ' || it == '-' }))
         }}))
     }
 
-    private fun productCandidateJson(candidate: ProductCandidate): JsonObject = buildJsonObject {
-        put("schema_version", JsonPrimitive("PRICETRACE_PRODUCT_CANDIDATE"))
-        put("contract_version", JsonPrimitive("product-candidate.v1"))
-        put("source_app", JsonPrimitive("pricetrace_ocr_app"))
-        put("client_key", JsonPrimitive(candidate.clientKey))
-        put("sub_brand", candidate.subBrand?.let(::JsonPrimitive) ?: JsonNull)
-        put("source_version", candidate.sourceVersion?.let(::JsonPrimitive) ?: JsonNull)
-        put("candidate_type", JsonPrimitive(candidate.candidateType))
-        put("product_name", JsonPrimitive(candidate.productName))
-        put("brand", candidate.brand?.let(::JsonPrimitive) ?: JsonNull)
-        put("manufacturer", candidate.manufacturer?.let(::JsonPrimitive) ?: JsonNull)
-        put("specification", candidate.specification?.let(::JsonPrimitive) ?: JsonNull)
-        put("content_amount", candidate.contentAmount?.let(::JsonPrimitive) ?: JsonNull)
-        put("content_unit", candidate.contentUnit?.let(::JsonPrimitive) ?: JsonNull)
-        put("package_count", candidate.packageCount?.let(::JsonPrimitive) ?: JsonNull)
-        put("variant", candidate.variant?.let(::JsonPrimitive) ?: JsonNull)
-        put("identifiers", JsonArray(candidateIdentifiers(candidate)))
-        put("evidence", JsonArray(candidate.evidence.mapNotNull { evidence ->
-            val field = priceTraceProductCandidateEvidenceField(evidence)
-            if (field == null) {
-                null
-            } else {
-                val sourceRef = evidence.sourceRef?.takeIf(String::isNotBlank)
-                    ?: evidence.source?.takeIf(String::isNotBlank)
-                    ?: evidence.sourceAttachmentIds.firstOrNull()
-                    ?: error("product candidate evidence source_ref is required")
-                buildJsonObject {
-                    put("source_type", JsonPrimitive(evidence.sourceType))
-                    put("source_ref", JsonPrimitive(sourceRef))
-                    put("field", JsonPrimitive(field))
-                    put("observed_value", evidence.observedValue?.let(::JsonPrimitive) ?: JsonNull)
-                    put("content_hash", evidence.contentHash?.let(::JsonPrimitive) ?: JsonNull)
-                }
-            }
-        }))
-        put("provenance", buildJsonObject {
-            candidate.evidence.firstOrNull()?.sourceAttachmentIds?.firstOrNull()
-                ?.let { put("capture_id", JsonPrimitive(it)) }
-            put("extraction_method", JsonPrimitive("mixed"))
-            put("extractor", JsonPrimitive("ocr-app"))
-            candidate.sourceVersion?.let { put("extractor_version", JsonPrimitive(it)) }
-            candidate.sourceVersion?.let { put("source_revision", JsonPrimitive(it)) }
-        })
-    }
-
-    /** Normalize only the V4 order-history aliases at the PriceTrace boundary. */
-    private fun priceTraceProductCandidateEvidenceField(
-        evidence: ProductCandidateEvidence,
-    ): String? = if (evidence.sourceType != "order_history") {
-        evidence.field
-    } else {
-        when (evidence.field) {
-            "brand_name" -> "brand"
-            "manufacturer_name" -> "manufacturer"
-            "variant_name" -> "variant"
-            "specification_text" -> "specification"
-            "sub_brand_name" -> "sub_brand"
-            "barcodes" -> null
-            else -> evidence.field
-        }
-    }
-
-    private fun candidateIdentifiers(candidate: ProductCandidate): List<JsonObject> {
-        return candidate.barcodes.map { barcode -> buildJsonObject {
-            put("scheme", JsonPrimitive(priceTraceIdentifierScheme(barcode)))
-            put("value", JsonPrimitive(barcode.value))
-        }}
-    }
-
-    /** Convert the Project's barcode observation type to PriceTrace's existing identifier scheme. */
-    private fun priceTraceIdentifierScheme(barcode: ProductCandidateBarcode): String =
-        when (barcode.type.lowercase().replace("-", "").replace("_", "")) {
-            "ean", "ean8", "ean13" -> "ean"
-            "upc", "upca", "upce" -> "upc"
-            "gtin", "gtin8", "gtin12", "gtin13", "gtin14", "barcode" -> "gtin"
-            else -> when (barcode.value.filterNot { it == ' ' || it == '-' }.length) {
-                8, 13 -> "ean"
-                12 -> "upc"
-                14 -> "gtin"
-                else -> error("unsupported product candidate barcode type: ${barcode.type}")
-            }
-        }
+    private fun effectiveAuthorityKey(candidate: ProductCandidate, accepted: Map<String,String>): String =
+        accepted[candidate.clientKey] ?: PriceTraceCandidatePayload.revision(candidate).authorityClientKey
 
     private fun decodeResponse(value: String): JsonObject {
         val element = json.parseToJsonElement(value)
@@ -1376,6 +1348,7 @@ class PriceTraceCanonicalProjectionSubmitter(
                     return purchaseProjectionResult(gateway.submitPurchasePriceObservationsV4(
                         request.idempotencyKey,
                         envelope,
+                        acceptedAuthorityKeys = PriceTraceCandidatePayload.acceptedKeys(request.dependencyMetadataJson[IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE],envelope.productCandidates),
                     ))
                 }
                 if (request.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION &&
@@ -1390,7 +1363,7 @@ class PriceTraceCanonicalProjectionSubmitter(
                     if (envelope.review.status != com.pricetrace.receiptscanner.ingestion.IngestionReviewStatus.READY) {
                         return ProjectionSubmission.Failure("canonical_review_required", retryable = false)
                     }
-                    when (val result = gateway.submitStandalonePriceObservations(request.idempotencyKey, envelope)) {
+                    when (val result = gateway.submitStandalonePriceObservations(request.idempotencyKey, envelope, PriceTraceCandidatePayload.acceptedKeys(request.dependencyMetadataJson[IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE],envelope.productCandidates))) {
                         is PriceTraceCanonicalOutcome.Success -> {
                             val observations = (result.response["observations"] as? JsonArray).orEmpty()
                             val observationResponses = observations.mapNotNull { observation ->

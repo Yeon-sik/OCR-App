@@ -32,6 +32,7 @@ import com.pricetrace.receiptscanner.review.ReviewViewModel
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
@@ -42,6 +43,27 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PriceTraceCanonicalGatewayTest {
+    @Test fun legacyAuthorityTranslationIsPtOnlyForStandaloneAndPurchase() = runTest {
+        val standalone=textOnlyEnvelope()
+        val candidate=standalone.productCandidates.single()
+        val standaloneBefore=com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec.encode(standalone)
+        val standaloneTransport=QueueTransport(PriceObservationHttpResponse(200,"""{"observationId":"observation"}"""))
+        val standaloneResult=PriceTraceCanonicalGateway(FakeStore(signedIn()),standaloneTransport).submitStandalonePriceObservations("legacy-standalone",standalone,mapOf(candidate.clientKey to "accepted-legacy-authority"))
+        assertTrue(standaloneResult is PriceTraceCanonicalOutcome.Success)
+        val observation=Json.parseToJsonElement(standaloneTransport.requests.single().body!!).jsonObject["p_observation"]!!.jsonObject
+        assertEquals("accepted-legacy-authority",observation["product"]!!.jsonObject["product_client_key"]!!.jsonPrimitive.content)
+        assertEquals(standaloneBefore,com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec.encode(standalone))
+        val purchase=com.pricetrace.receiptscanner.ingestion.YeonsikOcrV4Json.decode(java.io.File("../examples/yeonsik-ocr.v4.purchase.example.json").readText(),"revision-key")
+        val purchaseBefore=com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec.encode(purchase)
+        val mapping=purchase.productCandidates.associate { it.clientKey to "accepted-${it.clientKey}" }
+        assertTrue(mapping.isNotEmpty())
+        val transport=QueueTransport(PriceObservationHttpResponse(200,"""{"purchaseSourceId":"source","observationCreated":false,"observationIds":[]}"""))
+        PriceTraceCanonicalGateway(FakeStore(signedIn()),transport).submitPurchasePriceObservationsV4("legacy-purchase",purchase,acceptedAuthorityKeys=mapping)
+        val wire=Json.parseToJsonElement(transport.requests.single().body!!).jsonObject["p_purchase"]!!.jsonObject
+        val keys=wire["items"]!!.jsonArray.mapNotNull { it.jsonObject["product"]?.jsonObject?.get("client_key")?.jsonPrimitive?.contentOrNull }
+        assertTrue(keys.isNotEmpty()); assertTrue(keys.all { it in mapping.values })
+        assertEquals(purchaseBefore,com.pricetrace.receiptscanner.ingestion.YeonsikOcrEnvelopeCodec.encode(purchase))
+    }
     @Test
     fun confirmedParsedReceiptSurvivesRestoreAndSendsVerifiedSanitizedRpcPayload() = runTest {
         val envelope = parsedReceiptEnvelope()
@@ -811,7 +833,7 @@ class PriceTraceCanonicalGatewayTest {
         assertEquals("Test Mart", observation["merchant"]!!.jsonObject["merchant_name"]?.jsonPrimitive?.content)
         assertEquals("store-1", observation["merchant"]!!.jsonObject["source_code"]?.jsonPrimitive?.content)
         val product = observation["product"]!!.jsonObject
-        assertEquals("product-1", product["product_client_key"]?.jsonPrimitive?.content)
+        assertEquals(PriceTraceCandidatePayload.revision(candidate).authorityClientKey, product["product_client_key"]?.jsonPrimitive?.content)
         assertEquals(JsonNull, product["merchant_sku"])
         assertEquals("Test Sub Brand", product["sub_brand"]?.jsonPrimitive?.content)
         assertEquals("Test Foods", product["manufacturer"]?.jsonPrimitive?.content)
@@ -1345,7 +1367,7 @@ class PriceTraceCanonicalGatewayTest {
         assertEquals(setOf("p_idempotency_key", "p_candidate"), body.keys)
         assertEquals("PRICETRACE_PRODUCT_CANDIDATE", sent["schema_version"]?.jsonPrimitive?.content)
         assertEquals("product-candidate.v1", sent["contract_version"]?.jsonPrimitive?.content)
-        assertEquals("product-1", sent["client_key"]?.jsonPrimitive?.content)
+        assertEquals(PriceTraceCandidatePayload.revision(candidate).authorityClientKey, sent["client_key"]?.jsonPrimitive?.content)
         assertEquals(JsonNull, sent["sub_brand"])
         val identifier = sent["identifiers"]!!.jsonArray.single().jsonObject
         assertEquals("ean", identifier["scheme"]?.jsonPrimitive?.content)
@@ -1501,7 +1523,7 @@ class PriceTraceCanonicalGatewayTest {
         assertFalse(observation.containsKey("source_attachment_ids"))
         assertFalse(observation.containsKey("evidence"))
         val product = observation["product"]!!.jsonObject
-        assertEquals("product-brandx-chicken-20260910", product["product_client_key"]?.jsonPrimitive?.content)
+        assertEquals(PriceTraceCandidatePayload.revision(envelope.productCandidates.single()).authorityClientKey, product["product_client_key"]?.jsonPrimitive?.content)
         assertEquals(JsonNull, product["merchant_sku"])
         assertEquals("브랜드X 닭가슴살", product["product_name"]?.jsonPrimitive?.content)
     }

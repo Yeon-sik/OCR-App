@@ -41,6 +41,8 @@ class CanonicalIngestionUseCase(
     private val importer: ExternalJsonImporter = ExternalJsonImporter(),
     private val now: () -> String = { OffsetDateTime.now().toString() },
 ) {
+    suspend fun setProductBrandResolution(ingestionId: String, envelope: YeonsikOcrEnvelope, draft: ProductBrandResolutionDraft): IngestionSession =
+        orchestrator.setProductBrandResolution(ingestionId,envelope,draft)
     private val orchestrator = IngestionOrchestrator(
         store = store,
         identityResolver = null,

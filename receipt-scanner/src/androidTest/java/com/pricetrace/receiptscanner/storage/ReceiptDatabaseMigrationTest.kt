@@ -145,6 +145,13 @@ class ReceiptDatabaseMigrationTest {
         applyMigration(database, 10, ReceiptDatabase.MIGRATION_9_10)
 
         database.execSQL(
+            "INSERT INTO ingestion_sessions (ingestion_id, local_document_id, envelope_storage_key, " +
+                "canonical_fingerprint, review_status, created_at, updated_at) VALUES " +
+                "('ingestion-migrate', 'doc-migrate', 'canonical.json', 'source-before', " +
+                "'user_verified', '2026-08-03T09:00:00Z', '2026-08-03T09:30:00Z')",
+        )
+
+        database.execSQL(
             "INSERT INTO ingestion_projections (" +
                 "ingestion_id, projection, status, idempotency_key, remote_id, " +
                 "attempt_count, last_error, updated_at, metadata_json" +
@@ -164,11 +171,17 @@ class ReceiptDatabaseMigrationTest {
         applyMigration(database, 11, ReceiptDatabase.MIGRATION_10_11)
         applyMigration(database, 12, ReceiptDatabase.MIGRATION_11_12)
         applyMigration(database, 13, ReceiptDatabase.MIGRATION_12_13)
+        applyMigration(database, 14, ReceiptDatabase.MIGRATION_13_14)
+        database.query("SELECT brand_resolution_drafts_json, canonical_fingerprint FROM ingestion_sessions").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("[]", cursor.getString(0))
+            assertEquals("source-before", cursor.getString(1))
+        }
         val migrated = database
 
         migrated.query("PRAGMA user_version").use { cursor ->
             assertTrue(cursor.moveToFirst())
-            assertEquals(13, cursor.getInt(0))
+            assertEquals(14, cursor.getInt(0))
         }
 
         migrated.query(

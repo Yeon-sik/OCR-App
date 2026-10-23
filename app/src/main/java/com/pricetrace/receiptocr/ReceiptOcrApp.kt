@@ -66,6 +66,9 @@ fun ReceiptOcrApp(
         }
     }
 
+    androidx.compose.runtime.CompositionLocalProvider(LocalProductBrandReview provides ProductBrandReviewActions(
+        drafts = if(uiState.screen==AppScreen.CANONICAL_JSON_VALIDATOR) canonicalJsonValidatorState.session?.brandResolutionDrafts.orEmpty() else uiState.productBrandResolutionDrafts,
+        configured = viewModel.isProductBrandSearchConfigured(),search=viewModel::searchProductBrands,change=viewModel::selectProductBrand)) {
     ReceiptOcrContent(
         uiState = uiState,
         sessions = sessions,
@@ -244,6 +247,7 @@ fun ReceiptOcrApp(
         onShareAccuracy = viewModel::shareAccuracyReport,
         onDismissMessage = viewModel::clearMessage,
     )
+    }
 }
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {

@@ -50,10 +50,12 @@ internal fun ProductInformationCard(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("상품 정보", style = MaterialTheme.typography.titleMedium)
+            Text("관측된 상품 정보", style = MaterialTheme.typography.titleMedium)
             facts.forEach { fact ->
                 ProductFactControl(fact, busy, errors, onFieldChanged, onResolve, onPendingChanged)
             }
+            val brandActions=LocalProductBrandReview.current
+            if(brandActions!=null) ProductBrandResolutionEditor(product,brandActions.drafts,brandActions.configured,busy,brandActions.search,brandActions.change)
             product.specification?.let { Text("규격 · $it") }
             product.contentAmount?.let { Text("내용량 · ${if (it == it.toLong().toDouble()) it.toLong().toString() else it.toString()} ${product.contentUnit.orEmpty()}") }
             if (facts.any { it.linked } && facts.all { it.status == ProductFactStatus.SAME }) {
@@ -70,6 +72,7 @@ internal fun ProductInformationCard(
                 product.barcodes.forEach { Text("바코드 · ${it.value}") }
                 Text("개발자 정보", style = MaterialTheme.typography.labelMedium)
                 Text("client key · ${product.clientKey}", style = MaterialTheme.typography.bodySmall)
+                brandActions?.drafts?.filter { it.matches(product) }?.forEach { Text("${it.sourceField.label} Brand ID · ${it.brandId ?: "연결 없음"}",style=MaterialTheme.typography.bodySmall) }
                 Text("confidence · ${product.confidence}", style = MaterialTheme.typography.bodySmall)
                 Text("source attachment IDs · ${product.effectiveSourceAttachmentIds.joinToString()}", style = MaterialTheme.typography.bodySmall)
             }
