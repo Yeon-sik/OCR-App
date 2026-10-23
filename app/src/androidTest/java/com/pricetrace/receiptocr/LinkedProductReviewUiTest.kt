@@ -75,7 +75,11 @@ class LinkedProductReviewUiTest {
         }
         compose.onNodeWithTag("product_fact_product-1_BRAND_manual").performClick()
         compose.onNodeWithTag("product_fact_product-1_BRAND_input").performTextReplacement("Chosen brand")
-        compose.onNodeWithTag("product_fact_product-1_BRAND_resolve").performScrollTo().performClick()
+        compose.onNodeWithTag("product_fact_product-1_BRAND_input").assertTextContains("Chosen brand")
+        // IME insets can still move the button after text replacement in a full-suite run.
+        androidx.test.espresso.Espresso.closeSoftKeyboard()
+        compose.onNodeWithTag("product_fact_product-1_BRAND_resolve").performScrollTo()
+            .assertIsDisplayed().assertIsEnabled().performClick()
         compose.runOnIdle {
             assertEquals("Chosen brand", review.controller.state.value.envelope.productCandidates.single().brand)
             assertEquals("Chosen brand", label(review.controller.state.value.envelope).draft.brand)

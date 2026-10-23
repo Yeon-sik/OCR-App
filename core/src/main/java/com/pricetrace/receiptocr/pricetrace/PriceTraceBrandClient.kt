@@ -41,7 +41,7 @@ class PriceTraceBrandClient(private val transport: PriceObservationHttpTransport
             val rows=Json.parseToJsonElement(body).jsonArray.map { it.jsonObject }
             val fields=mutableSetOf<String>(); val fingerprints=mutableSetOf<String>()
             rows.forEach { r ->
-                val expected=setOf("product_client_key","request_fingerprint","source_field","observed_value","brand_id","canonical_name","brand_active","parent_brand_id","parent_canonical_name","created_at","updated_at")
+                val expected=setOf("product_client_key","request_fingerprint","source_field","observed_value","brand_id","canonical_name","brand_active","parent_brand_id","parent_canonical_name","created_at","updated_at","pair_relationship","pair_relationship_valid","requires_review")
                 require(r.keys==expected) { "invalid_brand_resolution_shape" }
                 fun text(k:String):String? {
                     val value=r.getValue(k)
@@ -54,9 +54,23 @@ class PriceTraceBrandClient(private val transport: PriceObservationHttpTransport
                 require(validBrandUuid(text("brand_id")) && (text("parent_brand_id")==null || validBrandUuid(text("parent_brand_id"))))
                 require(text("request_fingerprint")?.matches(Regex("[0-9a-f]{64}"))==true)
                 require(r["brand_active"]?.jsonPrimitive?.booleanOrNull != null && r["brand_active"]?.jsonPrimitive?.isString==false)
+                fun bool(key: String): Boolean {
+                    val value = r.getValue(key) as? JsonPrimitive
+                    require(value != null && !value.isString && value.booleanOrNull != null)
+                    return value.boolean
+                }
+                val relation = requireNotNull(text("pair_relationship"))
+                ProductBrandPairStatus(relation, bool("pair_relationship_valid"), bool("requires_review"), bool("brand_active"))
                 listOf("canonical_name","parent_canonical_name").forEach { text(it) }
                 OffsetDateTime.parse(text("created_at")); OffsetDateTime.parse(text("updated_at"))
                 fingerprints.add(requireNotNull(text("request_fingerprint")))
+            }
+            val relations = rows.map { it.getValue("pair_relationship").jsonPrimitive.content }.distinct()
+            require(relations.size <= 1) { "inconsistent_brand_pair_relationship" }
+            if (rows.isNotEmpty()) {
+                val relation = relations.single()
+                require((rows.size == 1) == (relation == "single")) { "invalid_brand_pair_cardinality" }
+                if (rows.size == 2) require((rows[0]["brand_id"] == rows[1]["brand_id"]) == (relation == "same_brand"))
             }
             require(fingerprints.size<=1) { "brand_resolution_revision_mismatch" }
             return rows

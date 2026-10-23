@@ -12,10 +12,11 @@ import kotlinx.coroutines.*
 @Composable
 internal fun ProductBrandResolutionEditor(product: ProductCandidate, drafts: List<ProductBrandResolutionDraft>,
     configured: Boolean, busy: Boolean, search: suspend (String) -> List<PriceTraceBrandMatch>,
-    onChange: (ProductBrandResolutionDraft) -> Unit) {
+    onChange: (ProductBrandResolutionDraft) -> Unit, metadata: String? = null) {
     Column(Modifier.fillMaxWidth().testTag("pt_brand_${product.clientKey}"), verticalArrangement=Arrangement.spacedBy(8.dp)) {
         Text("PriceTrace 브랜드 연결",style=MaterialTheme.typography.titleSmall)
         Text("관측값은 그대로 보존하며, 선택한 연결은 PriceTrace 제출 시 저장됩니다.",style=MaterialTheme.typography.bodySmall)
+        productBrandReviewMessages(metadata,product.clientKey).forEach { Text(it,modifier=Modifier.testTag("pt_brand_semantic_review")) }
         ProductBrandFactField.entries.forEach { field ->
             val observed=field.observed(product)?.trim()?.takeIf { it.isNotBlank() } ?: return@forEach
             key(product.clientKey,field,observed) {

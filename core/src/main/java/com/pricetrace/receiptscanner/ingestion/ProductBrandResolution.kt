@@ -70,3 +70,27 @@ object ProductBrandResolutionJson {
         return rows
     }
 }
+
+/** Server-owned current relationship, separate from historical selection and local intent. */
+data class ProductBrandPairStatus(val pairRelationship: String, val pairRelationshipValid: Boolean,
+    val requiresReview: Boolean, val brandActive: Boolean) {
+    init {
+        require(pairRelationship in setOf("single", "same_brand", "descendant", "hierarchy_conflict"))
+        require(pairRelationshipValid == (pairRelationship != "hierarchy_conflict"))
+        require(requiresReview == (!brandActive || !pairRelationshipValid))
+    }
+}
+
+fun productBrandReviewMessages(metadata: String?, logicalKey: String): List<String> {
+    val root = metadata?.let { runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull() } ?: return emptyList()
+    val rows = (root["brandResolutions"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+        .filter { it["logicalProductClientKey"]?.jsonPrimitive?.contentOrNull == logicalKey }
+    return buildList {
+        if (rows.any { it["pair_relationship"]?.jsonPrimitive?.contentOrNull == "same_brand" })
+            add("두 관측값이 동일 PriceTrace 브랜드로 연결됨")
+        if (rows.any { it["pair_relationship"]?.jsonPrimitive?.contentOrNull == "hierarchy_conflict" })
+            add("현재 PriceTrace 브랜드 계층과 선택 관계가 일치하지 않습니다. 다시 확인해 주세요.")
+        if (rows.any { it["brand_active"]?.jsonPrimitive?.booleanOrNull == false })
+            add("선택한 PriceTrace 브랜드가 비활성 상태입니다. 기존 연결을 확인해 주세요.")
+    }
+}

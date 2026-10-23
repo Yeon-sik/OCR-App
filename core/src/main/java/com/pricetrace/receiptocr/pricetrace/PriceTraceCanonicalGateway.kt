@@ -72,7 +72,7 @@ class PriceTraceCanonicalGateway(
 
     suspend fun setProductBrandResolution(authorityKey: String, draft: ProductBrandResolutionDraft): PriceTraceCanonicalOutcome = readAcceptedResponse { config ->
         val selected = if (draft.intent == ProductBrandSelectionIntent.CLEAR) null else requireNotNull(draft.brandId)
-        val response = PriceTraceBrandClient(transport).call(config,"set_product_candidate_brand_resolution_v1",buildJsonObject {
+        val response = PriceTraceBrandClient(transport).call(config,"set_product_candidate_brand_resolution_v2",buildJsonObject {
             put("p_client_key",authorityKey); put("p_source_field",draft.sourceField.wire); put("p_observed_value",draft.observedValue.trim())
             put("p_brand_id",selected?.let(::JsonPrimitive) ?: JsonNull); put("p_user_verified",true)
         })
@@ -89,7 +89,7 @@ class PriceTraceCanonicalGateway(
     }
 
     suspend fun readProductBrandResolutions(authorityKey: String, candidate: ProductCandidate): PriceTraceCanonicalOutcome = readAcceptedResponse { config ->
-        val response=PriceTraceBrandClient(transport).call(config,"get_product_candidate_brand_resolutions_v1",buildJsonObject { put("p_client_key",authorityKey) })
+        val response=PriceTraceBrandClient(transport).call(config,"get_product_candidate_brand_resolutions_v2",buildJsonObject { put("p_client_key",authorityKey) })
         if(response.statusCode !in 200..299) return@readAcceptedResponse PriceTraceCanonicalOutcome.Failure(classify(response),response.body)
         PriceTraceCanonicalOutcome.Success(buildJsonObject { put("rows",JsonArray(PriceTraceBrandClient.parseResolutions(response.body,authorityKey,candidate))) })
     }

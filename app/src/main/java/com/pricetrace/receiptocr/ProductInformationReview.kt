@@ -55,7 +55,7 @@ internal fun ProductInformationCard(
                 ProductFactControl(fact, busy, errors, onFieldChanged, onResolve, onPendingChanged)
             }
             val brandActions=LocalProductBrandReview.current
-            if(brandActions!=null) ProductBrandResolutionEditor(product,brandActions.drafts,brandActions.configured,busy,brandActions.search,brandActions.change)
+            if(brandActions!=null) ProductBrandResolutionEditor(product,brandActions.drafts,brandActions.configured,busy,brandActions.search,brandActions.change,brandActions.metadata)
             product.specification?.let { Text("규격 · $it") }
             product.contentAmount?.let { Text("내용량 · ${if (it == it.toLong().toDouble()) it.toLong().toString() else it.toString()} ${product.contentUnit.orEmpty()}") }
             if (facts.any { it.linked } && facts.all { it.status == ProductFactStatus.SAME }) {

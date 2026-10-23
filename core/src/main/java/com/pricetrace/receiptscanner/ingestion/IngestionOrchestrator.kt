@@ -639,7 +639,7 @@ class IngestionOrchestrator(
                             projectionIsAffected(state.projection, affectedArtifactKeys))) ||
                             requiredArtifactKeys(state.projection, envelope).any { it in changedProductSources }
                         if (payloadChanged) {
-                            resetForPayloadChange(state, nowValue, nextProjectionFingerprint)
+                            resetForPayloadChange(state, nowValue, nextProjectionFingerprint, envelope)
                         } else {
                             state.copy(
                                 projectionPayloadFingerprint = state.projectionPayloadFingerprint
@@ -975,7 +975,7 @@ class IngestionOrchestrator(
         if (current.projectionPayloadFingerprint != null &&
             current.projectionPayloadFingerprint != payloadFingerprint
         ) {
-            val invalidated = resetForPayloadChange(current, now(), payloadFingerprint).copy(
+            val invalidated = resetForPayloadChange(current, now(), payloadFingerprint, envelope).copy(
                 status = ProjectionStatus.BLOCKED,
                 lastError = "projection_payload_changed",
             )
@@ -2273,7 +2273,11 @@ class IngestionOrchestrator(
         state: ProjectionState,
         updatedAt: String,
         payloadFingerprint: String,
+        envelope: YeonsikOcrEnvelope,
     ): ProjectionState = resetPending(state, updatedAt).copy(
+        metadataJson = if (state.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
+            PriceTraceCandidatePayload.preserveCurrentCandidateAuthorityMetadata(state.metadataJson, envelope.productCandidates)
+        else null,
         projectionRevisionSeq = state.projectionRevisionSeq.coerceAtLeast(1) + 1,
         projectionPayloadFingerprint = payloadFingerprint,
     )
@@ -2314,7 +2318,7 @@ class IngestionOrchestrator(
                             projectionIsAffected(state.projection, affectedArtifactKeys))) ||
                             requiredArtifactKeys(state.projection, envelope).any { it in changedProductSources }
                         if (payloadChanged) {
-                            resetForPayloadChange(state, nowValue, nextProjectionFingerprint).copy(
+                            resetForPayloadChange(state, nowValue, nextProjectionFingerprint, envelope).copy(
                                 status = ProjectionStatus.BLOCKED,
                                 lastError = reason,
                             )

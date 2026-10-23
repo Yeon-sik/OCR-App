@@ -147,10 +147,10 @@ class ProductBrandResolutionTest {
             when {
                 request.url.endsWith("submit_product_candidate_v1") -> PriceObservationHttpResponse(200,
                     """{"candidateId":"$root","clientKey":"${p.clientKey}"}""")
-                request.url.endsWith("set_product_candidate_brand_resolution_v1") -> PriceObservationHttpResponse(200,
+                request.url.endsWith("set_product_candidate_brand_resolution_v2") -> PriceObservationHttpResponse(200,
                     """{"product_client_key":"${p.clientKey}","request_fingerprint":"$fingerprint","source_field":"brand","observed_value":"${p.brand}","brand_id":"$root","cleared":false}""")
                 else -> PriceObservationHttpResponse(200,
-                    """[{"product_client_key":"${p.clientKey}","request_fingerprint":"$fingerprint","source_field":"brand","observed_value":"${p.brand}","brand_id":"$child","canonical_name":"Concurrent selection","brand_active":true,"parent_brand_id":null,"parent_canonical_name":null,"created_at":"2026-10-23T00:00:00Z","updated_at":"2026-10-23T00:00:00Z"}]""")
+                    """[{"product_client_key":"${p.clientKey}","request_fingerprint":"$fingerprint","source_field":"brand","observed_value":"${p.brand}","brand_id":"$child","canonical_name":"Concurrent selection","brand_active":true,"pair_relationship":"single","pair_relationship_valid":true,"requires_review":false,"parent_brand_id":null,"parent_canonical_name":null,"created_at":"2026-10-23T00:00:00Z","updated_at":"2026-10-23T00:00:00Z"}]""")
             }
         })
         val result = PriceTraceProductCandidateProjectionSubmitter(gateway).submit(request(p, listOf(draft), legacy)) as ProjectionSubmission.Failure
@@ -225,7 +225,7 @@ class ProductBrandResolutionTest {
         val clear=ProductBrandResolutionDraft(p.clientKey,ProductBrandFactField.BRAND,p.brand!!,ProductBrandSelectionIntent.CLEAR)
         val result=PriceTraceProductCandidateProjectionSubmitter(gateway).submit(request(p,listOf(clear))) as ProjectionSubmission.Failure
         assertFalse(result.retryable);assertTrue(result.requiresReview)
-        val body=Json.parseToJsonElement(calls.last().body!!).jsonObject
+        val body=Json.parseToJsonElement(calls.last { it.url.endsWith("set_product_candidate_brand_resolution_v2") }.body!!).jsonObject
         assertEquals(JsonNull,body["p_brand_id"]);assertEquals(JsonPrimitive(true),body["p_user_verified"])
     }
     @Test fun partialFailureRetainsCandidateMetadataAndRetryUsesSameRevision()=runTest {
@@ -234,13 +234,14 @@ class ProductBrandResolutionTest {
             calls+=r; val args=Json.parseToJsonElement(r.body!!).jsonObject
             when {
                 r.url.endsWith("submit_product_candidate_v1") -> PriceObservationHttpResponse(200,"""{"candidateId":"$root","clientKey":${args["p_candidate"]!!.jsonObject["client_key"]}}""")
-                r.url.endsWith("set_product_candidate_brand_resolution_v1") -> {
+                r.url.endsWith("set_product_candidate_brand_resolution_v2") -> {
                     val field=args["p_source_field"]!!.jsonPrimitive.content
                     if(field=="sub_brand" && fail) { fail=false;PriceObservationHttpResponse(503,"temporary") }
                     else {
                         stored[field]=buildJsonObject {
                             put("product_client_key",args.getValue("p_client_key"));put("request_fingerprint","a".repeat(64));put("source_field",field)
                             put("observed_value",args.getValue("p_observed_value"));put("brand_id",args.getValue("p_brand_id"))
+                            put("pair_relationship","descendant");put("pair_relationship_valid",true);put("requires_review",false)
                             put("canonical_name",if(field=="brand") "Canonical A" else "Canonical B");put("brand_active",true)
                             put("parent_brand_id",if(field=="sub_brand") JsonPrimitive(root) else JsonNull);put("parent_canonical_name",if(field=="sub_brand") JsonPrimitive("Canonical A") else JsonNull)
                             put("created_at","2026-10-23T00:00:00Z");put("updated_at","2026-10-23T00:00:00Z")

@@ -223,7 +223,7 @@ fun ReviewWorkspace(
                         onEdit = onEdit,
                     )
                     envelope.productCandidates.forEach { product -> ProductBrandResolutionEditor(product,
-                        state.session?.brandResolutionDrafts.orEmpty(),brandSearchConfigured,busy,searchProductBrands,onProductBrandChanged) }
+                        state.session?.brandResolutionDrafts.orEmpty(),brandSearchConfigured,busy,searchProductBrands,onProductBrandChanged,state.session?.projections?.singleOrNull { it.projection==com.pricetrace.receiptscanner.ingestion.IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE }?.metadataJson) }
                     val ownerMetadata = state.session?.projections?.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson
                     com.pricetrace.receiptscanner.ingestion.PurchaseIdentityReview.cards(envelope,ownerMetadata).forEach { card ->
                         PurchaseIdentityCard(card,canUseVerifiedSource && card.sourceSaved,onPurchaseIdentityCommand)

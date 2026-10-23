@@ -32,11 +32,44 @@ object PriceTraceCandidatePayload {
             if(candidates!=null && sourceFingerprint!=null && candidates.singleOrNull { it.clientKey==logical }?.let { revision(it).sourceRevisionFingerprint }!=sourceFingerprint) return@forEach
             val authority = (row["priceTraceAuthorityClientKey"] as? JsonPrimitive)?.contentOrNull
                 ?: (row["productClientKey"] as? JsonPrimitive)?.contentOrNull ?: logical
+            require(validAuthorityKey(authority)) { "invalid_candidate_authority_key" }
             require(keys[logical] == null || keys[logical] == authority) { "conflicting_candidate_authority_key" }
             keys[logical] = authority
         }
         return keys
     }
+
+    /** Aggregate workflow resets must retain only independently accepted, exact-source candidates. */
+    fun preserveCurrentCandidateAuthorityMetadata(metadata: String?, candidates: List<ProductCandidate>): String? {
+        val root = metadata?.let { runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull() } ?: return null
+        val current = candidates.associate { it.clientKey to revision(it).sourceRevisionFingerprint }
+        fun text(row: JsonObject, key: String) = (row[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        val arrays = listOf("responses", "products").associateWith { field ->
+            JsonArray((root[field] as? JsonArray).orEmpty().filter { element ->
+                val row = element as? JsonObject ?: return@filter false
+                val logical = text(row, "clientKey") ?: return@filter false
+                val authority = when {
+                    "priceTraceAuthorityClientKey" in row -> text(row, "priceTraceAuthorityClientKey") ?: return@filter false
+                    "productClientKey" in row -> text(row, "productClientKey") ?: return@filter false
+                    else -> logical
+                }
+                val acceptedIdentity = listOf("candidateId", "catalogProductId", "catalog_product_id").any { !text(row, it).isNullOrBlank() }
+                acceptedIdentity && validAuthorityKey(authority) && current[logical] != null &&
+                    text(row, "sourceRevisionFingerprint") == current[logical]
+            })
+        }
+        if (arrays.values.all { it.isEmpty() }) return null
+        val preserved = buildJsonObject {
+            put("schemaVersion", "product-candidate.v1"); put("contract", "PRICETRACE_PRODUCT_CANDIDATE")
+            arrays.forEach { (field, rows) -> put(field, rows) }
+        }
+        acceptedKeys(preserved.toString(), candidates) // Reject conflicting duplicate representations.
+        return preserved.toString()
+    }
+
+    private fun validAuthorityKey(key: String) = key.isNotBlank() && key.length <= 200 &&
+        key == key.trim() && key.none(Char::isISOControl) &&
+        !key.matches(Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"))
 
     /** Add a baseline only when Core has proved the saved canonical source is unchanged. */
     fun annotateCurrentLegacySource(metadata: String, candidates: List<ProductCandidate>): String {

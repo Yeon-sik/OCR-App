@@ -68,6 +68,7 @@ fun ReceiptOcrApp(
 
     androidx.compose.runtime.CompositionLocalProvider(LocalProductBrandReview provides ProductBrandReviewActions(
         drafts = if(uiState.screen==AppScreen.CANONICAL_JSON_VALIDATOR) canonicalJsonValidatorState.session?.brandResolutionDrafts.orEmpty() else uiState.productBrandResolutionDrafts,
+        metadata = if(uiState.screen==AppScreen.CANONICAL_JSON_VALIDATOR) canonicalJsonValidatorState.session?.projections?.singleOrNull { it.projection==com.pricetrace.receiptscanner.ingestion.IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE }?.metadataJson else uiState.productBrandResolutionMetadata,
         configured = viewModel.isProductBrandSearchConfigured(),search=viewModel::searchProductBrands,change=viewModel::selectProductBrand)) {
     ReceiptOcrContent(
         uiState = uiState,

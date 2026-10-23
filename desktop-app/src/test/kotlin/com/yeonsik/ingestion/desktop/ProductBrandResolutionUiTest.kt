@@ -76,6 +76,43 @@ class ProductBrandResolutionUiTest {
         compose.onNodeWithText("브랜드 관측값: Observed A").assertExists()
     }
 
+    @Test fun sameBrandAndRemoteDriftPreserveBothExplicitSelections() {
+        val p = product()
+        var drafts by mutableStateOf(emptyList<ProductBrandResolutionDraft>())
+        var metadata by mutableStateOf<String?>(null)
+        val changes = mutableListOf<ProductBrandResolutionDraft>()
+        compose.setContent { MaterialTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
+            ProductBrandResolutionEditor(p, drafts, true, false, { listOf(match()) }, { draft ->
+                changes += draft
+                drafts = drafts.filterNot { it.sourceField == draft.sourceField } + draft
+            }, metadata)
+        } } }
+        for (field in ProductBrandFactField.entries) {
+            compose.onNodeWithTag("pt_brand_search_p_${field.wire}").performScrollTo().performClick()
+            compose.waitUntil(5000) { compose.onAllNodesWithTag("pt_brand_result_${id}_${field.wire}").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithTag("pt_brand_result_${id}_${field.wire}").performScrollTo().performClick()
+        }
+        assertEquals(listOf(id, id), changes.map { it.brandId })
+        fun remote(relation: String, active: Boolean = true) = """{"brandResolutions":[{"logicalProductClientKey":"p","pair_relationship":"$relation","brand_active":$active}]}"""
+        compose.runOnIdle { metadata = remote("same_brand") }
+        compose.onNodeWithText("두 관측값이 동일 PriceTrace 브랜드로 연결됨").assertExists()
+        compose.onAllNodesWithText("Parent > Canonical A").assertCountEquals(2)
+        compose.runOnIdle { metadata = remote("hierarchy_conflict") }
+        compose.onNodeWithText("현재 PriceTrace 브랜드 계층과 선택 관계가 일치하지 않습니다. 다시 확인해 주세요.").assertExists()
+        compose.onAllNodesWithText("Parent > Canonical A").assertCountEquals(2)
+        assertEquals(2, changes.size)
+        for (field in ProductBrandFactField.entries) {
+            compose.onNodeWithTag("pt_brand_search_p_${field.wire}").assertIsEnabled()
+            compose.onNodeWithTag("pt_brand_clear_${field.wire}").assertIsEnabled()
+        }
+        compose.runOnIdle { metadata = remote("hierarchy_conflict", false) }
+        compose.onNodeWithText("선택한 PriceTrace 브랜드가 비활성 상태입니다. 기존 연결을 확인해 주세요.").assertExists()
+        compose.onAllNodesWithText("Parent > Canonical A").assertCountEquals(2)
+        compose.onNodeWithTag("pt_brand_clear_sub_brand").performScrollTo().performClick()
+        assertEquals(ProductBrandSelectionIntent.CLEAR, changes.last().intent)
+        assertEquals("Observed sub", p.subBrand)
+    }
+
     private fun capture(name: String) {
         val pixels = compose.onRoot().captureToImage().toPixelMap()
         val bitmap = java.awt.image.BufferedImage(pixels.width, pixels.height, java.awt.image.BufferedImage.TYPE_INT_ARGB)

@@ -200,6 +200,7 @@ data class ReceiptAppUiState(
     val merchantCandidateLastError: String? = null,
     val productCandidates: List<ProductCandidate> = emptyList(),
     val productBrandResolutionDrafts: List<com.pricetrace.receiptscanner.ingestion.ProductBrandResolutionDraft> = emptyList(),
+    val productBrandResolutionMetadata: String? = null,
     val productCandidateVerifiedKeys: Set<String> = emptySet(),
     val isSubmittingProductCandidates: Boolean = false,
     val productCandidateId: String? = null,
@@ -1245,6 +1246,7 @@ class ReceiptAppViewModel(
                 isSubmittingProductCandidates = false,
                 productCandidateId = projection?.takeIf { it.status == ProjectionStatus.UPLOADED }?.remoteId,
                 productCandidateLastError = projection?.lastError,
+                productBrandResolutionMetadata = projection?.metadataJson,
                 canonicalNutritionCount = envelope.nutrition.size,
                 canonicalNutritionArtifacts = envelope.nutrition,
                 canonicalNutritionVerifiedCount = verifiedNutritionCount(ingestionSession, envelope),
@@ -2379,8 +2381,9 @@ class ReceiptAppViewModel(
                         .toSet()
                 }.orEmpty(),
                 isSubmittingProductCandidates = false,
-                productCandidateId = projection?.takeIf { it.status == ProjectionStatus.UPLOADED }?.remoteId ?: state.productCandidateId,
+                productCandidateId = projection?.takeIf { it.status == ProjectionStatus.UPLOADED }?.remoteId,
                 productCandidateLastError = projection?.lastError,
+                productBrandResolutionMetadata = projection?.metadataJson,
                 canonicalNutritionCount = envelope.nutrition.size,
                 canonicalNutritionArtifacts = envelope.nutrition,
                 canonicalNutritionVerifiedCount = ingestionSession?.let {
@@ -3210,8 +3213,9 @@ class ReceiptAppViewModel(
             )
             IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE -> current.copy(
                 isSubmittingProductCandidates = false,
-                productCandidateId = state.remoteId ?: current.productCandidateId,
+                productCandidateId = state.takeIf { it.status == ProjectionStatus.UPLOADED }?.remoteId,
                 productCandidateLastError = state.lastError,
+                productBrandResolutionMetadata = state.metadataJson,
                 message = message,
             )
             IngestionProjection.FITNESS_NUTRITION -> current.copy(
@@ -3257,8 +3261,9 @@ class ReceiptAppViewModel(
             )
             IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE -> current.copy(
                 isSubmittingProductCandidates = false,
-                productCandidateId = state.remoteId ?: current.productCandidateId,
+                productCandidateId = state.takeIf { it.status == ProjectionStatus.UPLOADED }?.remoteId,
                 productCandidateLastError = state.lastError,
+                productBrandResolutionMetadata = state.metadataJson,
                 message = message,
             )
             IngestionProjection.FITNESS_NUTRITION -> current.copy(

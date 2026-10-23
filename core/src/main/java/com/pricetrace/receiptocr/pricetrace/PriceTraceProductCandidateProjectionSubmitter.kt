@@ -10,6 +10,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.coroutines.CancellationException
 
 /** Routes fact-only product observations to PriceTrace; identity is accepted only from its response. */
@@ -50,9 +51,17 @@ class PriceTraceProductCandidateProjectionSubmitter(
                     if(intents.isEmpty()) continue
                     val authorityKey=requireNotNull(authorityKeys[candidate.clientKey])
                     for(draft in intents) when(val mutation=gateway.setProductBrandResolution(authorityKey,draft)) {
-                        is PriceTraceCanonicalOutcome.Failure -> return ProjectionSubmission.Failure(
-                            mutation.message ?: mutation.kind.name,mutation.kind.retryable,
-                            requiresReview=!mutation.kind.retryable,metadataJson=result.response.toString())
+                        is PriceTraceCanonicalOutcome.Failure -> {
+                            // A semantic rejection can be caused by graph drift or archival since selection.
+                            val state = if (!mutation.kind.retryable) gateway.readProductBrandResolutions(authorityKey,candidate) else null
+                            val savedRows = (state as? PriceTraceCanonicalOutcome.Success)?.response?.get("rows") as? kotlinx.serialization.json.JsonArray
+                            val metadata = if (savedRows == null) result.response else JsonObject(result.response +
+                                ("brandResolutions" to kotlinx.serialization.json.JsonArray(recovered + savedRows.map { row ->
+                                    JsonObject((row as JsonObject) + ("logicalProductClientKey" to kotlinx.serialization.json.JsonPrimitive(candidate.clientKey)))
+                                })))
+                            return ProjectionSubmission.Failure(mutation.message ?: mutation.kind.name, mutation.kind.retryable,
+                                requiresReview = !mutation.kind.retryable, metadataJson = metadata.toString())
+                        }
                         is PriceTraceCanonicalOutcome.Success -> Unit
                     }
                     when(val read=gateway.readProductBrandResolutions(authorityKey,candidate)) {
@@ -70,6 +79,10 @@ class PriceTraceProductCandidateProjectionSubmitter(
                 }
                 val combined=if(recovered.isEmpty() && drafts.isEmpty()) result.response else
                     JsonObject(result.response + ("brandResolutions" to kotlinx.serialization.json.JsonArray(recovered)))
+                if (recovered.any { it["requires_review"]?.jsonPrimitive?.booleanOrNull == true }) {
+                    return ProjectionSubmission.Failure("brand_resolution_requires_review", retryable = false,
+                        requiresReview = true, metadataJson = combined.toString())
+                }
                 ProjectionSubmission.Success(
                     remoteId = remoteId,
                     metadataJson = Json.encodeToString(JsonObject.serializer(), combined),

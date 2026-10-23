@@ -17,7 +17,7 @@ class PriceTraceBrandLiveSmokeTest {
         val client = PriceTraceBrandClient(HttpsPriceObservationHttpTransport())
         val rows = client.search(config, "", limit = 50)
         assertTrue("Expected deployed public brands", rows.isNotEmpty())
-        val denied = client.call(config, "set_product_candidate_brand_resolution_v1", buildJsonObject {
+        val denied = client.call(config, "set_product_candidate_brand_resolution_v2", buildJsonObject {
             put("p_client_key", "anonymous-denial-probe")
             put("p_source_field", "brand")
             put("p_observed_value", "probe")
