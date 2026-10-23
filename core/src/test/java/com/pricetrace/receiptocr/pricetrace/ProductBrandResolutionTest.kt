@@ -61,6 +61,103 @@ class ProductBrandResolutionTest {
         assertEquals(PriceTraceCandidatePayload.revision(p).authorityClientKey,PriceTraceCandidatePayload.acceptedKeys(result.metadataJson)[p.clientKey])
         assertTrue(result.metadataJson!!.contains("\"clientKey\":\"${p.clientKey}\""))
     }
+    @Test fun publicSearchDoesNotDependOnAnExpiredSignedInSession()=runTest {
+        val requests = mutableListOf<PriceObservationHttpRequest>()
+        val gateway = PriceTraceCanonicalGateway(Store(), PriceObservationHttpTransport { request ->
+            requests += request
+            if ("Authorization" in request.headers) PriceObservationHttpResponse(401, "expired token")
+            else PriceObservationHttpResponse(200, "[]")
+        })
+        assertTrue(gateway.searchBrands("Observed A").isEmpty())
+        assertFalse(requests.single().headers.containsKey("Authorization"))
+    }
+    @Test fun ingestFailurePreservesAcceptedLegacyAuthorityForRetry()=runTest {
+        val p = candidate()
+        val legacy = """{"responses":[{"clientKey":"${p.clientKey}","candidateId":"$root"}]}"""
+        val keys = mutableListOf<String>()
+        var fail = true
+        val gateway = PriceTraceCanonicalGateway(Store(), PriceObservationHttpTransport { request ->
+            val key = Json.parseToJsonElement(request.body!!).jsonObject["p_candidate"]!!.jsonObject["client_key"]!!.jsonPrimitive.content
+            keys += key
+            if (fail) { fail = false; PriceObservationHttpResponse(503, "unavailable") }
+            else PriceObservationHttpResponse(200, """{"candidateId":"$root","clientKey":"$key"}""")
+        })
+        val submitter = PriceTraceProductCandidateProjectionSubmitter(gateway)
+        val failed = submitter.submit(request(p, previous = legacy)) as ProjectionSubmission.Failure
+        assertTrue(failed.retryable)
+        assertEquals(legacy, failed.metadataJson)
+        assertTrue(submitter.submit(request(p, previous = failed.metadataJson)) is ProjectionSubmission.Success)
+        assertEquals(listOf(p.clientKey, p.clientKey), keys)
+    }
+    @Test fun restoredLegacyMetadataTracksExactSourceOrderingWithoutChangingItsAuthorityKey()=runTest {
+        val base = candidate()
+        val p = base.copy(evidence = base.evidence + base.evidence.single().copy(field = "brand", observedValue = base.brand))
+        val source = envelope(p)
+        val store = InMemoryIngestionSessionStore()
+        val orchestrator = IngestionOrchestrator(store, submitters = emptyMap())
+        orchestrator.start("ordered", "document", source)
+        val started = requireNotNull(store.get("ordered"))
+        val legacy = """{"responses":[{"clientKey":"${p.clientKey}","candidateId":"$root"}]}"""
+        store.save(started.copy(projections = started.projections.map {
+            if (it.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
+                it.copy(status = ProjectionStatus.UPLOADED, idempotencyKey = "accepted-key", metadataJson = legacy)
+            else it
+        }))
+        val restored = requireNotNull(orchestrator.prepareExistingSession("ordered", source))
+        val accepted = restored.projections.single { it.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE }
+        assertEquals(ProjectionStatus.UPLOADED, accepted.status)
+        assertEquals(p.clientKey, PriceTraceCandidatePayload.acceptedKeys(accepted.metadataJson)[p.clientKey])
+        assertTrue(accepted.metadataJson!!.contains(PriceTraceCandidatePayload.revision(p).sourceRevisionFingerprint))
+        val edited = source.copy(productCandidates = listOf(p.copy(evidence = p.evidence.reversed())))
+        assertNotEquals(PriceTraceCandidatePayload.revision(p), PriceTraceCandidatePayload.revision(edited.productCandidates.single()))
+        val revised = (orchestrator.reviseCanonicalDraft("ordered", edited) as IngestionStartResult.Success).session
+        val pending = revised.projections.single { it.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE }
+        assertEquals(ProjectionStatus.PENDING, pending.status)
+        assertNull(pending.metadataJson)
+        assertNull(pending.idempotencyKey)
+    }
+    @Test fun restoreRejectsAlreadyStaleUploadedMetadataInsteadOfBlessingIt()=runTest {
+        val old = candidate()
+        val edited = old.copy(brand = "edited source")
+        val source = envelope(edited)
+        val store = InMemoryIngestionSessionStore()
+        val orchestrator = IngestionOrchestrator(store, submitters = emptyMap())
+        orchestrator.start("stale-restore", "document", source)
+        val started = requireNotNull(store.get("stale-restore"))
+        val metadata = """{"responses":[{"clientKey":"${old.clientKey}","candidateId":"$root","sourceRevisionFingerprint":"${PriceTraceCandidatePayload.revision(old).sourceRevisionFingerprint}"}]}"""
+        store.save(started.copy(projections = started.projections.map {
+            if (it.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE)
+                it.copy(status = ProjectionStatus.UPLOADED, idempotencyKey = "old-key", metadataJson = metadata)
+            else it
+        }))
+        val restored = requireNotNull(orchestrator.prepareExistingSession("stale-restore", source))
+        val rejected = restored.projections.single { it.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE }
+        assertEquals(ProjectionStatus.BLOCKED, rejected.status)
+        assertEquals("candidate_source_revision_changed", rejected.lastError)
+        assertNull(rejected.metadataJson)
+        assertNull(rejected.idempotencyKey)
+    }
+    @Test fun recoveryMismatchRetainsAcceptedCandidateAuthorityForCorrection()=runTest {
+        val p = candidate()
+        val legacy = """{"responses":[{"clientKey":"${p.clientKey}","candidateId":"$root"}]}"""
+        val fingerprint = "a".repeat(64)
+        val draft = ProductBrandResolutionDraft(p.clientKey, ProductBrandFactField.BRAND, p.brand!!,
+            ProductBrandSelectionIntent.SELECTED, root, "Canonical A")
+        val gateway = PriceTraceCanonicalGateway(Store(), PriceObservationHttpTransport { request ->
+            when {
+                request.url.endsWith("submit_product_candidate_v1") -> PriceObservationHttpResponse(200,
+                    """{"candidateId":"$root","clientKey":"${p.clientKey}"}""")
+                request.url.endsWith("set_product_candidate_brand_resolution_v1") -> PriceObservationHttpResponse(200,
+                    """{"product_client_key":"${p.clientKey}","request_fingerprint":"$fingerprint","source_field":"brand","observed_value":"${p.brand}","brand_id":"$root","cleared":false}""")
+                else -> PriceObservationHttpResponse(200,
+                    """[{"product_client_key":"${p.clientKey}","request_fingerprint":"$fingerprint","source_field":"brand","observed_value":"${p.brand}","brand_id":"$child","canonical_name":"Concurrent selection","brand_active":true,"parent_brand_id":null,"parent_canonical_name":null,"created_at":"2026-10-23T00:00:00Z","updated_at":"2026-10-23T00:00:00Z"}]""")
+            }
+        })
+        val result = PriceTraceProductCandidateProjectionSubmitter(gateway).submit(request(p, listOf(draft), legacy)) as ProjectionSubmission.Failure
+        assertTrue(result.requiresReview)
+        assertFalse(result.retryable)
+        assertEquals(p.clientKey, PriceTraceCandidatePayload.acceptedKeys(result.metadataJson)[p.clientKey])
+    }
     @Test fun successfulLegacyMetadataKeepsAcceptedAuthorityKey()=runTest {
         val p=candidate(); var wireKey=""
         val gateway=PriceTraceCanonicalGateway(Store(),PriceObservationHttpTransport { r ->

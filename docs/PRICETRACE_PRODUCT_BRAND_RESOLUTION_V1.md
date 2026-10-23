@@ -18,6 +18,8 @@ Only the PT gateway emits this authority key as `p_candidate.client_key`. Candid
 
 Successful, current legacy projection metadata retains its already accepted authority key. Changing source facts clears that metadata through Core's existing projection revision mechanism; it cannot reuse the legacy key. New metadata also records the source hash and rejects stale mappings. Echoed keys must be strings equal to the transmitted authority key before metadata is translated back to logical keys.
 
+When restoring an unchanged canonical source, Core adds a missing exact-source hash to successful legacy metadata without changing its accepted key. This supplements the older artifact fingerprints, which can sort evidence arrays. Source-hash changes invalidate the affected approvals and projections even when those older fingerprints compare equal; already stale uploaded metadata is blocked during restore.
+
 The same effective mapping is used only in PT standalone `product.product_client_key` and purchase-v4 `items[].product.client_key`. The canonical source objects are unchanged. Metadata preserves `priceTraceAuthorityClientKey` separately from logical `clientKey` / `productClientKey`.
 
 ## Selection and persistence
@@ -37,7 +39,7 @@ Editing a raw Brand/sub-brand drops its stale draft in both canonical revision a
 3. Read `get_product_candidate_brand_resolutions_v1` and validate the exact authority key, observed fields, one current server fingerprint and requested selections.
 4. Persist the combined product projection metadata. Brand rows cannot become CatalogProduct identity.
 
-No-selection submissions issue only ingest calls. A partial mutation/read failure does not report projection success; accepted candidate metadata is preserved for retry. Retry uses the same authority and candidate idempotency keys, replays idempotent selections and reads the server-owned current state. Network/auth failures retain existing gateway refresh/retry behavior; hierarchy/contract failures require review. A proper-descendant conflict is corrected by selecting another Brand, explicitly clearing a selection or editing the raw fact. OCR never reparents Brands.
+No-selection submissions issue only ingest calls. A partial mutation/read failure does not report projection success; accepted candidate metadata is preserved for retry, including when ingest itself fails or recovery detects a conflicting selection. Retry uses the same authority and candidate idempotency keys, replays idempotent selections and reads the server-owned current state. Network/auth failures retain existing private gateway refresh/retry behavior; hierarchy/contract failures require review. Public Brand discovery always uses the anonymous public connection, so an expired signed-in session cannot block it. A proper-descendant conflict is corrected by selecting another Brand, explicitly clearing a selection or editing the raw fact. OCR never reparents Brands.
 
 The private mutation is `set_product_candidate_brand_resolution_v1(p_client_key text, p_source_field text, p_observed_value text, p_brand_id uuid, p_user_verified boolean) RETURNS jsonb`. Null ID explicitly clears. The read RPC accepts `p_client_key text` and returns current owner-only resolutions, including the server fingerprint and archived-ID state. Public discovery uses the existing strict `get_public_brand_catalog_v1` contract; anonymous discovery sends the publishable `apikey` without a blank Bearer header.
 

@@ -37,6 +37,38 @@ object PriceTraceCandidatePayload {
         }
         return keys
     }
+
+    /** Add a baseline only when Core has proved the saved canonical source is unchanged. */
+    fun annotateCurrentLegacySource(metadata: String, candidates: List<ProductCandidate>): String {
+        val root = runCatching { Json.parseToJsonElement(metadata).jsonObject }.getOrNull() ?: return metadata
+        val byKey = candidates.associateBy(ProductCandidate::clientKey)
+        var changed = false
+        val updated = root.toMutableMap()
+        for (field in listOf("responses", "products")) {
+            val rows = root[field] as? JsonArray ?: continue
+            updated[field] = JsonArray(rows.map { element ->
+                val row = element as? JsonObject ?: return@map element
+                val candidate = byKey[(row["clientKey"] as? JsonPrimitive)?.contentOrNull] ?: return@map row
+                if ("sourceRevisionFingerprint" in row) return@map row
+                changed = true
+                JsonObject(row + ("sourceRevisionFingerprint" to JsonPrimitive(revision(candidate).sourceRevisionFingerprint)))
+            })
+        }
+        return if (changed) JsonObject(updated).toString() else metadata
+    }
+
+    /** Legacy display/artifact hashes may sort arrays or collide on delimiter-containing facts. */
+    fun changedSourceKeys(metadata: String?, candidates: List<ProductCandidate>): Set<String> {
+        val root = metadata?.let { runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull() } ?: return emptySet()
+        val fingerprints = candidates.associate { it.clientKey to revision(it).sourceRevisionFingerprint }
+        return listOf("responses", "products").flatMap { (root[it] as? JsonArray).orEmpty() }
+            .mapNotNull { element ->
+                val row = element as? JsonObject ?: return@mapNotNull null
+                val key = (row["clientKey"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+                val stored = (row["sourceRevisionFingerprint"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+                key.takeIf { fingerprints[key] != stored }
+            }.toSet()
+    }
     fun source(candidate: ProductCandidate): JsonObject = buildJsonObject {
         put("schema_version", JsonPrimitive("PRICETRACE_PRODUCT_CANDIDATE"))
         put("contract_version", JsonPrimitive("product-candidate.v1"))

@@ -32,6 +32,7 @@ class PriceTraceProductCandidateProjectionSubmitter(
             is PriceTraceCanonicalOutcome.Failure -> ProjectionSubmission.Failure(
                 message = result.message ?: result.kind.name,
                 retryable = result.kind.retryable,
+                metadataJson = request.previousMetadataJson,
             )
             is PriceTraceCanonicalOutcome.Success -> try {
                 val identities = PriceTraceProductIdentityJson.tryDecode(
@@ -76,7 +77,8 @@ class PriceTraceProductCandidateProjectionSubmitter(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
-                ProjectionSubmission.Failure("pricetrace_product_identity_invalid", retryable = false,requiresReview = true)
+                ProjectionSubmission.Failure("pricetrace_product_identity_invalid", retryable = false,
+                    requiresReview = true, metadataJson = result.response.toString())
             }
         }
     }

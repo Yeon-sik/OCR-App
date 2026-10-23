@@ -10,7 +10,7 @@ class PriceTraceBrandClient(private val transport: PriceObservationHttpTransport
         require(config.isConnectionConfigured) { "PriceTrace 연결 설정 필요" }
         val response = call(config, "get_public_brand_catalog_v1", buildJsonObject {
             put("p_query", query); put("p_limit", limit.coerceIn(1,200)); put("p_offset", offset.coerceIn(0,1000000))
-        }, config.isSignedIn)
+        }, authenticated = false)
         require(response.statusCode in 200..299) { "브랜드 검색 실패 (${response.statusCode})" }
         return parseSearch(response.body)
     }

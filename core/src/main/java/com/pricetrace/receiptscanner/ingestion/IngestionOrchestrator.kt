@@ -1,6 +1,7 @@
 package com.pricetrace.receiptscanner.ingestion
 
 import com.pricetrace.receiptscanner.domain.PlaceResolutionStatus
+import com.pricetrace.receiptocr.pricetrace.PriceTraceCandidatePayload
 import com.pricetrace.receiptscanner.domain.ReceiptV2
 import com.pricetrace.receiptscanner.domain.StableIds
 import com.pricetrace.receiptscanner.export.ReceiptV2Json
@@ -256,6 +257,21 @@ class IngestionOrchestrator(
         restoredSnapshot: Boolean = false,
     ): IngestionSession? {
         var session = store.get(ingestionId) ?: return null
+        if (session.canonicalFingerprint == fingerprint(envelope)) {
+            val annotated = session.projections.map { state ->
+                if (state.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE &&
+                    state.status == ProjectionStatus.UPLOADED && state.metadataJson != null) {
+                    state.copy(metadataJson = PriceTraceCandidatePayload.annotateCurrentLegacySource(state.metadataJson, envelope.productCandidates))
+                } else state
+            }
+            if (annotated != session.projections) {
+                session = session.copy(projections = annotated)
+                store.save(session)
+            }
+            if (changedProductSourceArtifacts(session, envelope).isNotEmpty()) {
+                session = invalidateVerification(session, envelope, "candidate_source_revision_changed")
+            }
+        }
         val fitness = session.projections.singleOrNull { it.projection == IngestionProjection.FITNESS_NUTRITION }
         val legacyDiningOut = diningOutItems(envelope).isNotEmpty() &&
             (envelope.receipt != null || envelope.priceObservations.isNotEmpty() || envelope.purchaseNutritionLinks.isNotEmpty()) &&
@@ -568,6 +584,7 @@ class IngestionOrchestrator(
         val nowValue = now()
         val previousArtifacts = current.verifiedArtifactFingerprints
         val nextArtifacts = artifactFingerprints(envelope)
+        val changedProductSources = changedProductSourceArtifacts(current, envelope)
         val affectedArtifactKeys = changedArtifactKeys(previousArtifacts, nextArtifacts)
         val enabled = enabledProjections(envelope).toSet()
         val purchaseIdentityAmendment = envelope.schemaVersion == YEONSIK_OCR_V5_SCHEMA && current.projections.any {
@@ -583,7 +600,7 @@ class IngestionOrchestrator(
             reviewStatus = IngestionReviewStatus.NEEDS_REVIEW,
             verifiedCanonicalFingerprint = null,
             verifiedAt = null,
-            verifiedArtifactFingerprints = previousArtifacts.filter { (key, value) -> nextArtifacts[key] == value },
+            verifiedArtifactFingerprints = previousArtifacts.filter { (key, value) -> nextArtifacts[key] == value && key !in changedProductSources },
             updatedAt = nowValue,
             projections = current.projections.map { state ->
                 val shouldEnable = state.projection in enabled
@@ -616,10 +633,11 @@ class IngestionOrchestrator(
                         )
                     else -> {
                         val nextProjectionFingerprint = projectionPayloadFingerprint(state, envelope)
-                        val payloadChanged = state.projectionPayloadFingerprint?.let {
+                        val payloadChanged = (state.projectionPayloadFingerprint?.let {
                             it != nextProjectionFingerprint
                         } ?: (state.idempotencyKey != null &&
-                            projectionIsAffected(state.projection, affectedArtifactKeys))
+                            projectionIsAffected(state.projection, affectedArtifactKeys))) ||
+                            requiredArtifactKeys(state.projection, envelope).any { it in changedProductSources }
                         if (payloadChanged) {
                             resetForPayloadChange(state, nowValue, nextProjectionFingerprint)
                         } else {
@@ -2260,6 +2278,14 @@ class IngestionOrchestrator(
         projectionPayloadFingerprint = payloadFingerprint,
     )
 
+    private fun changedProductSourceArtifacts(session: IngestionSession, envelope: YeonsikOcrEnvelope): Set<String> {
+        val metadata = session.projections.singleOrNull {
+            it.projection == IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE
+        }?.metadataJson
+        return PriceTraceCandidatePayload.changedSourceKeys(metadata, envelope.productCandidates)
+            .map(IngestionArtifactKeys::productCandidate).toSet()
+    }
+
     private suspend fun invalidateVerification(
         session: IngestionSession,
         envelope: YeonsikOcrEnvelope,
@@ -2267,7 +2293,8 @@ class IngestionOrchestrator(
     ): IngestionSession {
         val nowValue = now()
         val nextArtifacts = artifactFingerprints(envelope)
-        val preserved = session.verifiedArtifactFingerprints.filter { (key, value) -> nextArtifacts[key] == value }
+        val changedProductSources = changedProductSourceArtifacts(session, envelope)
+        val preserved = session.verifiedArtifactFingerprints.filter { (key, value) -> nextArtifacts[key] == value && key !in changedProductSources }
         val affectedArtifactKeys = changedArtifactKeys(session.verifiedArtifactFingerprints, nextArtifacts)
         val updated = session.copy(
             brandResolutionDrafts = currentBrandDrafts(session.brandResolutionDrafts,envelope.productCandidates),
@@ -2281,10 +2308,11 @@ class IngestionOrchestrator(
                     state.status == ProjectionStatus.DISABLED -> state
                     else -> {
                         val nextProjectionFingerprint = projectionPayloadFingerprint(state, envelope)
-                        val payloadChanged = state.projectionPayloadFingerprint?.let {
+                        val payloadChanged = (state.projectionPayloadFingerprint?.let {
                             it != nextProjectionFingerprint
                         } ?: (state.idempotencyKey != null &&
-                            projectionIsAffected(state.projection, affectedArtifactKeys))
+                            projectionIsAffected(state.projection, affectedArtifactKeys))) ||
+                            requiredArtifactKeys(state.projection, envelope).any { it in changedProductSources }
                         if (payloadChanged) {
                             resetForPayloadChange(state, nowValue, nextProjectionFingerprint).copy(
                                 status = ProjectionStatus.BLOCKED,
