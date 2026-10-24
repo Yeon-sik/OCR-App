@@ -7,12 +7,15 @@ import org.junit.Assert.*
 import org.junit.Test
 import java.nio.file.Files
 class MultiCandidateAuthorityPersistenceTest {
- @Test fun siblingEditSurvivesNewDesktopStore()=runBlocking {
-  val a=ProductCandidate("legacy-a","Product A",brand="Raw A",evidence=listOf(ProductCandidateEvidence(sourceAttachmentIds=listOf("photo"),sourceRef="capture:photo",field="product_name",observedValue="Product A")))
+ @Test fun siblingEditSurvivesNewDesktopStore()=checkRestart("legacy-a")
+ @Test fun uuidLegacyAuthoritySurvivesNewDesktopStoreAndDownstreamReplay()=
+  checkRestart("550e8400-e29b-41d4-a716-446655440000")
+ private fun checkRestart(logicalA:String)=runBlocking {
+  val a=ProductCandidate(logicalA,"Product A",brand="Raw A",evidence=listOf(ProductCandidateEvidence(sourceAttachmentIds=listOf("photo"),sourceRef="capture:photo",field="product_name",observedValue="Product A")))
   val b=a.copy(clientKey="legacy-b",productName="Product B")
   val envelope=YeonsikOcrEnvelope(IngestionMode.PACKAGED_PRODUCT,IngestionSource("fixture",listOf(SourceAttachment("photo",SourceAttachmentType.PRODUCT_PHOTO))),productCandidates=listOf(a,b),schemaVersion=YEONSIK_OCR_V3_SCHEMA,targets=setOf(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE))
   val directory=Files.createTempDirectory("multi-authority");val store=DesktopSessionStore(directory);val o=IngestionOrchestrator(store,submitters=emptyMap());o.start("i","doc",envelope)
-  val s=requireNotNull(store.get("i"));val legacy="""{"responses":[{"clientKey":"legacy-a","candidateId":"00000000-0000-4000-8000-000000000001"},{"clientKey":"legacy-b","candidateId":"00000000-0000-4000-8000-000000000002"}]}"""
+  val s=requireNotNull(store.get("i"));val legacy="""{"responses":[{"clientKey":"${a.clientKey}","candidateId":"00000000-0000-4000-8000-000000000001"},{"clientKey":"legacy-b","candidateId":"00000000-0000-4000-8000-000000000002"}]}"""
   store.save(s.copy(projections=s.projections.map { if(it.projection==IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE) it.copy(status=ProjectionStatus.UPLOADED,idempotencyKey="old-accepted",metadataJson=legacy) else it }))
   val expectedA=a.clientKey
   val restored=requireNotNull(o.prepareExistingSession("i",envelope))

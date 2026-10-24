@@ -73,7 +73,7 @@ class ProductBrandResolutionTest {
     }
     @Test fun ingestFailurePreservesAcceptedLegacyAuthorityForRetry()=runTest {
         val p = candidate()
-        val legacy = """{"responses":[{"clientKey":"${p.clientKey}","candidateId":"$root"}]}"""
+        val legacy = """{"responses":[{"clientKey":"${p.clientKey}","candidateId":"$root","sourceRevisionFingerprint":"${PriceTraceCandidatePayload.revision(p).sourceRevisionFingerprint}"}]}"""
         val keys = mutableListOf<String>()
         var fail = true
         val gateway = PriceTraceCanonicalGateway(Store(), PriceObservationHttpTransport { request ->
@@ -139,7 +139,7 @@ class ProductBrandResolutionTest {
     }
     @Test fun recoveryMismatchRetainsAcceptedCandidateAuthorityForCorrection()=runTest {
         val p = candidate()
-        val legacy = """{"responses":[{"clientKey":"${p.clientKey}","candidateId":"$root"}]}"""
+        val legacy = """{"responses":[{"clientKey":"${p.clientKey}","candidateId":"$root","sourceRevisionFingerprint":"${PriceTraceCandidatePayload.revision(p).sourceRevisionFingerprint}"}]}"""
         val fingerprint = "a".repeat(64)
         val draft = ProductBrandResolutionDraft(p.clientKey, ProductBrandFactField.BRAND, p.brand!!,
             ProductBrandSelectionIntent.SELECTED, root, "Canonical A")
@@ -164,7 +164,7 @@ class ProductBrandResolutionTest {
             wireKey=Json.parseToJsonElement(r.body!!).jsonObject["p_candidate"]!!.jsonObject["client_key"]!!.jsonPrimitive.content
             PriceObservationHttpResponse(200,"""{"candidateId":"$root","clientKey":"$wireKey"}""")
         })
-        val result=PriceTraceProductCandidateProjectionSubmitter(gateway).submit(request(p,previous="""{"responses":[{"clientKey":"${p.clientKey}","candidateId":"$root"}]}"""))
+        val result=PriceTraceProductCandidateProjectionSubmitter(gateway).submit(request(p,previous="""{"responses":[{"clientKey":"${p.clientKey}","candidateId":"$root","sourceRevisionFingerprint":"${PriceTraceCandidatePayload.revision(p).sourceRevisionFingerprint}"}]}"""))
         assertTrue(result is ProjectionSubmission.Success); assertEquals(p.clientKey,wireKey)
     }
     @Test fun mismatchedAuthorityEchoFailsClosed()=runTest {

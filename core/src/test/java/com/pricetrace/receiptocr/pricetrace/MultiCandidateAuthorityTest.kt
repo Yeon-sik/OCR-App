@@ -8,12 +8,14 @@ import org.junit.Test
 class MultiCandidateAuthorityTest {
  @Test fun unchangedLegacyCandidateSurvivesSiblingEdit()=checkPreservation(false)
  @Test fun unchangedRevisionCandidateSurvivesSiblingEdit()=checkPreservation(true)
- private fun checkPreservation(modern:Boolean)=runTest {
-  val a=ProductCandidate("legacy-a","Product A",brand="Raw A",evidence=listOf(ProductCandidateEvidence(sourceType="user_statement",sourceRef="user-statement:product",field="product_name",observedValue="Product A")))
+ @Test fun unchangedUuidLegacyCandidateSurvivesSiblingEditAndAllDownstreamBoundaries()=
+  checkPreservation(false, "550e8400-e29b-41d4-a716-446655440000")
+ private fun checkPreservation(modern:Boolean, logicalA:String="legacy-a")=runTest {
+  val a=ProductCandidate(logicalA,"Product A",brand="Raw A",evidence=listOf(ProductCandidateEvidence(sourceType="user_statement",sourceRef="user-statement:product",field="product_name",observedValue="Product A")))
   val b=a.copy(clientKey="legacy-b",productName="Product B")
   val envelope=YeonsikOcrEnvelope(IngestionMode.PACKAGED_PRODUCT,IngestionSource("fixture",emptyList(),userText="Two explicitly reviewed products"),productCandidates=listOf(a,b),schemaVersion=YEONSIK_OCR_V3_SCHEMA,targets=setOf(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE))
   val store=InMemoryIngestionSessionStore();val o=IngestionOrchestrator(store,submitters=emptyMap());o.start("i","doc",envelope)
-  val s=requireNotNull(store.get("i"));val legacy="""{"responses":[{"clientKey":"legacy-a","candidateId":"00000000-0000-4000-8000-000000000001"},{"clientKey":"legacy-b","candidateId":"00000000-0000-4000-8000-000000000002"}]}"""
+  val s=requireNotNull(store.get("i"));val legacy="""{"responses":[{"clientKey":"${a.clientKey}","candidateId":"00000000-0000-4000-8000-000000000001"},{"clientKey":"legacy-b","candidateId":"00000000-0000-4000-8000-000000000002"}]}"""
   store.save(s.copy(projections=s.projections.map { if(it.projection==IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE) it.copy(status=ProjectionStatus.UPLOADED,idempotencyKey="old-accepted",metadataJson=legacy) else it }))
   if(modern) {
    val meta=buildJsonObject { put("responses",JsonArray(listOf(a,b).map { c -> buildJsonObject {
@@ -54,6 +56,7 @@ class MultiCandidateAuthorityTest {
   val keys=calls.map { Json.parseToJsonElement(it.body!!).jsonObject["p_candidate"]!!.jsonObject["client_key"]!!.jsonPrimitive.content }
   val expectedB=PriceTraceCandidatePayload.revision(edited.productCandidates[1]).authorityClientKey
   assertEquals(listOf(expectedA,expectedB,expectedA,expectedB),keys)
+  assertEquals(setOf(expectedA, expectedB), keys.toSet())
   assertEquals(mapOf(a.clientKey to expectedA,b.clientKey to expectedB),PriceTraceCandidatePayload.acceptedKeys(success.metadataJson,edited.productCandidates))
   checkDownstream(edited, requireNotNull(success.metadataJson), config, listOf(expectedA, expectedB))
  }

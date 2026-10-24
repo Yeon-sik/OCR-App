@@ -44,7 +44,7 @@ class PriceTraceProductCandidateProjectionSubmitter(
                 }
                 val remoteId = result.response.requiredProductId()
                 val recovered = mutableListOf<kotlinx.serialization.json.JsonObject>()
-                val authorityKeys=PriceTraceCandidatePayload.acceptedKeys(result.response.toString())
+                val authorityKeys=PriceTraceCandidatePayload.acceptedKeys(result.response.toString(), candidates)
                 for (candidate in candidates) {
                     val intents=drafts.filter { it.productClientKey==candidate.clientKey && it.intent!=ProductBrandSelectionIntent.UNSET }
                         .sortedWith(compareBy({ it.intent != ProductBrandSelectionIntent.CLEAR }, { it.sourceField.ordinal }))

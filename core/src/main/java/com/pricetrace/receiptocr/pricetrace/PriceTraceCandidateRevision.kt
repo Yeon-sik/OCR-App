@@ -24,15 +24,23 @@ object PriceTraceCandidatePayload {
     fun acceptedKeys(metadata: String?, candidates: List<ProductCandidate>? = null): Map<String, String> {
         val root = metadata?.let { runCatching { Json.parseToJsonElement(it) as JsonObject }.getOrNull() } ?: return emptyMap()
         val rows = listOf("responses", "products").flatMap { (root[it] as? JsonArray).orEmpty() }
+        val current = candidates?.associateBy(ProductCandidate::clientKey)
         val keys = linkedMapOf<String,String>()
         rows.forEach { element ->
             val row = element as? JsonObject ?: return@forEach
-            val logical = (row["clientKey"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
-            val sourceFingerprint=(row["sourceRevisionFingerprint"] as? JsonPrimitive)?.contentOrNull
-            if(candidates!=null && sourceFingerprint!=null && candidates.singleOrNull { it.clientKey==logical }?.let { revision(it).sourceRevisionFingerprint }!=sourceFingerprint) return@forEach
-            val authority = (row["priceTraceAuthorityClientKey"] as? JsonPrimitive)?.contentOrNull
-                ?: (row["productClientKey"] as? JsonPrimitive)?.contentOrNull ?: logical
-            require(validAuthorityKey(authority)) { "invalid_candidate_authority_key" }
+            val logical = metadataText(row, "clientKey") ?: return@forEach
+            val sourceFingerprint = metadataText(row, "sourceRevisionFingerprint") ?: return@forEach
+            if (!hasAcceptedIdentity(row)) return@forEach
+            val authority = metadataAuthority(row, logical) ?: return@forEach
+            if (current != null) {
+                val candidate = current[logical] ?: return@forEach
+                if (sourceFingerprint != revision(candidate).sourceRevisionFingerprint) return@forEach
+                require(isAcceptedAuthorityForCandidate(candidate, authority, sourceFingerprint)) { "invalid_candidate_authority_key" }
+            } else {
+                // 현재 후보 없이 읽을 때도 metadata 내부의 logical/revision 두 identity만 허용한다.
+                require(sourceFingerprint.matches(Regex("[0-9a-f]{64}")) &&
+                    (authority == logical || authority == "ocrpc-r1-$sourceFingerprint")) { "invalid_candidate_authority_key" }
+            }
             require(keys[logical] == null || keys[logical] == authority) { "conflicting_candidate_authority_key" }
             keys[logical] = authority
         }
@@ -42,20 +50,15 @@ object PriceTraceCandidatePayload {
     /** Aggregate workflow resets must retain only independently accepted, exact-source candidates. */
     fun preserveCurrentCandidateAuthorityMetadata(metadata: String?, candidates: List<ProductCandidate>): String? {
         val root = metadata?.let { runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull() } ?: return null
-        val current = candidates.associate { it.clientKey to revision(it).sourceRevisionFingerprint }
-        fun text(row: JsonObject, key: String) = (row[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        val current = candidates.associateBy(ProductCandidate::clientKey)
         val arrays = listOf("responses", "products").associateWith { field ->
             JsonArray((root[field] as? JsonArray).orEmpty().filter { element ->
                 val row = element as? JsonObject ?: return@filter false
-                val logical = text(row, "clientKey") ?: return@filter false
-                val authority = when {
-                    "priceTraceAuthorityClientKey" in row -> text(row, "priceTraceAuthorityClientKey") ?: return@filter false
-                    "productClientKey" in row -> text(row, "productClientKey") ?: return@filter false
-                    else -> logical
-                }
-                val acceptedIdentity = listOf("candidateId", "catalogProductId", "catalog_product_id").any { !text(row, it).isNullOrBlank() }
-                acceptedIdentity && validAuthorityKey(authority) && current[logical] != null &&
-                    text(row, "sourceRevisionFingerprint") == current[logical]
+                val logical = metadataText(row, "clientKey") ?: return@filter false
+                val candidate = current[logical] ?: return@filter false
+                val authority = metadataAuthority(row, logical) ?: return@filter false
+                hasAcceptedIdentity(row) && isAcceptedAuthorityForCandidate(candidate, authority,
+                    metadataText(row, "sourceRevisionFingerprint"))
             })
         }
         if (arrays.values.all { it.isEmpty() }) return null
@@ -67,9 +70,25 @@ object PriceTraceCandidatePayload {
         return preserved.toString()
     }
 
-    private fun validAuthorityKey(key: String) = key.isNotBlank() && key.length <= 200 &&
-        key == key.trim() && key.none(Char::isISOControl) &&
-        !key.matches(Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"))
+    private fun isAcceptedAuthorityForCandidate(candidate: ProductCandidate, authority: String,
+        storedSourceRevisionFingerprint: String?): Boolean {
+        val current = revision(candidate)
+        // 승인된 legacy key는 UUID 모양이어도 유지하며, source가 바뀌면 재사용하지 않는다.
+        return storedSourceRevisionFingerprint == current.sourceRevisionFingerprint &&
+            (authority == candidate.clientKey || authority == current.authorityClientKey)
+    }
+
+    private fun metadataText(row: JsonObject, key: String) =
+        (row[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+    private fun hasAcceptedIdentity(row: JsonObject) =
+        listOf("candidateId", "catalogProductId", "catalog_product_id").any { !metadataText(row, it).isNullOrBlank() }
+
+    private fun metadataAuthority(row: JsonObject, logical: String): String? = when {
+        "priceTraceAuthorityClientKey" in row -> metadataText(row, "priceTraceAuthorityClientKey")
+        "productClientKey" in row -> metadataText(row, "productClientKey")
+        else -> logical
+    }
 
     /** Add a baseline only when Core has proved the saved canonical source is unchanged. */
     fun annotateCurrentLegacySource(metadata: String, candidates: List<ProductCandidate>): String {

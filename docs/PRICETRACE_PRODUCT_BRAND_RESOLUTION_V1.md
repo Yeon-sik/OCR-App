@@ -64,7 +64,7 @@ On Windows, the current Android plugin/JVM tests have path limitations with this
 
 ## Candidate-scoped recovery and V2 semantics
 
-A projection reset keeps only rows with an explicit current logical key, identical `sourceRevisionFingerprint`, structurally valid authority key and accepted candidate/catalog identity. It rebuilds `responses`/`products` without stale remote Brand rows. Duplicate authority representations must agree. Missing fingerprints are not invented during reset: only restoration of an unchanged, previously uploaded legacy projection may annotate them first.
+A projection reset keeps only rows with an explicit current logical key, identical `sourceRevisionFingerprint`, accepted candidate/catalog identity, and authority equal to either the current logical key or its exact derived revision key. It rebuilds `responses`/`products` without stale remote Brand rows. Duplicate authority representations must agree. Missing fingerprints are not invented during reset: only restoration of an unchanged, previously uploaded legacy projection may annotate them first.
 
 Editing B sets the aggregate projection to PENDING while retaining unchanged A's accepted authority. This applies to legacy logical authorities and `ocrpc-r1-*` authorities. B derives the new revision deterministically; retries and durable session/Room reloads use the same mixed map. Existing source hashing, immutable PT keys and canonical v1-v5 are unchanged.
 
@@ -73,3 +73,11 @@ V2 read retains the eleven V1 fields and appends `pair_relationship`, `pair_rela
 Both fields may explicitly select the same UUID. Android/Desktop display that fact while keeping both raw observations. Later graph drift and archival preserve local historical snapshots with change/clear controls. A review-required read produces a semantic, non-retryable review state and cannot mark the projection fully complete. A later explicit retry may succeed after user action or a corrected server graph. Network failures remain retryable. There is no private V1 fallback when V2 is unavailable; public Brand search remains V1.
 
 Regression coverage includes mixed legacy/current authority keys in actual standalone, purchase-v4 and Brand V2 request bodies, partial failure/retry, Desktop store reconstruction, Room close/reopen, explicit same-Brand UI selections and non-destructive drift/archival warnings. SQL and remote deployment evidence is maintained in PriceTrace's V2 contract validation report.
+
+## Final legacy authority compatibility repair
+
+An accepted legacy authority may equal a UUID-shaped, prefixed, numeric-looking or other opaque logical ProductCandidate key. Its validity follows exact candidate/revision identity, not string shape. For candidate C, only `C.clientKey` and `revision(C).authorityClientKey` are allowed. Candidate-aware recovery and preservation also require accepted candidate/catalog identity and an exact current `sourceRevisionFingerprint`; missing or stale proof is not reused. An unrelated third authority is dropped during preservation or rejected during strict recovery. Conflicting logical/revision representations still fail.
+
+All production metadata recovery paths supply current candidates, including Brand V2 submission. Decoding without candidate context checks internal logical/revision consistency and does not establish current-source proof. Proven unchanged legacy sessions may still receive the existing restoration annotation before recovery. Source, revision, wire and canonical v1-v5 models remain unchanged.
+
+Regression tests preserve a UUID legacy A through sibling B edits, partial failure/retry, new Desktop store instances and actual outgoing candidate, standalone, purchase-v4 and Brand V2 requests. Existing non-UUID legacy/current revision tests remain. Historical validation notes describing a non-UUID-only rule are superseded by this candidate-aware identity rule. PriceTrace code and RPCs remain frozen during this OCR repair.
