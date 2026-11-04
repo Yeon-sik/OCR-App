@@ -5,6 +5,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.key
 import androidx.compose.runtime.Composable
@@ -147,10 +149,13 @@ fun ReviewWorkspace(
         }
         val navigation = remember(state.ingestionId) { ReviewNavigation() }
         val groups = canonicalReviewFieldGroups(envelope)
+        val hiddenPurchaseNames = purchaseItemReviewLayout(groups.visibleFields, envelope,
+            state.reviewFieldErrors.keys + state.reviewDrafts.keys).hiddenPaths
         val paths = LinkedProductReview.facts(envelope).filter { it.status == ProductFactStatus.CONFLICT }
             .map { "conflict:${it.productClientKey}:${it.field}" } +
             state.reviewDrafts.keys.filter { it.endsWith(".new_option") } +
             (groups.visibleFields + groups.emptyOptionalFields.filter { it.path in state.reviewFieldErrors || it.path in state.reviewDrafts })
+                .filterNot { it.path in hiddenPurchaseNames }
                 .sortedBy { reviewFieldPriority(it, state.reviewFieldErrors.keys, state.reviewDrafts.keys) }
                 .map { it.path }
         val confirmationBlocker = reviewConfirmationBlocker(state, busy, revisionReady)
@@ -583,12 +588,13 @@ private fun EditableCanonicalSection(
                 ReviewTarget("conflict:${fact.productClientKey}:${fact.field}") { ProductFactConflict(fact, busy, onEdit) }
             }
         }
-        CategorizedReviewFields(fields.filterNot { ".option_items[" in it.path }, fieldErrors.keys) { field ->
+        CategorizedReviewFields(fields.filterNot { ".option_items[" in it.path }, fieldErrors.keys,
+            itemOptions = { linePath -> PurchaseOptionEditor(envelope, edits, fieldErrors, busy,
+                embeddedLinePath = linePath, onEdit = onEdit) }) { field ->
                 AccessibleField(field, CanonicalFieldRegistry.isModified(field, edits),
                     edits.firstOrNull { it.fieldPath == field.path }?.previousValue, fieldErrors[field.path], busy,
                     onApply = { value -> onEdit { it.updateField(field.path, value) } })
         }
-        PurchaseOptionEditor(envelope, edits, fieldErrors, busy, onEdit)
         if (emptyOptional.isNotEmpty()) {
             CollectorButton(if (showEmptyOptionalFields) "빈 선택 항목 접기" else "비어 있는 선택 항목 ${emptyOptional.size}개 보기",
                 { showEmptyOptionalFields = !showEmptyOptionalFields }, enabled = !busy, emphasized = false)
@@ -611,18 +617,26 @@ internal fun PurchaseOptionEditor(
     edits: List<com.pricetrace.receiptscanner.review.CanonicalReviewEdit>,
     fieldErrors: Map<String, String>,
     busy: Boolean,
+    embeddedLinePath: String? = null,
     onEdit: ((CanonicalReviewController) -> Boolean) -> Unit,
 ) {
     val fields = CanonicalFieldRegistry.fields(envelope)
     envelope.purchaseRecords.forEach { record ->
         record.lineItems.forEachIndexed { lineIndex, line ->
             val lineKey = line.lineKey ?: lineIndex.toString()
-            val path = "purchase_records[${record.clientKey}].line_items[$lineKey].option_items"
+            val linePath = "purchase_records[${record.clientKey}].line_items[$lineKey]"
+            if (embeddedLinePath != null && embeddedLinePath != linePath) return@forEachIndexed
+            val path = "$linePath.option_items"
             val actions = LocalReviewDraftActions.current
             val draftPath = "$path.new_option"
             var localDescription by rememberSaveable(path) { mutableStateOf("") }
             val description = if (actions != null) actions.values[draftPath].orEmpty() else localDescription
-            CollectorSection("${line.description} · 구매 옵션", "수량·금액이 원본에 없으면 비워 두세요. 실제 0원은 0을 입력하세요.") {
+            var optionsExpanded by rememberSaveable(path) { mutableStateOf(false) }
+            val needsAttention = actions?.values.orEmpty().keys.any { it.startsWith(path) } ||
+                fieldErrors.keys.any { it.startsWith(path) } ||
+                LocalReviewNavigation.current?.requestedPath?.startsWith(path) == true
+            val showOptions = embeddedLinePath == null || optionsExpanded || line.optionItems.isNotEmpty() || needsAttention
+            val optionContent: @Composable ColumnScope.() -> Unit = {
                 if (edits.any { it.fieldPath == path }) Text("검수자가 옵션 목록을 수정했습니다.", style = MaterialTheme.typography.bodySmall)
                 ReviewTarget(draftPath) {
                     OutlinedTextField(
@@ -664,6 +678,19 @@ internal fun PurchaseOptionEditor(
                             }, enabled = !busy && actions?.values.orEmpty().keys.none { it.startsWith("$prefix.") }, emphasized = false)
                         }
                     }
+                }
+            }
+            if (embeddedLinePath == null) CollectorSection("${line.description} · 구매 옵션",
+                "수량·금액이 원본에 없으면 비워 두세요. 실제 0원은 0을 입력하세요.", content = optionContent)
+            else {
+                if (line.optionItems.isNotEmpty() || needsAttention) Text("구매 옵션", style = MaterialTheme.typography.labelLarge)
+                else TextButton({ optionsExpanded = !optionsExpanded }, enabled = !busy) {
+                    Text(if (optionsExpanded) "구매 옵션 접기" else "구매 옵션 추가")
+                }
+                if (showOptions) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("수량·금액이 원본에 없으면 비워 두세요. 실제 0원은 0을 입력하세요.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    optionContent()
                 }
             }
         }

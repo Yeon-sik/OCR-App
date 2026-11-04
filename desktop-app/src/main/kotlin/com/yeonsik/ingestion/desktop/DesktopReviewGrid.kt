@@ -58,8 +58,18 @@ private fun categoryAccent(category: ReviewFieldCategory): Color = when (categor
 }
 
 @Composable
-internal fun CategorizedReviewFields(fields: List<CanonicalEditableField>, errors: Set<String> = emptySet(), content: @Composable (CanonicalEditableField) -> Unit) {
-    val groups = fields.groupBy(::reviewFieldCategory)
+internal fun CategorizedReviewFields(
+    fields: List<CanonicalEditableField>,
+    errors: Set<String> = emptySet(),
+    itemOptions: @Composable (String) -> Unit = {},
+    content: @Composable (CanonicalEditableField) -> Unit,
+) {
+    val navigation = LocalReviewNavigation.current
+    val drafts = LocalReviewDraftActions.current?.values.orEmpty()
+    val attentionPaths = errors + drafts.keys + listOfNotNull(navigation?.requestedPath)
+    val layout = purchaseItemReviewLayout(fields, LocalReviewEnvelope.current, attentionPaths)
+    val groups = layout.otherFields.groupBy(::reviewFieldCategory).toMutableMap()
+    if (layout.items.isNotEmpty()) groups[ReviewFieldCategory.ITEMS] = layout.items.flatMap { it.fields }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         ReviewFieldCategory.entries.forEach { category ->
             val categoryFields = groups[category] ?: return@forEach
@@ -75,27 +85,30 @@ internal fun CategorizedReviewFields(fields: List<CanonicalEditableField>, error
                             style = MaterialTheme.typography.labelSmall)
                     }
                     if (category == ReviewFieldCategory.ITEMS) {
-                        categoryFields.groupBy { reviewLineGroup(it.path) }.entries.forEachIndexed { index, (linePath, lineFields) ->
-                            key(linePath) {
-                                val primary = lineFields.filterNot(::reviewLineDetail).sortedBy {
-                                    when (it.path.substringAfterLast('.')) { "description" -> 0; "quantity" -> 1; else -> 2 }
-                                }
-                                val details = lineFields.filter(::reviewLineDetail)
-                                val navigation = LocalReviewNavigation.current
-                                val drafts = LocalReviewDraftActions.current?.values.orEmpty()
+                        layout.items.forEachIndexed { index, item ->
+                            key(item.path) {
+                                val primary = item.fields.filterNot(::purchaseItemDetail).sortedBy(::purchaseItemFieldOrder)
+                                val details = item.fields.filter(::purchaseItemDetail)
                                 var expanded by remember { mutableStateOf(false) }
+                                var showPurchaseName by remember { mutableStateOf(false) }
                                 val needsAttention = details.any { it.path in errors || it.path in drafts || it.path == navigation?.requestedPath }
-                                Column(Modifier.fillMaxWidth().testTag("review-line:$linePath"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Column(Modifier.fillMaxWidth().testTag("review-line:${item.path}"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                     if (index > 0) HorizontalDivider()
-                                    Text("품목 ${index + 1} · ${primary.firstOrNull { it.path.endsWith(".description") }?.value ?: "이름 미확인"}",
-                                        style = MaterialTheme.typography.labelLarge, maxLines = 1)
+                                    val title = if (item.path.startsWith("purchase_records[")) "품목 ${item.number}"
+                                        else "품목 ${item.number} · ${primary.firstOrNull { it.path.endsWith(".description") }?.value ?: "이름 미확인"}"
+                                    Text(title, style = MaterialTheme.typography.labelLarge)
                                     ReviewFieldGrid(primary, content)
-                                    if (details.isNotEmpty()) {
-                                        TextButton({ expanded = !expanded }, enabled = !needsAttention) {
-                                            Text(if (expanded || needsAttention) "품목 ${index + 1} 상세 접기" else "품목 ${index + 1} 상세 · 유형·역할")
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        if (item.matchingPurchaseName != null) TextButton({ showPurchaseName = !showPurchaseName }, enabled = !item.purchaseNameNeedsAttention) {
+                                            Text(if (showPurchaseName || item.purchaseNameNeedsAttention) "구매 내역 표기명 접기" else "구매 내역 표기명 보기")
                                         }
-                                        if (expanded || needsAttention) ReviewFieldGrid(details, content)
+                                        if (details.isNotEmpty()) TextButton({ expanded = !expanded }, enabled = !needsAttention) {
+                                            Text(if (expanded || needsAttention) "품목 ${item.number} 상세 접기" else "품목 ${item.number} 상세 · 유형·역할")
+                                        }
                                     }
+                                    if (showPurchaseName || item.purchaseNameNeedsAttention) item.matchingPurchaseName?.let { content(it) }
+                                    if (expanded || needsAttention) ReviewFieldGrid(details, content)
+                                    itemOptions(item.path)
                                 }
                             }
                         }
