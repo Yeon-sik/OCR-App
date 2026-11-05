@@ -1500,6 +1500,8 @@ class IngestionOrchestrator(
         val fixedRejection = when (state.projection) {
             IngestionProjection.PRICETRACE_RECEIPT -> envelope.receipt != null && code == "22023" &&
                 message == "only privacy-sanitized user_verified receipt.v2 is accepted"
+            IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE -> envelope.productCandidates.isNotEmpty() &&
+                code == "23505" && message == "client_key was already used for another product candidate payload"
             IngestionProjection.FITNESS_NUTRITION -> envelope.nutrition.any { it is IngestionNutrition.ProductLabel } &&
                 code == "23514" && message == "A product label may carry only a resolved PriceTrace catalog_product_id."
             else -> false

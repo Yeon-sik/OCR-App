@@ -1345,7 +1345,9 @@ class PriceTraceCanonicalGatewayTest {
         assertEquals(setOf("p_idempotency_key", "p_candidate"), body.keys)
         assertEquals("PRICETRACE_PRODUCT_CANDIDATE", sent["schema_version"]?.jsonPrimitive?.content)
         assertEquals("product-candidate.v1", sent["contract_version"]?.jsonPrimitive?.content)
-        assertEquals("product-1", sent["client_key"]?.jsonPrimitive?.content)
+        val submissionKey = sent.getValue("client_key").jsonPrimitive.content
+        assertTrue(submissionKey.matches(Regex("ocr-product-[0-9a-f]{64}")))
+        assertEquals(submissionKey, success.response["productSubmissionKeys"]?.jsonObject?.get("product-1")?.jsonPrimitive?.content)
         assertEquals(JsonNull, sent["sub_brand"])
         val identifier = sent["identifiers"]!!.jsonArray.single().jsonObject
         assertEquals("ean", identifier["scheme"]?.jsonPrimitive?.content)
@@ -1355,6 +1357,82 @@ class PriceTraceCanonicalGatewayTest {
         assertFalse(sent.containsKey("restaurant_menu_id"))
         assertFalse(sent.containsKey("user_verified"))
         assertFalse(requireNotNull(request.body).contains("access_token"))
+    }
+
+    @Test
+    fun approvedV4PurchaseRetriesBlockedLegacyCandidateAndUsesItsAcceptedKey() = runTest {
+        val productProjection = IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE
+        val purchaseProjection = IngestionProjection.PRICETRACE_PRICE_OBSERVATION
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(200,
+                """{"candidateId":"candidate-1","outcome":"catalog_product_reused","catalogProductId":"$CATALOG_PRODUCT_ID"}"""),
+            PriceObservationHttpResponse(200, """{"purchaseSourceId":"purchase-source-1","observationCreated":true,"observationIds":["observation-1"]}"""),
+        )
+        val gateway = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+        val store = InMemoryIngestionSessionStore()
+        val useCase = CanonicalIngestionUseCase(store, submitters = mapOf(
+            productProjection to PriceTraceProductCandidateProjectionSubmitter(gateway),
+            purchaseProjection to PriceTraceCanonicalProjectionSubmitter(gateway),
+        ))
+        val raw = java.io.File("../examples/yeonsik-ocr.v4.purchase.example.json").readText()
+        val parsed = YeonsikOcrV4Json.decode(raw, "approved-v4-product")
+        val evidence = parsed.source.sourceFiles.map { LocalEvidence(it.id, it.type, true) }
+        val imported = useCase.importJson(raw, "approved-v4-product", evidence = evidence) as CanonicalImportResult.Success
+        val id = imported.session.ingestionId
+        val confirmed = useCase.confirm(id, imported.envelope, evidence)
+        assertTrue(confirmed.result is IngestionStartResult.Success)
+        val approved = requireNotNull(store.get(id))
+        val oldIdempotencyKey = "pre-update-product-attempt"
+        store.save(approved.copy(projections = approved.projections.map { state ->
+            when (state.projection) {
+                productProjection -> state.copy(
+                    status = ProjectionStatus.BLOCKED,
+                    idempotencyKey = oldIdempotencyKey,
+                    attemptCount = 1,
+                    lastError = """{"code":"23505","message":"client_key was already used for another product candidate payload"}""",
+                )
+                purchaseProjection -> state.copy(status = ProjectionStatus.BLOCKED,
+                    lastError = "dependency_pending:pricetrace_product_candidate")
+                else -> state
+            }
+        }))
+
+        val result = useCase.submitSelected(id, confirmed.envelope, setOf(purchaseProjection)).associateBy { it.projection }
+        assertEquals(ProjectionStatus.UPLOADED, result.getValue(productProjection).status)
+        assertEquals(oldIdempotencyKey, result.getValue(productProjection).idempotencyKey)
+        assertEquals(ProjectionStatus.UPLOADED, result.getValue(purchaseProjection).status)
+        assertEquals(approved.verifiedCanonicalFingerprint, store.get(id)?.verifiedCanonicalFingerprint)
+        val candidate = Json.parseToJsonElement(transport.requests[0].body!!).jsonObject
+        val purchase = Json.parseToJsonElement(transport.requests[1].body!!).jsonObject
+        val key = candidate.getValue("p_candidate").jsonObject.getValue("client_key").jsonPrimitive.content
+        val localKey = confirmed.envelope.productCandidates.single().clientKey
+        assertTrue(key != localKey)
+        assertEquals(key, purchase.getValue("p_purchase").jsonObject.getValue("items").jsonArray.single().jsonObject
+            .getValue("product").jsonObject.getValue("client_key").jsonPrimitive.content)
+        assertEquals(localKey, confirmed.envelope.purchaseRecords.single().lineItems.single().productClientKey)
+    }
+
+    @Test
+    fun legacyPartialSubmissionReplaysAndLaterDocumentsGetDifferentCandidateKeys() = runTest {
+        val accepted = PriceObservationHttpResponse(200, """{"candidateId":"existing-candidate","outcome":"pending_review"}""")
+        val transport = QueueTransport(
+            PriceObservationHttpResponse(409,
+                """{"code":"23505","message":"idempotency key was already used for another product candidate"}"""),
+            accepted, accepted, accepted,
+        )
+        val gateway = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
+        val candidate = textOnlyEnvelope().productCandidates.single().copy(clientKey = "product-1")
+        val result = gateway.submitProductCandidates("document-1", listOf(candidate)) as PriceTraceCanonicalOutcome.Success
+        assertEquals("product-1", result.response["productSubmissionKeys"]?.jsonObject?.get("product-1")?.jsonPrimitive?.content)
+        assertTrue(gateway.submitProductCandidates("document-2", listOf(candidate)) is PriceTraceCanonicalOutcome.Success)
+        assertTrue(gateway.submitProductCandidates("document-2", listOf(candidate)) is PriceTraceCanonicalOutcome.Success)
+        val requests = transport.requests.map { Json.parseToJsonElement(it.body!!).jsonObject }
+        val keys = requests.map { it.getValue("p_candidate").jsonObject.getValue("client_key").jsonPrimitive.content }
+        assertEquals(requests[0]["p_idempotency_key"], requests[1]["p_idempotency_key"])
+        assertEquals("product-1", keys[1])
+        assertTrue(keys[0] != keys[2])
+        assertEquals(keys[2], keys[3])
+        assertEquals(requests[2]["p_idempotency_key"], requests[3]["p_idempotency_key"])
     }
 
     @Test
@@ -1486,9 +1564,17 @@ class PriceTraceCanonicalGatewayTest {
         assertTrue(sentEvidence.all { it.jsonObject["content_hash"] == JsonNull })
         assertFalse(requireNotNull(candidateRequest.body).contains("product-photo"))
 
-        val priceResult = PriceTraceCanonicalGateway(FakeStore(signedIn()), transport)
-            .submitStandalonePriceObservations("text-only-price-key", envelope)
-        assertTrue(priceResult is PriceTraceCanonicalOutcome.Success)
+        val priceResult = PriceTraceCanonicalProjectionSubmitter(PriceTraceCanonicalGateway(FakeStore(signedIn()), transport))
+            .submit(ProjectionRequest(
+                ingestionId = "text-only",
+                projection = IngestionProjection.PRICETRACE_PRICE_OBSERVATION,
+                canonicalPayload = "",
+                idempotencyKey = "text-only-price-key",
+                envelope = envelope,
+                dependencyMetadataJson = mapOf(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE to
+                    (productResult as PriceTraceCanonicalOutcome.Success).response.toString()),
+            ))
+        assertTrue(priceResult is ProjectionSubmission.Success)
 
         val priceBody = Json.parseToJsonElement(requireNotNull(transport.requests[1].body)).jsonObject
         val observation = priceBody["p_observation"]!!.jsonObject
@@ -1501,7 +1587,7 @@ class PriceTraceCanonicalGatewayTest {
         assertFalse(observation.containsKey("source_attachment_ids"))
         assertFalse(observation.containsKey("evidence"))
         val product = observation["product"]!!.jsonObject
-        assertEquals("product-brandx-chicken-20260910", product["product_client_key"]?.jsonPrimitive?.content)
+        assertEquals(sentCandidate["client_key"], product["product_client_key"])
         assertEquals(JsonNull, product["merchant_sku"])
         assertEquals("브랜드X 닭가슴살", product["product_name"]?.jsonPrimitive?.content)
     }
