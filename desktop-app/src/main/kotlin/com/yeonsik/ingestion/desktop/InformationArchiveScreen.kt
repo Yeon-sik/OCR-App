@@ -24,8 +24,11 @@ import java.util.UUID
 fun InformationArchiveScreen(
     store: DesktopInformationStore = remember { DesktopInformationStore() },
     onInputState: (busy: Boolean, hasInput: Boolean) -> Unit = { _, _ -> },
+    delivery: DesktopInformationDelivery = remember { DesktopInformationDelivery() },
 ) {
     val scope = rememberCoroutineScope()
+    val deliveryJournal = remember(store) { InformationDeliveryJournal(store.directory.resolve("deliveries").toFile()) }
+    var deliveryRecordId by remember { mutableStateOf<String?>(null) }
     var snapshot by remember { mutableStateOf(InformationArchiveSnapshot(emptyList(), emptyList(), emptyList())) }
     var busy by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -60,7 +63,7 @@ fun InformationArchiveScreen(
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
     Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("정보 보관함", style = MaterialTheme.typography.headlineSmall)
-        Text("원문을 보관하고, 내용의 소유 앱을 정해 구조화합니다. 검토한 기록은 JSON 파일로 내보내 해당 앱에서 가져오세요.", style = MaterialTheme.typography.bodyMedium)
+        Text("원문을 보관하고 소유 앱을 정해 구조화합니다. 검토한 기록을 해당 앱의 검토함으로 직접 보내거나 JSON으로 내보낼 수 있습니다.", style = MaterialTheme.typography.bodyMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("원문 ${snapshot.sources.size}", "구조화", "기록 ${snapshot.records.size}").forEachIndexed { index, label ->
                 FilterChip(selected = pane == index, onClick = { pane = index }, label = { Text(label) })
@@ -174,7 +177,7 @@ fun InformationArchiveScreen(
                     }
                 }
                 2 -> {
-                    Text("이 보관함의 기록은 각 앱에 자동 전송되지 않습니다. 내보낸 JSON을 소유 앱의 정보 기록함에서 가져오세요.")
+                    Text("수신 계정을 확인하면 소유 앱의 비공개 검토함으로 전송합니다. 실제 기록·통계 반영은 수신 앱에서 따로 승인합니다.")
                     if (snapshot.records.isEmpty()) Text("구조화 탭에서 기록을 만들거나 information-record.v1 JSON을 가져오세요.")
                     snapshot.records.forEach { entry ->
                         val record = entry.record
@@ -195,6 +198,10 @@ fun InformationArchiveScreen(
                                 }
                             }) { Text("${record.owner.label}용 내보내기") }
                         }
+                        OutlinedButton(enabled = !busy && entry.reviewed, onClick = { deliveryRecordId = if (deliveryRecordId == record.id) null else record.id }) {
+                            Text("${record.owner.label}로 직접 전송")
+                        }
+                        if (deliveryRecordId == record.id) InformationDeliveryPanel(record, store, delivery, deliveryJournal, onBusy = { busy = it })
                     }
                     if (draft.isNotBlank()) Text("편집 중인 내용이 있습니다. 구조화 탭에서 저장하거나 비운 뒤 다른 기록을 열 수 있습니다.")
                 }

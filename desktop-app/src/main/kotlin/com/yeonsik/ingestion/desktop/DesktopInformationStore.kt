@@ -20,7 +20,7 @@ data class InformationInboxEntry(val record: InformationRecord, val reviewed: Bo
 data class InformationArchiveSnapshot(val sources: List<ArchivedInformationSource>, val records: List<InformationInboxEntry>, val errors: List<String>)
 enum class InformationSaveResult { CREATED, DUPLICATE }
 
-/** Local source archive. No source is executed, parsed by media libraries, or sent to a remote service. */
+/** Source bytes stay local. Only separately reviewed structured records may be delivered. */
 class DesktopInformationStore(val directory: Path = DesktopSessionStore.defaultDirectory().parent.resolve("information")) {
     private val sourceDirectory = directory.resolve("sources")
     private val blobDirectory = directory.resolve("blobs")
@@ -92,6 +92,10 @@ class DesktopInformationStore(val directory: Path = DesktopSessionStore.defaultD
         writeAtomic(stateDirectory.resolve(record.id + ".json"), buildJsonObject {
             put("fingerprint", record.fingerprint); put("reviewed_at", Instant.now().toString())
         }.toString(), replace = true)
+    }
+
+    fun reviewedRecord(id: String): InformationRecord = exclusive {
+        storedRecord(id).also { require(isReviewed(it)) { "소유 앱과 출처를 먼저 검토하세요." } }
     }
 
     fun exportRecord(id: String, target: Path) = exclusive {

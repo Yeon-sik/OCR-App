@@ -50,7 +50,7 @@ fun InformationArchiveScreen(
             }
             if (model.busy) LinearProgressIndicator(Modifier.fillMaxWidth().testTag("information_busy"))
             LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("information_content"), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                item { Text("원문을 보관하고 소유 앱을 정해 구조화합니다. 검토한 JSON을 해당 앱에서 가져오세요.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                item { Text("원문을 보관하고 소유 앱을 정해 구조화합니다. 검토한 기록은 해당 앱의 검토함으로 직접 보내거나 파일로 내보낼 수 있습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 model.notice?.let { item { SelectionContainer { Text(it, modifier = Modifier.testTag("information_notice"), color = MaterialTheme.colorScheme.primary) } } }
                 items(model.snapshot.errors) { Text(it, color = MaterialTheme.colorScheme.error) }
                 when (model.pane) {
@@ -123,6 +123,8 @@ fun InformationArchiveScreen(
                                         OutlinedButton(enabled = !model.busy && confirmed, onClick = { model.review(entry.record.id) }, modifier = Modifier.fillMaxWidth()) { Text("검토 완료") }
                                     }
                                     Button(enabled = !model.busy && entry.reviewed, onClick = { onExportRecord(entry.record.id) }, modifier = Modifier.fillMaxWidth().testTag("information_export_record")) { Text("${entry.record.owner.label}로 가져갈 JSON 내보내기") }
+                                    OutlinedButton(enabled = !model.busy && entry.reviewed, onClick = { model.openDelivery(entry.record.id) }, modifier = Modifier.fillMaxWidth().testTag("information_open_delivery")) { Text("${entry.record.owner.label}로 직접 전송") }
+                                    if (model.deliveryRecordId == entry.record.id) InformationDeliveryPanel(model)
                                 }
                             }
                         }

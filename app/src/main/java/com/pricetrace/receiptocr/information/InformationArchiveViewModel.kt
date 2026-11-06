@@ -17,8 +17,18 @@ import java.io.File
 import java.time.Instant
 import java.util.UUID
 
-class InformationArchiveViewModel @JvmOverloads constructor(application: Application, directory: File = File(application.filesDir, "information")) : AndroidViewModel(application) {
+class InformationArchiveViewModel @JvmOverloads constructor(application: Application, directory: File = File(application.filesDir, "information"), gateway: InformationDeliveryGateway? = null) : AndroidViewModel(application) {
     val store = AndroidInformationStore(directory)
+    private val deliveryGateway by lazy { gateway ?: InformationDeliveryGateway(informationConnections(application)) }
+    private val deliveryJournal = InformationDeliveryJournal(File(directory, "deliveries"))
+    var deliveryRecordId by mutableStateOf<String?>(null); private set
+    var deliveryUrl by mutableStateOf("")
+    var deliveryKey by mutableStateOf("")
+    var deliveryEmail by mutableStateOf("")
+    var deliveryPassword by mutableStateOf("")
+    var deliveryPrepared by mutableStateOf<PreparedInformationDelivery?>(null); private set
+    var deliveryConfirmed by mutableStateOf(false)
+    var deliveryHistory by mutableStateOf<List<InformationDeliveryAttempt>>(emptyList()); private set
     var snapshot by mutableStateOf(AndroidInformationSnapshot()); private set
     var busy by mutableStateOf(false); private set
     var notice by mutableStateOf<String?>(null); private set
@@ -40,6 +50,51 @@ class InformationArchiveViewModel @JvmOverloads constructor(application: Applica
     init { refresh() }
 
     fun refresh() = runAction { "보관함을 불러왔습니다." }
+    fun openDelivery(id: String) {
+        if (busy) return
+        deliveryRecordId = id; deliveryPrepared = null; deliveryConfirmed = false; deliveryPassword = ""
+        val owner = snapshot.records.first { it.record.id == id }.record.owner
+        deliveryGateway.connection(owner).let { deliveryUrl = it.url; deliveryKey = it.publishableKey; deliveryEmail = it.email }
+        deliveryAction { "수신 계정을 확인한 뒤 직접 전송하세요." }
+    }
+    fun resetDeliveryConfirmation() { deliveryPrepared = null; deliveryConfirmed = false }
+    fun configureDelivery() = deliveryAction {
+        deliveryGateway.configure(deliveryOwner(), deliveryUrl, deliveryKey); resetDeliveryConfirmation(); "서버 설정을 저장했습니다. 수신 계정으로 로그인하세요."
+    }
+    fun loginDelivery() {
+        val secret = deliveryPassword; deliveryPassword = ""
+        deliveryAction { deliveryGateway.signIn(deliveryOwner(), deliveryEmail, secret); resetDeliveryConfirmation(); "로그인했습니다. 수신 계정 확인을 진행하세요." }
+    }
+    fun logoutDelivery() = deliveryAction { deliveryGateway.signOut(deliveryOwner()); resetDeliveryConfirmation(); "로그인 정보를 지웠습니다." }
+    fun prepareDelivery() {
+        resetDeliveryConfirmation()
+        deliveryAction { deliveryPrepared = deliveryGateway.prepare(store.reviewedRecord(requireNotNull(deliveryRecordId))); "수신 계정과 전송 내용을 확인하세요." }
+    }
+    fun sendDelivery() {
+        val prepared = deliveryPrepared ?: return
+        if (!deliveryConfirmed) return
+        deliveryConfirmed = false
+        deliveryAction {
+            deliveryJournal.deliver(store.reviewedRecord(prepared.recordId), prepared, deliveryGateway)
+            deliveryPrepared = null
+            "검토함 도착을 확인했습니다. ${prepared.target.owner.label}에서 실제 기록 반영을 승인하세요."
+        }
+    }
+    private fun deliveryOwner() = snapshot.records.first { it.record.id == deliveryRecordId }.record.owner
+    private fun deliveryAction(action: suspend () -> String) {
+        if (busy) return
+        busy = true
+        viewModelScope.launch {
+            try {
+                notice = withContext(Dispatchers.IO) { try { action() }
+                    catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (error: Exception) { error.message ?: "처리하지 못했습니다." } }
+                val id = deliveryRecordId
+                if (id != null) withContext(Dispatchers.IO) { runCatching { deliveryJournal.attempts(id) } }
+                    .onSuccess { deliveryHistory = it }.onFailure { notice = "전송 이력을 읽지 못했습니다. 같은 기록으로 수신 여부를 다시 확인하세요." }
+            } finally { busy = false }
+        }
+    }
     fun clearDraft() { draft = ""; ownerConfirmed = false; recordTitle = ""; fieldKey = ""; fieldValue = ""; fieldUnit = "" }
     fun captureText() {
         val text = rawText; val name = sourceName

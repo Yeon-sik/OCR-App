@@ -97,6 +97,10 @@ class AndroidInformationStore(private val directory: File) {
         output.write(InformationRecordCodec.pretty(record).toByteArray(Charsets.UTF_8)); output.flush()
     }
 
+    fun reviewedRecord(id: String): InformationRecord = exclusive {
+        readRecord(id).also { require(isReviewed(it)) { "소유 앱과 출처를 먼저 검토하세요." } }
+    }
+
     fun exportSource(id: String, output: OutputStream) = exclusive {
         val source = readSource(File(sources, "${safeId(id)}.json"))
         val blob = File(blobs, source.sha256)

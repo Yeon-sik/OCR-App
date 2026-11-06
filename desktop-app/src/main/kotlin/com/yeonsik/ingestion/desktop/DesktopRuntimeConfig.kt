@@ -23,6 +23,7 @@ class DesktopRuntimeConfig(
     val nutrition: DesktopServiceConfig,
     val cashOs: DesktopServiceConfig,
     val envFile: Path,
+    val healthTrace: DesktopServiceConfig = DesktopServiceConfig("", "", "", "", "", "", ""),
 ) {
     override fun toString(): String = "DesktopRuntimeConfig(envFile=$envFile)"
 
@@ -76,6 +77,13 @@ class DesktopRuntimeConfig(
                     refreshToken = value("CASHOS_REFRESH_TOKEN"),
                 ),
                 envFile = envFile,
+                healthTrace = DesktopServiceConfig(
+                    url = value("HEALTHTRACE_SUPABASE_URL"),
+                    publishableKey = value("HEALTHTRACE_SUPABASE_PUBLISHABLE_KEY").ifBlank { value("HEALTHTRACE_SUPABASE_ANON_KEY") },
+                    email = value("HEALTHTRACE_EMAIL"), password = value("HEALTHTRACE_PASSWORD"),
+                    userId = value("HEALTHTRACE_USER_ID"), accessToken = value("HEALTHTRACE_ACCESS_TOKEN"),
+                    refreshToken = value("HEALTHTRACE_REFRESH_TOKEN"),
+                ),
             )
         }
 
