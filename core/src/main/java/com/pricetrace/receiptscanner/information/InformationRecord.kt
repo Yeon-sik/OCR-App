@@ -31,13 +31,13 @@ object InformationRecordCodec {
     private val rootKeys = setOf("schema_version", "record_id", "owner_app", "record_type", "title", "captured_at", "occurred_at", "supersedes_record_id", "sources", "fields", "references")
 
     /** Draft editing must reject ambiguous keys before any DOM operation can discard them. */
-    fun parseValue(text: String): JsonElement {
-        require(text.toByteArray(Charsets.UTF_8).size <= MAX_BYTES) { "기록은 UTF-8 1 MiB 이하여야 합니다." }
+    fun parseValue(text: String, maxBytes: Int = MAX_BYTES): JsonElement {
+        require(text.toByteArray(Charsets.UTF_8).size <= maxBytes) { "JSON이 허용된 크기를 초과했습니다." }
         validateStructureBeforeParsing(text)
         return json.parseToJsonElement(text).also { validateJsonValues(it) }
     }
 
-    fun parseObject(text: String): JsonObject = parseValue(text) as? JsonObject ?: error("기록은 JSON 객체여야 합니다.")
+    fun parseObject(text: String, maxBytes: Int = MAX_BYTES): JsonObject = parseValue(text, maxBytes) as? JsonObject ?: error("기록은 JSON 객체여야 합니다.")
 
     fun decode(text: String, expectedOwner: InformationOwner? = null): InformationRecord {
         val root = parseObject(text)
