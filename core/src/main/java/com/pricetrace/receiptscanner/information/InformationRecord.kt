@@ -30,11 +30,17 @@ object InformationRecordCodec {
     private val instant = Regex("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})")
     private val rootKeys = setOf("schema_version", "record_id", "owner_app", "record_type", "title", "captured_at", "occurred_at", "supersedes_record_id", "sources", "fields", "references")
 
-    fun decode(text: String, expectedOwner: InformationOwner? = null): InformationRecord {
+    /** Draft editing must reject ambiguous keys before any DOM operation can discard them. */
+    fun parseValue(text: String): JsonElement {
         require(text.toByteArray(Charsets.UTF_8).size <= MAX_BYTES) { "기록은 UTF-8 1 MiB 이하여야 합니다." }
-        validateNestingBeforeParsing(text)
-        val root = json.parseToJsonElement(text) as? JsonObject ?: error("기록은 JSON 객체여야 합니다.")
-        validateJsonValues(root)
+        validateStructureBeforeParsing(text)
+        return json.parseToJsonElement(text).also { validateJsonValues(it) }
+    }
+
+    fun parseObject(text: String): JsonObject = parseValue(text) as? JsonObject ?: error("기록은 JSON 객체여야 합니다.")
+
+    fun decode(text: String, expectedOwner: InformationOwner? = null): InformationRecord {
+        val root = parseObject(text)
         root.keysOnly(rootKeys)
         require(root.text("schema_version") == "information-record.v1") { "지원하지 않는 기록 형식입니다." }
         val id = root.text("record_id").also { require(uuid.matches(it)) { "record_id는 소문자 UUID여야 합니다." } }
@@ -145,22 +151,39 @@ object InformationRecordCodec {
                 Regex("-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?").matches(value.content)) { "표준 JSON 값만 사용할 수 있습니다." }
         }
     }
-    private fun validateNestingBeforeParsing(text: String) {
-        var depth = 0
+    private class JsonContainer(val kind: Char, val keys: MutableSet<String> = mutableSetOf(), var expectingKey: Boolean = true)
+
+    private fun validateStructureBeforeParsing(text: String) {
+        val containers = mutableListOf<JsonContainer>()
         var inString = false
         var escaped = false
-        for (character in text) {
+        var stringStart = 0
+        for ((index, character) in text.withIndex()) {
             if (inString) {
                 if (escaped) escaped = false
                 else if (character == '\\') escaped = true
-                else if (character == '"') inString = false
+                else if (character == '"') {
+                    inString = false
+                    containers.lastOrNull()?.takeIf { it.kind == '{' && it.expectingKey }?.let { container ->
+                        val key = json.parseToJsonElement(text.substring(stringStart, index + 1)).jsonPrimitive.content
+                        require(container.keys.add(key)) { "중복 JSON 객체 키는 사용할 수 없습니다: $key" }
+                        container.expectingKey = false
+                    }
+                }
             } else when (character) {
-                '"' -> inString = true
-                '{', '[' -> { depth++; require(depth <= 64) { "중첩 JSON은 64단계까지 지원합니다." } }
-                '}', ']' -> { depth--; require(depth >= 0) { "JSON 괄호가 올바르지 않습니다." } }
+                '"' -> { inString = true; stringStart = index }
+                '{', '[' -> {
+                    containers.add(JsonContainer(character))
+                    require(containers.size <= 64) { "중첩 JSON은 64단계까지 지원합니다." }
+                }
+                '}', ']' -> {
+                    require(containers.isNotEmpty() && containers.last().kind == if (character == '}') '{' else '[') { "JSON 괄호가 올바르지 않습니다." }
+                    containers.removeAt(containers.lastIndex)
+                }
+                ',' -> containers.lastOrNull()?.let { if (it.kind == '{') it.expectingKey = true }
             }
         }
-        require(depth == 0 && !inString) { "JSON 문자열 또는 괄호가 닫히지 않았습니다." }
+        require(containers.isEmpty() && !inString) { "JSON 문자열 또는 괄호가 닫히지 않았습니다." }
     }
     private fun httpUri(value: String) {
         val uri = URI(value)

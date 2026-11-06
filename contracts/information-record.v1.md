@@ -17,6 +17,8 @@ OCR owns source artifacts, extraction drafts and delivery state. It is not an ad
 
 UTF-8 JSON object, at most 1 MiB encoded and at most 64 nested objects/arrays (the root object counts as one container). Unknown top-level keys are rejected in v1 so extensions do not disappear silently. Arbitrary additional facts belong in fields, including value_type=json. Omit optional keys rather than sending null, except a json field value may be null. Only standard JSON tokens are permitted; NaN, Infinity and undefined are rejected.
 
+Object member names must be unique at every nesting level, including after decoding escape sequences (`"a"` and `"\u0061"` are the same key). Reject ambiguous duplicate members before parsing into a last-value-wins object; never silently discard an earlier value.
+
 Required keys:
 
 - schema_version: exactly `information-record.v1`.

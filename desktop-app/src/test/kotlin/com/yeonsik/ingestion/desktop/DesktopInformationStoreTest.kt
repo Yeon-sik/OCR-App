@@ -75,5 +75,6 @@ class DesktopInformationStoreTest {
         assertTrue(runCatching { addInformationField(draft, "note", "text", "duplicate", "") }.isFailure)
         assertTrue(runCatching { addInformationField(draft, "healthtrace.sleep", "decimal", "8", "h") }.isFailure)
         assertTrue(runCatching { addInformationField(draft, "flag", "boolean", "\"true\"", "") }.isFailure)
+        assertTrue(runCatching { addInformationField(draft, "custom", "json", "{\"a\":1,\"a\":2}", "") }.isFailure)
     }
 }

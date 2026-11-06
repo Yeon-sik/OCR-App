@@ -82,7 +82,7 @@ class InformationArchiveViewModel @JvmOverloads constructor(application: Applica
         require(fieldKey.isNotBlank()) { "항목 키를 입력하세요." }
         val value: JsonElement = when (fieldType) {
             "boolean" -> { require(fieldValue in setOf("true", "false")) { "참/거짓은 true 또는 false로 입력하세요." }; JsonPrimitive(fieldValue == "true") }
-            "json" -> Json.parseToJsonElement(fieldValue)
+            "json" -> InformationRecordCodec.parseValue(fieldValue)
             else -> JsonPrimitive(fieldValue)
         }
         val field = buildJsonObject {
@@ -96,7 +96,7 @@ class InformationArchiveViewModel @JvmOverloads constructor(application: Applica
         next
     }
     private fun editDraft(action: (JsonObject) -> JsonObject) {
-        runCatching { action(Json.parseToJsonElement(draft).jsonObject) }
+        runCatching { action(InformationRecordCodec.parseObject(draft)) }
             .onSuccess { draft = InformationRecordCodec.pretty(it); ownerConfirmed = false; notice = null }
             .onFailure { notice = "입력을 확인하세요: ${it.message}" }
     }

@@ -129,7 +129,7 @@ fun InformationArchiveScreen(
                     }
                     Text("숫자는 소수점을 포함한 문자열로 보존합니다. 모르는 값은 넣지 말고, 다른 앱의 사실은 references로 연결하세요.")
                     if (draft.isNotBlank()) {
-                        val parsed = runCatching { Json.parseToJsonElement(draft).jsonObject }.getOrNull()
+                        val parsed = runCatching { InformationRecordCodec.parseObject(draft) }.getOrNull()
                         if (parsed != null) {
                             OutlinedTextField((parsed["title"] as? JsonPrimitive)?.content.orEmpty(), { title ->
                                 draft = prettyInformation(JsonObject(parsed + ("title" to JsonPrimitive(title))))
@@ -221,7 +221,7 @@ internal fun addInformationField(draft: String, key: String, type: String, value
     val record = InformationRecordCodec.decode(draft)
     val field = buildJsonObject {
         put("key", key); put("value_type", type)
-        put("value", if (type in setOf("boolean", "json")) Json.parseToJsonElement(value) else JsonPrimitive(value))
+        put("value", if (type in setOf("boolean", "json")) InformationRecordCodec.parseValue(value) else JsonPrimitive(value))
         if (unit.isNotBlank()) put("unit", unit)
     }
     val result = prettyInformation(JsonObject(record.payload + ("fields" to JsonArray(record.payload.getValue("fields").jsonArray + field))))

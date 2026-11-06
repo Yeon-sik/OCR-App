@@ -72,4 +72,25 @@ class InformationRecordTest {
         val original = cases().getValue("accepted").jsonArray.first().jsonObject.getValue("record").toString()
         InformationRecordCodec.decode(original.replace("\"보존\"", "\"[\\\"{]\\\\\""))
     }
+
+    @Test fun `duplicate JSON members are never silently collapsed`() {
+        val original = cases().getValue("accepted").jsonArray.first().jsonObject.getValue("record").toString()
+        listOf("{\"reading\":1,\"reading\":2}", "{\"a\":1,\"\\u0061\":2}", "[{\"a\":1,\"a\":2}]").forEach { duplicate ->
+            assertTrue(runCatching { InformationRecordCodec.decode(original.replace("\"보존\"", duplicate)) }.isFailure)
+        }
+        InformationRecordCodec.decode(original.replace("\"보존\"", "[{\"a\":1},{\"a\":2}]"))
+    }
+
+    @Test fun `shared raw text vectors reject ambiguity before parsing`() {
+        val vectors = Json.parseToJsonElement(Files.readString(Path.of("..", "contracts", "information-record.v1.raw-cases.json"))).jsonObject
+        vectors.getValue("accepted").jsonArray.forEach { item ->
+            InformationRecordCodec.decode(item.jsonObject.getValue("text").jsonPrimitive.content)
+        }
+        vectors.getValue("rejected").jsonArray.forEach { item ->
+            val raw = item.jsonObject.getValue("text").jsonPrimitive.content
+            assertTrue(item.jsonObject.getValue("name").toString(), runCatching { InformationRecordCodec.decode(raw) }.isFailure)
+            assertTrue(runCatching { InformationRecordCodec.parseValue(raw) }.isFailure)
+            assertTrue(runCatching { InformationRecordCodec.parseObject(raw) }.isFailure)
+        }
+    }
 }
