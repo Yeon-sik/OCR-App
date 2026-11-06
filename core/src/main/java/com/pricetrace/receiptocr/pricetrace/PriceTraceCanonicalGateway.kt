@@ -462,6 +462,26 @@ class PriceTraceCanonicalGateway(
         return submitProductCandidatesOnce(idempotencyKey, candidates, refreshed)
     }
 
+    /** Explicitly approved official product facts, with independent server-side replay protection. */
+    suspend fun publishManufacturerProduct(
+        draft: ManufacturerProductPublicationDraft,
+    ): PriceTraceCanonicalOutcome = readAcceptedResponse { config ->
+        val response = transport.execute(request(config, "POST", "/rest/v1/rpc/publish_manufacturer_product_v1",
+            body = buildJsonObject {
+                put("p_product", draft.publicFacts())
+                put("p_reviewed", JsonPrimitive(true))
+            }.encode(),
+        ))
+        if (response.statusCode !in 200..299) {
+            return@readAcceptedResponse PriceTraceCanonicalOutcome.Failure(classify(response))
+        }
+        val published = decodeResponse(response.body)
+        val productId = published.requiredStringOrNull("catalog_product_id")
+        require(productId != null && java.util.UUID.fromString(productId).toString() == productId)
+        require(published.requiredStringOrNull("status") in setOf("published", "already_published"))
+        PriceTraceCanonicalOutcome.Success(published)
+    }
+
     /** Publishes receipt-independent v3 price facts through PriceTrace's identity boundary. */
     suspend fun submitStandalonePriceObservations(
         idempotencyKey: String,

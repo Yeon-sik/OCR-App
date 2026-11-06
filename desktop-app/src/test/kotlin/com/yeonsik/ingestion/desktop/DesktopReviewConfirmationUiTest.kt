@@ -9,6 +9,7 @@ import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.unit.dp
+import com.pricetrace.receiptocr.pricetrace.ManufacturerProductPublicationDraft
 import com.pricetrace.receiptscanner.ingestion.*
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -102,6 +103,46 @@ class DesktopReviewConfirmationUiTest {
         capture("review-confirmation-blocked")
         compose.onNodeWithText("원본 보관 다시 시도").assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(1, retries) }
+    }
+
+    @Test fun manufacturerPublicationRequiresVerifiedSourceFieldsAndExplicitConfirmation() {
+        val envelope = YeonsikOcrEnvelopeCodec.decode(
+            File("../examples/yeonsik-ocr.v2.packaged-product.example.json").readText(), "manufacturer-publication",
+        )
+        val product = envelope.productCandidates.first().copy(
+            productName = "검증용 120정", brand = "Fixture Brand", specification = "120정",
+            contentAmount = 120.0, contentUnit = "each", packageCount = 1,
+        )
+        val state = sampleState().copy(envelope = envelope.copy(productCandidates = listOf(product)))
+        var publication: ManufacturerProductPublicationDraft? = null
+        compose.setContent {
+            CollectorTheme {
+                ConfirmAndSubmitSection(
+                    state = state, busy = false, canVerify = false, canSubmit = false,
+                    confirmationBlocker = null, verificationBasis = VerificationBasis.SOURCE_EVIDENCE,
+                    selectedProjections = emptySet(), submitConfirmationOpen = true,
+                    onVerificationBasisSelected = {}, onVerify = {}, onOpenSubmitConfirmation = {},
+                    onDismissSubmitConfirmation = {}, onConfirmSubmit = { publication = it },
+                    onRetryArchive = {}, onRetryRevision = {}, canPublishManufacturer = true,
+                )
+            }
+        }
+        val confirm = compose.onNode(hasText("전송 확인") and hasClickAction())
+        compose.onNodeWithText("개인 공개").assertIsSelected()
+        confirm.assertIsNotEnabled()
+        compose.onNodeWithText("바로 공개").performClick().assertIsSelected()
+        confirm.assertIsNotEnabled()
+        compose.onNode(hasSetTextAction() and hasText("제조사 공식 상품 페이지"))
+            .performTextInput("https://manufacturer.example/products/test-120")
+        compose.onNode(hasSetTextAction() and hasText("제조사 SKU")).performTextInput("TEST-120")
+        confirm.assertIsNotEnabled()
+        compose.onNode(isToggleable()).performScrollTo().performClick()
+        confirm.assertIsEnabled().performClick()
+        compose.runOnIdle {
+            assertEquals(product.clientKey, publication?.productClientKey)
+            assertEquals("TEST-120", publication?.manufacturerSku)
+            assertEquals(null, publication?.validationMessage())
+        }
     }
 
     private fun sampleState() = DesktopUiState(
