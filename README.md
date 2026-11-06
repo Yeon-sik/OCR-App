@@ -182,6 +182,9 @@ Gemini 교정은 `.env`의 키가 빌드된 개인용 APK에서 자동 활성화
 
 ## 문서
 
+- [앱별 정보 수용 범위·소유 경계와 통합 계획](docs/UNIVERSAL_INFORMATION_PLAN.md)
+- [범용 구조화 기록 작성·전달 방법](docs/producer-candidate/08_INFORMATION_RECORD_V1.md)
+- [정보 보관함 구현·DB·빌드 검증 결과](docs/validation/2026-11-06-information-intake.md)
 - [정확도 평가 방법](docs/ACCURACY_EVALUATION.md)
 - [실제 기기 테스트 체크리스트](docs/DEVICE_TEST_CHECKLIST.md)
 - [개인정보 및 보안 경계](docs/PRIVACY_BOUNDARIES.md)
