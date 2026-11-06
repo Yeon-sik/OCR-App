@@ -37,7 +37,9 @@ OCR Android는 에뮬레이터에서 홈 → SAF 파일 선택 → 비정형 바
 
 CashOS와 PriceTrace는 에뮬레이터의 실제 Android 시스템 저장창에서 내보내기·취소를 확인했다. 내려받은 JSON은 각각 1,322/1,331 bytes로 기대 바이트와 SHA-256이 일치했다. 취소가 성공으로 표시되지 않고 임시 파일이 정리됐다. 테스트 API는 합성 fixture로 차단/대체하여 운영 기록을 쓰지 않았다. CashOS의 기존 JSON/CSV 백업도 같은 SAF 저장 경로를 사용한다.
 
-Fitness는 Room v57→v58→v59, profile/project 격리, backup/재시작, 검토 상태, 원격 Meal 계정 확인을 검사했다. 기존 supplement 이력은 보존하면서 신규 입력을 HealthTrace로 안내한다. Room에서 생성한 실제 합성 건강 export를 HealthTrace에 입력해 원문/원본 ID/시각·중복·프로필 격리·기존 집계와 mirror 불변을 확인했다. HealthTrace SQLite v14→v15는 기존 행을 보존한다. HealthTrace의 Android 파일 선택/공유 OS 동작은 아직 기기 검증하지 않았다.
+Fitness는 Room v57→v58→v59, profile/project 격리, backup/재시작, 검토 상태, 원격 Meal 계정 확인을 검사했다. 기존 supplement 이력은 보존하면서 신규 입력을 HealthTrace로 안내한다. Room에서 생성한 실제 합성 건강 export를 HealthTrace에 입력해 원문/원본 ID/시각·중복·프로필 격리·기존 집계와 mirror 불변을 확인했다. HealthTrace SQLite v14→v15는 기존 행을 보존한다.
+
+HealthTrace 최종 APK에서도 실제 Android DocumentsUI 파일 선택 → 소유 범위 확인 → 저장 → 상세 → SharePlus 공유창 → 취소를 검증했다. 소유 범위 확인 전 저장은 비활성화됐다. 입력/SQLite 원문/내보내기 원본/FileProvider backing file 모두 1,177 bytes, SHA-256 `d60de13e323f619ed42dda38fb21624671cfc1e0aaddacd9e88ac8c9fa8a5409`로 일치했다. 로컬 시험 inbox 1행만 추가됐으며 수면/복용/관측/GitHub queue는 각각 0행을 유지했다. 직접 content URI 읽기는 Android CLI 권한 제한으로 수행하지 못해 backing file을 비교했다. 외부 수신 앱 전송은 시험하지 않았다. 네트워크를 끈 상태에서 실행하고 비행기 모드를 원래 off로 복원했다. 코드/APK 수정은 필요하지 않았다.
 
 독립 검토는 OCR Windows/Android, Fitness, PriceTrace 캡처 7개의 확인 범위에서 차단 결함이 없다고 판단했다. 중복 JSON 키 값 유실 P2를 발견해 수정했고 좁은 재검토에서 새 결함은 없었다. 모든 화면의 접근성·키보드·실기기 동작 검증을 뜻하지 않는다. 첫 reviewer 실행은 지원되지 않는 모델 설정으로 실패하여 기본 에이전트로 다시 수행했다.
 
@@ -74,7 +76,7 @@ Fitness는 Room v57→v58→v59, profile/project 격리, backup/재시작, 검�
 | PriceTrace | `android/app/build/outputs/apk/debug/app-debug.apk` | `CAB1B7B3BC323F0EFF27C1E1022D171A4EB52FB27FDB6FCD4D48FEFEC4309143` |
 | HealthTrace | `build/app/outputs/flutter-apk/app-debug.apk` | `0A3A606D78A8EBE243A1BE61C90A0736E5D0656D00C6794AD8F15DF3CEC5E404` |
 
-주요 기능 커밋: OCR `e63f3ad`, `64e374c`, `2a8bbeb`, `2275d74`; Fitness `c5992a24`, `1b1734fe`, `aaf148b0`, `c9066f9d`, `941ffdb1`; CashOS `00a1a54`, 문서 `e89810e`; PriceTrace `82b86e9`, `59dcac2`, `36f6c36`; HealthTrace `aeb7b45`, `2070df0`, `49fbc83`, `735594e`.
+주요 기능 커밋: OCR `e63f3ad`, `64e374c`, `2a8bbeb`, `2275d74`; Fitness `c5992a24`, `1b1734fe`, `aaf148b0`, `c9066f9d`, `941ffdb1`; CashOS `00a1a54`, 문서 `e89810e`; PriceTrace `82b86e9`, `59dcac2`, `36f6c36`; HealthTrace `aeb7b45`, `2070df0`, `49fbc83`, `735594e`, 검증 문서 `7e7f73f`.
 
 ## 재실행과 증거 위치
 
@@ -84,6 +86,7 @@ Fitness는 Room v57→v58→v59, profile/project 격리, backup/재시작, 검�
 - HTTP: `node scripts/verify-information-http.mjs <로컬 env 파일> cashos|pricetrace`; Nutrition: `scripts/verify-nutrition-meal-read.mjs`. 비밀번호/토큰은 출력하지 않는다.
 - OCR Android: `build/information-android-qa/`; Windows 결과: `desktop-app/build/reports/tests/test/`.
 - Fitness: `artifacts/information-intake/`; CashOS: `.codex/information-intake-validation/`; PriceTrace: `.impeccable/review/`와 native export 검증 로그. 생성 증거는 일반적으로 Git에 커밋하지 않는다.
+- HealthTrace: `build/information-native-qa/`의 byte/DB evidence, 소유 범위 확인 및 공유창 캡처.
 
 ## 남은 범위
 

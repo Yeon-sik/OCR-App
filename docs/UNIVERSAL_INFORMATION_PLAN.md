@@ -114,7 +114,7 @@
 | 공통 수용·각 앱 검토함 | 구현·저장/계약/UI 검증 완료 | 대량 장기 사용과 실기기 사용감 확인 |
 | 기존 도메인 집계 반영 | 기존 전용 계약 유지, generic 검토함은 분리 | 자주 쓰는 자료부터 기존 validator에 연결하고 영향 preview/확인 제공 |
 | Fitness 원격 Meal 수신 | 계정↔프로필 확인, nullable snapshot 수신·중복 검사 구현 | 운영 계정에 실제 Meal이 생긴 뒤 비어 있지 않은 원격 기록 대조; 현재 실제 GET은 200/0행 |
-| supplement/health 경계 | 신규 Fitness 건강 입력 제한, 안정 ID export와 Room 합성 export의 Health 저장소 수신 검증 | 검토함 자료를 정식 Health 수면/섭취 기록으로 전환하는 별도 검수 계약 |
+| supplement/health 경계 | 신규 Fitness 건강 입력 제한, 안정 ID export, Room 합성 export의 Health 저장소 및 실제 Android 파일 선택·저장·공유 준비 검증 | 검토함 자료를 정식 Health 수면/섭취 기록으로 전환하는 별도 검수 계약 |
 | 형식별 자동 추출 | 기존 영수증/제품 경로와 임의 원문 보관 사용 가능 | PDF/음성/영상/센서별 추출기·실제 샘플·오류율·수동 수정 검증 |
 | 운영 DB | CashOS/PriceTrace 초기+중복키 후속 migration 적용, RLS/rollback 시험 통과 | 운영 웹 호스팅 반영 및 다른 feature branch와의 통합 검토 |
 | 설치 파일 | Windows 실행 폴더와 Android debug APK 빌드 완료 | 물리 기기 데이터·서명 대조와 보존 설치; 이번 작업에서는 설치하지 않음 |
