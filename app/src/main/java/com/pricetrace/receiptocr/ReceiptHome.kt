@@ -37,6 +37,7 @@ internal fun SessionListScreen(
     onScan: () -> Unit, onPickImages: () -> Unit, onPickCanonicalBundle: () -> Unit,
     onWorkflowSelected: (OcrWorkflowType) -> Unit, onSelectSession: (String) -> Unit,
     onDeleteSession: (String) -> Unit, onShowApiSettings: () -> Unit,
+    onOpenInformationArchive: () -> Unit = {},
 ) {
     var newWork by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = newWork) { newWork = false }
@@ -110,6 +111,7 @@ internal fun SessionListScreen(
                 Text("확인 필요한 작업 ${attention.size}개", color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.semantics { heading() })
             }
+            item { OutlinedButton(onClick = onOpenInformationArchive, enabled = !isBusy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("information_archive_button")) { Text("모든 원문 · 정보 보관함") } }
             item { Text("진행 중 · 최근 작업", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() }) }
             if (sessions.isEmpty()) item { Text("아직 작업이 없습니다. 촬영하거나 검수 자료를 가져오세요.") }
             items(sessions.sortedBy { it.lastError == null }, key = { it.documentId }) { session ->

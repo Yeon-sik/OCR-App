@@ -222,6 +222,7 @@ fun ReceiptOcrContent(
     onSelectSession: (String) -> Unit = {},
     onDeleteSession: (String) -> Unit = {},
     onShowApiSettings: () -> Unit = {},
+    onOpenInformationArchive: () -> Unit = {},
     onStartOcr: () -> Unit = {},
     onNutritionProductNameChanged: (String) -> Unit = {},
     onNutritionBrandChanged: (String) -> Unit = {},
@@ -455,6 +456,7 @@ fun ReceiptOcrContent(
                     onSelectSession = onSelectSession,
                     onDeleteSession = onDeleteSession,
                     onShowApiSettings = onShowApiSettings,
+                    onOpenInformationArchive = onOpenInformationArchive,
                 )
                 AppScreen.IMPORT_PREVIEW -> uiState.importPreview?.let { preview ->
                     ImportPreviewScreen(

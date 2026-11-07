@@ -24,7 +24,7 @@ fun interface NutritionHttpTransport {
     suspend fun execute(request: NutritionHttpRequest): NutritionHttpResponse
 }
 
-class HttpsNutritionHttpTransport : NutritionHttpTransport {
+class HttpsNutritionHttpTransport(private val maxResponseBytes: Int = 1024 * 1024) : NutritionHttpTransport {
     override suspend fun execute(request: NutritionHttpRequest): NutritionHttpResponse = withContext(Dispatchers.IO) {
         require(request.url.startsWith("https://")) { "Only HTTPS Nutrition endpoints are allowed" }
         val connection = (URL(request.url).openConnection() as HttpURLConnection).apply {
@@ -56,7 +56,7 @@ class HttpsNutritionHttpTransport : NutritionHttpTransport {
             val count = input.read(buffer)
             if (count < 0) break
             total += count
-            if (total > MAX_RESPONSE_BYTES) throw IOException("Nutrition response is too large")
+            if (total > maxResponseBytes) throw IOException("Nutrition response is too large")
             output.write(buffer, 0, count)
         }
         return output.toString(StandardCharsets.UTF_8.name())
@@ -65,6 +65,5 @@ class HttpsNutritionHttpTransport : NutritionHttpTransport {
     private companion object {
         const val CONNECT_TIMEOUT_MS = 15_000
         const val READ_TIMEOUT_MS = 25_000
-        const val MAX_RESPONSE_BYTES = 1024 * 1024
     }
 }

@@ -119,6 +119,7 @@ fun ReceiptOcrApp(
         onSelectSession = viewModel::selectSession,
         onDeleteSession = viewModel::deleteSession,
         onShowApiSettings = viewModel::showApiSettings,
+        onOpenInformationArchive = { context.startActivity(Intent(context, InformationArchiveActivity::class.java)) },
         onStartOcr = viewModel::startOcr,
         onNutritionProductNameChanged = viewModel::updateNutritionProductName,
         onNutritionBrandChanged = viewModel::updateNutritionBrand,

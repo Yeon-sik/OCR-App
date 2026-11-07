@@ -1,0 +1,1970 @@
+{
+  "contract": "information-record.v1",
+  "accepted": [
+    {
+      "name": "fitness-typed-values",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "cashos-typed-values",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "cashos",
+        "record_type": "cashos.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "pricetrace-typed-values",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "pricetrace",
+        "record_type": "pricetrace.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "fitness",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "healthtrace-typed-values",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "healthtrace",
+        "record_type": "healthtrace.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    }
+  ],
+  "rejected": [
+    {
+      "name": "wrong-schema",
+      "record": {
+        "schema_version": "information-record.v2",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown-root-field",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ],
+        "user_id": "someone-else"
+      }
+    },
+    {
+      "name": "wrong-owner-type",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "healthtrace.measurement",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "foreign-field-owner",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "healthtrace.sleep",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "numeric-decimal",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": 12.5,
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "exponent-decimal",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "1e5",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "leading-zero-decimal",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "01.0",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "string-boolean",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": "false"
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "impossible-calendar-date",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2026-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing-offset",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "impossible-calendar-time",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-02-30T12:30:00Z",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate-fields",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          },
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing-source-reference",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "not-present"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate-source-reference",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1",
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate-sources",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          },
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "null-optional",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ],
+        "occurred_at": null
+      }
+    },
+    {
+      "name": "file-without-hash",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "file",
+            "name": "source.bin"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "credential-url",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "url",
+            "uri": "https://user:password@example.com"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "file-url",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "url",
+            "uri": "file:///C:/secret"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unit-on-text",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": "",
+            "unit": "kg"
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing-value",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text"
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "confidence-outside-range",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 1.1,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "confidence-string",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": "0.5",
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "blank-title",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "  ",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ]
+      }
+    },
+    {
+      "name": "self-correction",
+      "record": {
+        "schema_version": "information-record.v1",
+        "record_id": "12345678-1234-4234-8234-1234567890ab",
+        "owner_app": "fitness",
+        "record_type": "fitness.observation",
+        "title": "확장 기록 계약 시험",
+        "captured_at": "2026-11-06T12:30:00+09:00",
+        "sources": [
+          {
+            "source_id": "manual-1",
+            "kind": "manual",
+            "text": "사용자가 입력한 원문"
+          }
+        ],
+        "fields": [
+          {
+            "key": "measurement",
+            "value_type": "decimal",
+            "value": "12345678901234567890.0010",
+            "unit": "custom-unit",
+            "confidence": 0.5,
+            "source_ids": [
+              "manual-1"
+            ]
+          },
+          {
+            "key": "details",
+            "value_type": "json",
+            "value": {
+              "nested": [
+                false,
+                null,
+                "원문",
+                {
+                  "custom": "보존"
+                }
+              ]
+            }
+          },
+          {
+            "key": "empty",
+            "value_type": "text",
+            "value": ""
+          },
+          {
+            "key": "enabled",
+            "value_type": "boolean",
+            "value": false
+          },
+          {
+            "key": "day",
+            "value_type": "date",
+            "value": "2024-02-29"
+          }
+        ],
+        "references": [
+          {
+            "owner_app": "pricetrace",
+            "record_id": "opaque-owner-id",
+            "relation": "references",
+            "project": "example-private-project"
+          }
+        ],
+        "supersedes_record_id": "12345678-1234-4234-8234-1234567890ab"
+      }
+    }
+  ]
+}
+
