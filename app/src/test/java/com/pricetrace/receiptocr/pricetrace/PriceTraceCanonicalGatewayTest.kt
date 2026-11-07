@@ -69,7 +69,14 @@ class PriceTraceCanonicalGatewayTest {
     }
 
     @Test
-    fun legacyParsedReceiptRequiresDurableArtifactApprovalAndKeepsReplayKeyAndUploadedSibling() = runTest {
+    fun legacyParsedReceiptRequiresDurableArtifactApprovalAndKeepsReplayKeyAndUploadedSibling() =
+        assertRepairedReceiptRetry("""{"code":"22023","message":"only privacy-sanitized user_verified receipt.v2 is accepted"}""")
+
+    @Test
+    fun repairedSkuMappingFailureRequiresApprovalAndKeepsReplayKeyAndUploadedSibling() =
+        assertRepairedReceiptRetry("""{"code":"23502","message":"null value in column \"product_id\" of relation \"store_products\" violates not-null constraint"}""")
+
+    private fun assertRepairedReceiptRetry(rejection: String) = runTest {
         val envelope = parsedReceiptEnvelope().copy(review = IngestionReview(IngestionReviewStatus.READY))
         val evidence = envelope.source.sourceFiles.map { LocalEvidence(it.id, it.type, true) }
         val store = InMemoryIngestionSessionStore()
@@ -87,7 +94,7 @@ class PriceTraceCanonicalGatewayTest {
         val unapproved = requireNotNull(store.get("legacy-review"))
         store.save(unapproved.copy(projections = unapproved.projections.map {
             if (it.projection == IngestionProjection.PRICETRACE_RECEIPT) it.copy(
-                lastError = """{"code":"22023","message":"only privacy-sanitized user_verified receipt.v2 is accepted"}""",
+                lastError = rejection,
             ) else it
         }))
         orchestrator.retrySelectedProjections("legacy-review", envelope, setOf(IngestionProjection.PRICETRACE_RECEIPT))
@@ -100,7 +107,7 @@ class PriceTraceCanonicalGatewayTest {
             when (it.projection) {
                 IngestionProjection.PRICETRACE_RECEIPT -> it.copy(status = ProjectionStatus.BLOCKED,
                     idempotencyKey = "original-receipt-key", attemptCount = 1,
-                    lastError = """{"code":"22023","message":"only privacy-sanitized user_verified receipt.v2 is accepted"}""")
+                    lastError = rejection)
                 IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE -> uploadedProduct
                 else -> it
             }
@@ -117,6 +124,33 @@ class PriceTraceCanonicalGatewayTest {
         assertEquals("original-receipt-key", Json.parseToJsonElement(transport.requests.single().body!!)
             .jsonObject["p_idempotency_key"]!!.jsonPrimitive.content)
         assertEquals(TranscriptionStatus.PARSED, envelope.receipt!!.document.source.transcriptionStatus)
+    }
+
+    @Test
+    fun unrelatedStorageContractFailureRemainsBlocked() = runTest {
+        val envelope = parsedReceiptEnvelope()
+        val evidence = envelope.source.sourceFiles.map { LocalEvidence(it.id, it.type, true) }
+        val store = InMemoryIngestionSessionStore()
+        val transport = QueueTransport()
+        val orchestrator = IngestionOrchestrator(store, submitters = mapOf(
+            IngestionProjection.PRICETRACE_RECEIPT to PriceTraceCanonicalProjectionSubmitter(
+                PriceTraceCanonicalGateway(FakeStore(signedIn()), transport),
+            ),
+        ))
+        orchestrator.start("unrelated-contract", "unrelated-document", envelope, evidence)
+        orchestrator.markReceiptVerified("unrelated-contract", envelope, evidence)
+        val approved = requireNotNull(store.get("unrelated-contract"))
+        store.save(approved.copy(projections = approved.projections.map {
+            if (it.projection == IngestionProjection.PRICETRACE_RECEIPT) it.copy(
+                status = ProjectionStatus.BLOCKED,
+                lastError = """{"code":"23502","message":"null value in column \"store_id\" of relation \"store_products\" violates not-null constraint"}""",
+            ) else it
+        }))
+        val result = orchestrator.retrySelectedProjections(
+            "unrelated-contract", envelope, setOf(IngestionProjection.PRICETRACE_RECEIPT),
+        ).single { it.projection == IngestionProjection.PRICETRACE_RECEIPT }
+        assertEquals(ProjectionStatus.BLOCKED, result.status)
+        assertTrue(transport.requests.isEmpty())
     }
 
     @Test

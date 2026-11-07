@@ -1528,8 +1528,11 @@ class IngestionOrchestrator(
         val code = (error["code"] as? JsonPrimitive)?.contentOrNull
         val message = (error["message"] as? JsonPrimitive)?.contentOrNull
         val fixedRejection = when (state.projection) {
-            IngestionProjection.PRICETRACE_RECEIPT -> envelope.receipt != null && code == "22023" &&
-                message == "only privacy-sanitized user_verified receipt.v2 is accepted"
+            IngestionProjection.PRICETRACE_RECEIPT -> envelope.receipt != null && (
+                (code == "22023" && message == "only privacy-sanitized user_verified receipt.v2 is accepted") ||
+                    (code == "23502" &&
+                        message == "null value in column \"product_id\" of relation \"store_products\" violates not-null constraint")
+                )
             IngestionProjection.FITNESS_NUTRITION -> envelope.nutrition.any { it is IngestionNutrition.ProductLabel } &&
                 code == "23514" && message == "A product label may carry only a resolved PriceTrace catalog_product_id."
             else -> false
