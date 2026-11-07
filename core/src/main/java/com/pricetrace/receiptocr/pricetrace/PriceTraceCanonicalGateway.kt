@@ -216,6 +216,52 @@ class PriceTraceCanonicalGateway(
                 "observationIds" to source.getValue("observationIds"), "observationCount" to source.getValue("observationCount"))))
         }
 
+    suspend fun reviewSavedIdentity(input: SavedIdentityRequest): PriceTraceCanonicalOutcome = readAcceptedResponse { config ->
+        SavedIdentityConnections.validateRecordIds(input.recordIds)
+        val command = input.command
+        suspend fun call(rpc: String, body: JsonObject): JsonObject {
+            require(store.read().let { it.isSignedIn && it.userId == config.userId }) { "로그인 계정이 변경되었습니다. 다시 불러오세요." }
+            val response = transport.execute(request(config,"POST","/rest/v1/rpc/$rpc",body = body.encode()))
+            require(store.read().let { it.isSignedIn && it.userId == config.userId }) { "로그인 계정이 변경되었습니다. 다시 불러오세요." }
+            if (response.statusCode !in 200..299) throw PurchaseContextFailure(PriceTraceCanonicalOutcome.Failure(classify(response),
+                if (response.statusCode == 404) "서버에 연결 기능이 아직 적용되지 않았습니다." else "연결 정보를 처리하지 못했습니다. 로그인과 연결 상태를 확인하고 다시 시도하세요."))
+            return Json.parseToJsonElement(response.body).jsonObject
+        }
+        val selectors = buildJsonObject { put("p_record_ids",JsonArray(input.recordIds.map(::JsonPrimitive))) }
+        val inventory = call("get_my_identity_connection_sources_v1",selectors)
+        val base = buildJsonObject { put("inventory",inventory) }
+        val current = SavedIdentityConnections.decode(base)
+        require(current.ownerId == config.userId) { "연결 정보의 소유자가 현재 계정과 다릅니다." }
+        if (command.action == SavedIdentityAction.LOAD) return@readAcceptedResponse PriceTraceCanonicalOutcome.Success(base)
+        val source = current.sources.single { it.entity == command.entity && it.sourceId == command.sourceId }
+        require(command.query.trim().length in 2..200)
+        val arguments = buildJsonObject {
+            put("p_entity",source.entity); put("p_source_id",source.sourceId); put("p_query",command.query)
+        }
+        if (command.action == SavedIdentityAction.CONNECT) {
+            require(command.targetId != null)
+            val connected = call("connect_my_identity_v1",JsonObject(arguments + mapOf(
+                "p_target_id" to JsonPrimitive(command.targetId),"p_user_verified" to JsonPrimitive(true))))
+            val result = SavedIdentityConnections.decode(buildJsonObject { put("inventory",connected) })
+            require(result.ownerId == current.ownerId && result.sources.any {
+                it.entity == source.entity && it.sourceId == source.sourceId && it.selected?.id == command.targetId
+            })
+            val refreshed = buildJsonObject {
+                put("inventory",call("get_my_identity_connection_sources_v1",selectors))
+            }
+            val refreshedState = SavedIdentityConnections.decode(refreshed)
+            require(refreshedState.ownerId == config.userId && refreshedState.sources.any {
+                it.entity == source.entity && it.sourceId == source.sourceId && it.selected?.id == command.targetId
+            }) { "연결 결과를 확인할 수 없습니다. 연결 정보를 다시 불러오세요." }
+            return@readAcceptedResponse PriceTraceCanonicalOutcome.Success(refreshed)
+        }
+        val search = call("search_my_identity_connections_v1",arguments)
+        require(search["sourceId"] == JsonPrimitive(source.sourceId) && search["entity"] == JsonPrimitive(source.entity) && search["query"] == JsonPrimitive(command.query))
+        val result = buildJsonObject { put("inventory",inventory); put("search",search) }
+        SavedIdentityConnections.decode(result)
+        PriceTraceCanonicalOutcome.Success(result)
+    }
+
     suspend fun reviewPurchaseIdentity(input: PurchaseIdentityReviewRequest): PriceTraceCanonicalOutcome = readAcceptedResponse { config ->
         val command = input.command
         var mutation: JsonObject? = null
@@ -1215,8 +1261,13 @@ class PriceTraceCanonicalGateway(
 
 class PriceTraceCanonicalProjectionSubmitter(
     private val gateway: PriceTraceCanonicalGateway,
-) : IngestionProjectionSubmitter, OcrMerchantIdentityResolutionSubmitter, OcrMenuIdentityResolutionSubmitter, OcrPurchaseIdentityResolutionSubmitter, PurchaseIdentityReviewSubmitter,
+) : IngestionProjectionSubmitter, OcrMerchantIdentityResolutionSubmitter, OcrMenuIdentityResolutionSubmitter, OcrPurchaseIdentityResolutionSubmitter, PurchaseIdentityReviewSubmitter, SavedIdentitySubmitter,
     OcrProjectionResponseReader {
+    override suspend fun reviewSavedIdentity(request: SavedIdentityRequest): ProjectionSubmission =
+        when (val result = gateway.reviewSavedIdentity(request)) {
+            is PriceTraceCanonicalOutcome.Failure -> result.toProjectionFailure(reviewAware = true)
+            is PriceTraceCanonicalOutcome.Success -> ProjectionSubmission.Success(request.recordIds.first(), metadataJson = result.response.encode())
+        }
     override suspend fun reviewPurchaseIdentity(request: PurchaseIdentityReviewRequest): ProjectionSubmission =
         when (val result = gateway.reviewPurchaseIdentity(request)) {
             is PriceTraceCanonicalOutcome.Failure -> result.toProjectionFailure(reviewAware = true)

@@ -97,6 +97,7 @@ fun ReviewWorkspace(
     onImportJson: () -> Unit,
     onOwnerRestaurantSelected: (com.pricetrace.receiptscanner.ingestion.PurchaseNutritionIdentity.OwnerRestaurantSelection) -> Unit = {},
     onPurchaseIdentityCommand: (com.pricetrace.receiptscanner.ingestion.PurchaseIdentityCommand) -> Unit = {},
+    onSavedIdentityCommand: (com.pricetrace.receiptscanner.ingestion.SavedIdentityCommand) -> Unit = {},
 ) {
     Surface(
         modifier = Modifier.fillMaxSize().onPreviewKeyEvent { event ->
@@ -219,6 +220,7 @@ fun ReviewWorkspace(
                         busy = busy,
                         onEdit = onEdit,
                     )
+                    SavedIdentityConnectionsPanel(state.session, canUseVerifiedSource && revisionReady, onSavedIdentityCommand)
                     val ownerMetadata = state.session?.projections?.singleOrNull { it.projection == IngestionProjection.PRICETRACE_PRICE_OBSERVATION }?.metadataJson
                     com.pricetrace.receiptscanner.ingestion.PurchaseIdentityReview.cards(envelope,ownerMetadata).forEach { card ->
                         PurchaseIdentityCard(card,canUseVerifiedSource && card.sourceSaved,onPurchaseIdentityCommand)
