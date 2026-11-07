@@ -1533,6 +1533,8 @@ class IngestionOrchestrator(
                     (code == "23502" &&
                         message == "null value in column \"product_id\" of relation \"store_products\" violates not-null constraint")
                 )
+            IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE -> envelope.productCandidates.isNotEmpty() &&
+                code == "23505" && message == "client_key was already used for another product candidate payload"
             IngestionProjection.FITNESS_NUTRITION -> envelope.nutrition.any { it is IngestionNutrition.ProductLabel } &&
                 code == "23514" && message == "A product label may carry only a resolved PriceTrace catalog_product_id."
             else -> false

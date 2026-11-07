@@ -1,5 +1,9 @@
 package com.yeonsik.ingestion.desktop
 
+import com.pricetrace.receiptocr.pricetrace.ManufacturerProductPublicationDraft
+import com.pricetrace.receiptocr.pricetrace.PriceTraceCanonicalOutcome
+import com.pricetrace.receiptscanner.publisher.PriceObservationFailureKind
+
 import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner
 
 import com.pricetrace.receiptscanner.ingestion.CanonicalImportResult
@@ -878,8 +882,13 @@ class DesktopIngestionController(
         }
     }
 
-    suspend fun submit(selectedProjections: Set<IngestionProjection> = emptySet()) {
+    suspend fun submit(
+        selectedProjections: Set<IngestionProjection> = emptySet(),
+        publication: ManufacturerProductPublicationDraft? = null,
+    ) {
         beginBusy()
+        var publicationNotice: String? = null
+        var publicationError: String? = null
         try {
             val currentState = _state.value
             require(currentState.draftSaveError == null) { currentState.draftSaveError.orEmpty() }
@@ -910,20 +919,50 @@ class DesktopIngestionController(
                 error("전송하려면 검수한 자료를 먼저 검수 완료 처리하세요.")
             }
             val plan = useCase.plan(envelope)
-            val selected = if (selectedProjections.isEmpty()) CanonicalProjectionPlanner.deliveryProjections(envelope) else {
+            val selected = if (selectedProjections.isEmpty() && publication == null) {
+                CanonicalProjectionPlanner.deliveryProjections(envelope)
+            } else {
                 selectedProjections.intersect(plan.eligible)
             }
-            if (selected.isEmpty()) error("전송할 수 있는 대상이 선택되지 않았습니다.")
-            if (session.projections.filter { it.projection in selected }.let { it.isNotEmpty() && it.all { p -> p.status == ProjectionStatus.UPLOADED } }) {
-                _state.value = currentState.copy(notice = "선택한 대상은 모두 전송 완료되었습니다.", error = null)
+            if (publication != null) {
+                require(envelope.productCandidates.any {
+                    it.clientKey == publication.productClientKey && it.candidateType == "retail_product"
+                }) { "공개할 검수 상품을 다시 선택하세요." }
+                publication.validationMessage()?.let { error(it) }
+                publicationError = bundle.ensureAuthenticated(setOf(IngestionProjection.PRICETRACE_PRODUCT_CANDIDATE))
+                    .firstOrNull()
+                if (publicationError == null) {
+                    when (val result = bundle.priceTraceCanonicalGateway.publishManufacturerProduct(publication)) {
+                        is PriceTraceCanonicalOutcome.Success -> publicationNotice = "PriceTrace 공용 상품 등록을 확인했습니다."
+                        is PriceTraceCanonicalOutcome.Failure -> publicationError = when (result.kind) {
+                            PriceObservationFailureKind.AUTHENTICATION, PriceObservationFailureKind.NOT_CONFIGURED ->
+                                "공용 상품 등록에는 PriceTrace 관리자 계정이 필요합니다."
+                            PriceObservationFailureKind.IDEMPOTENCY_MISMATCH ->
+                                "같은 제조사 SKU에 다른 규격이 등록되어 있습니다. 공식 상품 정보를 다시 확인하세요."
+                            PriceObservationFailureKind.CONTRACT ->
+                                "공개 등록에 실패했습니다. 제조사 URL과 SKU·규격을 확인하세요."
+                            else -> "공개 등록 결과를 확인하지 못했습니다. 같은 정보로 다시 시도하세요."
+                        }
+                    }
+                }
+            }
+            if (selected.isEmpty() && publication == null) error("전송할 수 있는 대상이 선택되지 않았습니다.")
+            if (selected.isEmpty() || selected.all { projection ->
+                    session.projections.any { it.projection == projection && it.status == ProjectionStatus.UPLOADED }
+                }
+            ) {
+                _state.value = currentState.copy(
+                    notice = publicationNotice ?: "선택한 대상은 모두 전송 완료되었습니다.".takeIf { selected.isNotEmpty() },
+                    error = publicationError,
+                )
                 return
             }
             val authenticationTargets = selected + selected.flatMap { plan.dependencies[it].orEmpty() }
             val authenticationErrors = bundle.ensureAuthenticated(authenticationTargets, envelope)
             if (authenticationErrors.isNotEmpty()) {
                 _state.value = currentState.copy(
-                    error = authenticationErrors.joinToString(" "),
-                    notice = null,
+                    error = (listOfNotNull(publicationError) + authenticationErrors).distinct().joinToString(" "),
+                    notice = publicationNotice,
                 )
                 return
             }
@@ -936,11 +975,14 @@ class DesktopIngestionController(
                 rawJson = currentState.rawJson,
                 canonicalJson = currentState.canonicalJson,
                 evidence = currentState.evidence,
-                notice = "전송 작업이 끝났습니다: ${projectionSummary(projections)}",
-                error = null,
+                notice = listOfNotNull(publicationNotice, "전송 작업이 끝났습니다: ${projectionSummary(projections)}").joinToString(" "),
+                error = publicationError,
             )
         } catch (error: Exception) {
-            _state.value = _state.value.copy(error = error.message ?: error.javaClass.simpleName, notice = null)
+            _state.value = _state.value.copy(
+                error = listOfNotNull(publicationError, error.message ?: error.javaClass.simpleName).joinToString(" "),
+                notice = publicationNotice,
+            )
         } finally {
             endBusy()
         }

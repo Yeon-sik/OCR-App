@@ -231,10 +231,10 @@ fun YeonsikCollectorApp(
                     },
                     onOpenSubmitConfirmation = { submitConfirmationOpen = true },
                     onDismissSubmitConfirmation = { submitConfirmationOpen = false },
-                    onConfirmSubmit = {
+                    onConfirmSubmit = { publication ->
                         submitConfirmationOpen = false
                         runIo {
-                            controller.submit(effectiveSelectedProjections)
+                            controller.submit(effectiveSelectedProjections, publication)
                             batchCoordinator.syncActiveItem()
                             refreshRecent()
                         }

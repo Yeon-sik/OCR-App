@@ -5,6 +5,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.key
 import androidx.compose.runtime.Composable
@@ -49,6 +51,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.pricetrace.receiptocr.pricetrace.ManufacturerProductPublicationDraft
 import com.pricetrace.receiptscanner.ingestion.CanonicalProjectionPlanner
 import com.pricetrace.receiptscanner.ingestion.IngestionNutrition
 import com.pricetrace.receiptscanner.ingestion.IngestionProjection
@@ -90,7 +93,7 @@ fun ReviewWorkspace(
     onVerify: () -> Unit,
     onOpenSubmitConfirmation: () -> Unit,
     onDismissSubmitConfirmation: () -> Unit,
-    onConfirmSubmit: () -> Unit,
+    onConfirmSubmit: (ManufacturerProductPublicationDraft?) -> Unit,
     onRetryArchive: () -> Unit,
     onRetryRevision: () -> Unit,
     onDeveloperInfoVisibleChanged: (Boolean) -> Unit,
@@ -148,21 +151,26 @@ fun ReviewWorkspace(
         }
         val navigation = remember(state.ingestionId) { ReviewNavigation() }
         val groups = canonicalReviewFieldGroups(envelope)
+        val hiddenPurchaseNames = purchaseItemReviewLayout(groups.visibleFields, envelope,
+            state.reviewFieldErrors.keys + state.reviewDrafts.keys).hiddenPaths
         val paths = LinkedProductReview.facts(envelope).filter { it.status == ProductFactStatus.CONFLICT }
             .map { "conflict:${it.productClientKey}:${it.field}" } +
             state.reviewDrafts.keys.filter { it.endsWith(".new_option") } +
             (groups.visibleFields + groups.emptyOptionalFields.filter { it.path in state.reviewFieldErrors || it.path in state.reviewDrafts })
+                .filterNot { it.path in hiddenPurchaseNames }
                 .sortedBy { reviewFieldPriority(it, state.reviewFieldErrors.keys, state.reviewDrafts.keys) }
                 .map { it.path }
         val confirmationBlocker = reviewConfirmationBlocker(state, busy, revisionReady)
         val canVerify = confirmationBlocker == null
-        val canUseVerifiedSource = confirmationBlocker == null && state.session != null &&
+        val verifiedSourceReady = confirmationBlocker == null && state.session != null &&
             state.session.verifiedCanonicalFingerprint == state.session.canonicalFingerprint &&
             (state.bundleMetadata == null ||
                 state.bundleMetadata.archiveStatus == DesktopEvidenceArchiveStatus.ARCHIVED &&
                 state.bundleMetadata.verificationEventRecorded) &&
-            revisionReady && selectedProjections.isNotEmpty() && state.reviewFieldErrors.isEmpty()
+            revisionReady && state.reviewFieldErrors.isEmpty()
+        val canUseVerifiedSource = verifiedSourceReady && selectedProjections.isNotEmpty()
         val canSubmit = canUseVerifiedSource && pendingDeliveryProjections(state, selectedProjections).isNotEmpty()
+        val canPublishManufacturer = verifiedSourceReady && envelope.productCandidates.any { it.candidateType == "retail_product" }
 
         CompositionLocalProvider(LocalReviewNavigation provides navigation, LocalReviewEnvelope provides envelope) {
           BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -259,6 +267,7 @@ fun ReviewWorkspace(
                         busy = busy,
                         canVerify = canVerify,
                         canSubmit = canSubmit,
+                        canPublishManufacturer = canPublishManufacturer,
                         confirmationBlocker = confirmationBlocker,
                         verificationBasis = verificationBasis,
                         selectedProjections = selectedProjections,
@@ -585,12 +594,13 @@ private fun EditableCanonicalSection(
                 ReviewTarget("conflict:${fact.productClientKey}:${fact.field}") { ProductFactConflict(fact, busy, onEdit) }
             }
         }
-        CategorizedReviewFields(fields.filterNot { ".option_items[" in it.path }, fieldErrors.keys) { field ->
+        CategorizedReviewFields(fields.filterNot { ".option_items[" in it.path }, fieldErrors.keys,
+            itemOptions = { linePath -> PurchaseOptionEditor(envelope, edits, fieldErrors, busy,
+                embeddedLinePath = linePath, onEdit = onEdit) }) { field ->
                 AccessibleField(field, CanonicalFieldRegistry.isModified(field, edits),
                     edits.firstOrNull { it.fieldPath == field.path }?.previousValue, fieldErrors[field.path], busy,
                     onApply = { value -> onEdit { it.updateField(field.path, value) } })
         }
-        PurchaseOptionEditor(envelope, edits, fieldErrors, busy, onEdit)
         if (emptyOptional.isNotEmpty()) {
             CollectorButton(if (showEmptyOptionalFields) "빈 선택 항목 접기" else "비어 있는 선택 항목 ${emptyOptional.size}개 보기",
                 { showEmptyOptionalFields = !showEmptyOptionalFields }, enabled = !busy, emphasized = false)
@@ -613,18 +623,26 @@ internal fun PurchaseOptionEditor(
     edits: List<com.pricetrace.receiptscanner.review.CanonicalReviewEdit>,
     fieldErrors: Map<String, String>,
     busy: Boolean,
+    embeddedLinePath: String? = null,
     onEdit: ((CanonicalReviewController) -> Boolean) -> Unit,
 ) {
     val fields = CanonicalFieldRegistry.fields(envelope)
     envelope.purchaseRecords.forEach { record ->
         record.lineItems.forEachIndexed { lineIndex, line ->
             val lineKey = line.lineKey ?: lineIndex.toString()
-            val path = "purchase_records[${record.clientKey}].line_items[$lineKey].option_items"
+            val linePath = "purchase_records[${record.clientKey}].line_items[$lineKey]"
+            if (embeddedLinePath != null && embeddedLinePath != linePath) return@forEachIndexed
+            val path = "$linePath.option_items"
             val actions = LocalReviewDraftActions.current
             val draftPath = "$path.new_option"
             var localDescription by rememberSaveable(path) { mutableStateOf("") }
             val description = if (actions != null) actions.values[draftPath].orEmpty() else localDescription
-            CollectorSection("${line.description} · 구매 옵션", "수량·금액이 원본에 없으면 비워 두세요. 실제 0원은 0을 입력하세요.") {
+            var optionsExpanded by rememberSaveable(path) { mutableStateOf(false) }
+            val needsAttention = actions?.values.orEmpty().keys.any { it.startsWith(path) } ||
+                fieldErrors.keys.any { it.startsWith(path) } ||
+                LocalReviewNavigation.current?.requestedPath?.startsWith(path) == true
+            val showOptions = embeddedLinePath == null || optionsExpanded || line.optionItems.isNotEmpty() || needsAttention
+            val optionContent: @Composable ColumnScope.() -> Unit = {
                 if (edits.any { it.fieldPath == path }) Text("검수자가 옵션 목록을 수정했습니다.", style = MaterialTheme.typography.bodySmall)
                 ReviewTarget(draftPath) {
                     OutlinedTextField(
@@ -666,6 +684,19 @@ internal fun PurchaseOptionEditor(
                             }, enabled = !busy && actions?.values.orEmpty().keys.none { it.startsWith("$prefix.") }, emphasized = false)
                         }
                     }
+                }
+            }
+            if (embeddedLinePath == null) CollectorSection("${line.description} · 구매 옵션",
+                "수량·금액이 원본에 없으면 비워 두세요. 실제 0원은 0을 입력하세요.", content = optionContent)
+            else {
+                if (line.optionItems.isNotEmpty() || needsAttention) Text("구매 옵션", style = MaterialTheme.typography.labelLarge)
+                else TextButton({ optionsExpanded = !optionsExpanded }, enabled = !busy) {
+                    Text(if (optionsExpanded) "구매 옵션 접기" else "구매 옵션 추가")
+                }
+                if (showOptions) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("수량·금액이 원본에 없으면 비워 두세요. 실제 0원은 0을 입력하세요.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    optionContent()
                 }
             }
         }
@@ -871,10 +902,11 @@ internal fun ConfirmAndSubmitSection(
     onVerify: () -> Unit,
     onOpenSubmitConfirmation: () -> Unit,
     onDismissSubmitConfirmation: () -> Unit,
-    onConfirmSubmit: () -> Unit,
+    onConfirmSubmit: (ManufacturerProductPublicationDraft?) -> Unit,
     onRetryArchive: () -> Unit,
     onRetryRevision: () -> Unit,
     compact: Boolean = false,
+    canPublishManufacturer: Boolean = false,
 ) {
     val verified = state.session?.let { it.verifiedCanonicalFingerprint == it.canonicalFingerprint } == true
     val verificationRecorded = state.bundleMetadata?.verificationEventRecorded != false
@@ -931,12 +963,13 @@ internal fun ConfirmAndSubmitSection(
             )
             CollectorButton(
                 label = when {
+                    !canSubmit && canPublishManufacturer -> "상품 공개 설정"
                     deliveryStates(state).let { it.isNotEmpty() && it.all { p -> p.status == ProjectionStatus.UPLOADED } } -> "전송 완료"
                     state.session?.projections?.any { it.projection in selectedProjections && it.status == ProjectionStatus.FAILED } == true -> "선택한 실패 항목 다시 보내기"
                     else -> "선택한 곳에 보내기"
                 },
                 onClick = onOpenSubmitConfirmation,
-                enabled = canSubmit,
+                enabled = canSubmit || canPublishManufacturer,
                 emphasized = verified && verificationRecorded,
                 modifier = Modifier.weight(1f),
                 contentDescription = "미전송 대상 ${pendingDeliveryProjections(state, selectedProjections).map { it.destination() }.distinct().size}곳. 전송 확인을 엽니다.",
@@ -944,24 +977,64 @@ internal fun ConfirmAndSubmitSection(
         }
         if (submitConfirmationOpen) {
             androidx.compose.ui.window.Dialog(onDismissRequest = onDismissSubmitConfirmation) {
+                val products = state.envelope?.productCandidates.orEmpty().filter { it.candidateType == "retail_product" }
+                var publicMode by remember { mutableStateOf(false) }
+                var productKey by remember { mutableStateOf(products.firstOrNull()?.clientKey) }
+                var selectingProduct by remember { mutableStateOf(false) }
+                val product = products.firstOrNull { it.clientKey == productKey }
+                var draft by remember(product) { mutableStateOf(product?.let { ManufacturerProductPublicationDraft.from(it) }) }
+                var reviewed by remember(product) { mutableStateOf(false) }
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = CollectorTokens.panelShape,
                     color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f),
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
                 ) {
-                    Column(Modifier.padding(CollectorTokens.space3).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
+                    Column(Modifier.heightIn(max = 610.dp).padding(CollectorTokens.space3), verticalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
                         Text("전송 확인", style = MaterialTheme.typography.titleMedium)
+                        Column(
+                            Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(CollectorTokens.space2),
+                        ) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
+                            CollectorButton("개인 공개", { publicMode = false; reviewed = false }, emphasized = !publicMode,
+                                modifier = Modifier.weight(1f).semantics { selected = !publicMode })
+                            CollectorButton("바로 공개", { publicMode = true }, enabled = canPublishManufacturer,
+                                emphasized = publicMode, modifier = Modifier.weight(1f).semantics { selected = publicMode })
+                        }
                         Text(
-                            "선택한 곳에 검수된 자료를 보냅니다. 필요한 선행 작업은 기존 처리 순서를 따르며, 이미 성공한 대상은 다시 보내지 않습니다.",
+                            if (publicMode) "선택한 상품 한 개의 제조사 정보가 PriceTrace 공용 검색에 표시됩니다. 구매 기록은 선택한 개인 계정으로 보냅니다."
+                            else "선택한 곳에 검수된 자료를 보냅니다. 필요한 선행 작업은 기존 처리 순서를 따르며, 이미 성공한 대상은 다시 보내지 않습니다.",
                             style = MaterialTheme.typography.bodyMedium,
                         )
+                        if (publicMode && canPublishManufacturer) {
+                            if (products.size > 1) {
+                                androidx.compose.foundation.layout.Box {
+                                    TextButton({ selectingProduct = true }) { Text(product?.productName ?: "공개할 상품 선택") }
+                                    androidx.compose.material3.DropdownMenu(selectingProduct, { selectingProduct = false }) {
+                                        products.forEach { candidate ->
+                                            androidx.compose.material3.DropdownMenuItem(
+                                                text = { Text(candidate.productName) },
+                                                onClick = { productKey = candidate.clientKey; selectingProduct = false },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            draft?.let {
+                                ManufacturerPublicationFields(it, { value -> draft = value; reviewed = false }, reviewed, { reviewed = it })
+                            }
+                        }
                         pendingDeliveryProjections(state, selectedProjections).groupBy { it.destination() }.forEach { (destination, projections) ->
                             Text("${destination.label} · ${destination.contentLabel(projections.toSet())}", style = MaterialTheme.typography.labelLarge)
                         }
+                        }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CollectorTokens.space2)) {
                             CollectorButton("전송 취소", onDismissSubmitConfirmation, emphasized = false, modifier = Modifier.weight(1f))
-                            CollectorButton("전송 확인", onConfirmSubmit, enabled = canSubmit, modifier = Modifier.weight(1f))
+                            val canConfirm = if (publicMode) canPublishManufacturer && reviewed && draft != null && draft?.validationMessage() == null
+                                else canSubmit
+                            CollectorButton("전송 확인", { onConfirmSubmit(draft.takeIf { publicMode }) },
+                                enabled = canConfirm, modifier = Modifier.weight(1f))
                         }
                     }
                 }
