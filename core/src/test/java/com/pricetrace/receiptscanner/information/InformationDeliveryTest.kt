@@ -78,6 +78,34 @@ class InformationDeliveryTest {
             assertFalse(it.readText().contains("secret-")); assertFalse(it.readText().contains("payload_text"))
         }
     }
+    @Test fun `separate journal instances allow concurrent reads and delivery writes`() = runTest {
+        val directory = temporary.newFolder("concurrent-journal")
+        val gateway = InformationDeliveryGateway(Connections(), Server())
+        val record = record()
+        val prepared = gateway.prepare(record)
+        InformationDeliveryJournal(directory).deliver(record, prepared, gateway)
+        val start = java.util.concurrent.CountDownLatch(1)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(8)
+        try {
+            val tasks = (0 until 8).map { worker ->
+                pool.submit<Unit> {
+                    val journal = InformationDeliveryJournal(directory)
+                    start.await()
+                    if (worker == 0) {
+                        repeat(30) { kotlinx.coroutines.runBlocking { journal.deliver(record, prepared, gateway) } }
+                    } else {
+                        repeat(100) { assertEquals(record.id, journal.attempts(record.id).single().recordId) }
+                    }
+                }
+            }
+            start.countDown()
+            tasks.forEach { it.get(30, java.util.concurrent.TimeUnit.SECONDS) }
+        } finally {
+            pool.shutdownNow()
+        }
+        assertEquals(InformationDeliveryState.DELIVERED, InformationDeliveryJournal(directory).attempts(record.id).single().state)
+    }
+
     @Test fun `account and project changes invalidate confirmation before any write`() = runTest {
         val connections = Connections(); val server = Server(); val gateway = InformationDeliveryGateway(connections, server); val record = record()
         val prepared = gateway.prepare(record)

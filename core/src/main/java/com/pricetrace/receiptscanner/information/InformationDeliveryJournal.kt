@@ -68,7 +68,15 @@ class InformationDeliveryJournal(private val directory: File) {
             InformationDeliveryState.valueOf(value("state")), value("attempted_at"), value("message"))
     }
     private fun validId(id: String) = require(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(id))
-    @Synchronized private fun <T> locked(action: () -> T): T = RandomAccessFile(File(directory, ".lock"), "rw").use { file ->
-        file.channel.lock().use { action() }
+    private fun <T> locked(action: () -> T): T = synchronized(processLock) {
+        RandomAccessFile(File(directory, ".lock"), "rw").use { file ->
+            file.channel.lock().use { action() }
+        }
+    }
+
+    private companion object {
+        // JVM file locks reject overlapping locks instead of waiting, even across journal instances.
+        // Serialize short local file operations; network delivery remains outside this monitor.
+        val processLock = Any()
     }
 }
