@@ -83,7 +83,7 @@ internal fun reviewGridColumns(width: Int): Int {
 }
 
 internal fun wideReviewField(field: CanonicalEditableField): Boolean = field.type == CanonicalFieldType.DATETIME ||
-    field.path.substringAfterLast('.') in setOf("address", "description", "specification_text", "note", "notes")
+    field.path.substringAfterLast('.') in setOf("product_name", "address", "description", "specification_text", "note", "notes")
 
 /** Display labels only; enum wire values and canonical paths stay untouched. */
 internal fun reviewEnumLabel(value: String): String = reviewEnumLabels[value] ?: value.ifEmpty { "없음" }

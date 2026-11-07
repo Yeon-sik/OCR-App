@@ -217,6 +217,9 @@ fun YeonsikCollectorApp(
                     onPurchaseIdentityCommand = { command ->
                         runIo { controller.reviewPurchaseIdentity(command); batchCoordinator.syncActiveItem(); refreshRecent() }
                     },
+                    onSavedIdentityCommand = { command ->
+                        runIo { controller.reviewSavedIdentity(command); batchCoordinator.syncActiveItem(); refreshRecent() }
+                    },
                     onVerify = {
                         runIo {
                             controller.verify(
@@ -228,10 +231,10 @@ fun YeonsikCollectorApp(
                     },
                     onOpenSubmitConfirmation = { submitConfirmationOpen = true },
                     onDismissSubmitConfirmation = { submitConfirmationOpen = false },
-                    onConfirmSubmit = {
+                    onConfirmSubmit = { publication ->
                         submitConfirmationOpen = false
                         runIo {
-                            controller.submit(effectiveSelectedProjections)
+                            controller.submit(effectiveSelectedProjections, publication)
                             batchCoordinator.syncActiveItem()
                             refreshRecent()
                         }
