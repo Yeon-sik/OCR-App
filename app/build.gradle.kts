@@ -217,8 +217,8 @@ android {
         applicationId = "com.pricetrace.receiptocr"
         minSdk = 24
         targetSdk = 37
-        versionCode = 19
-        versionName = "0.2.1"
+        versionCode = 20
+        versionName = "0.2.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEFAULT_NUTRITION_SUPABASE_URL", buildConfigString(defaultNutritionUrl))
         buildConfigField("String", "DEFAULT_NUTRITION_SUPABASE_PUBLISHABLE_KEY", buildConfigString(defaultNutritionKey))

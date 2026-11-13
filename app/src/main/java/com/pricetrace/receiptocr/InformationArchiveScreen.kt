@@ -24,6 +24,8 @@ fun InformationArchiveScreen(
     onExportRecord: (String) -> Unit,
     onExportSource: (AndroidInformationSource) -> Unit,
     onClose: () -> Unit,
+    onHealthSource: ((AndroidInformationSource) -> Unit)? = null,
+    onHealthPrescription: ((String) -> Unit)? = null,
 ) {
     var showDraftJson by remember { mutableStateOf(false) }
     var exitConfirmation by remember { mutableStateOf(false) }
@@ -69,6 +71,9 @@ fun InformationArchiveScreen(
                                 SelectionContainer { Text("SHA-256 ${source.sha256}", style = MaterialTheme.typography.bodySmall) }
                                 OutlinedButton(enabled = !model.busy, onClick = { model.linkedSourceId = source.id; model.pane = 1; model.ownerConfirmed = false }, modifier = Modifier.fillMaxWidth()) { Text("이 원문으로 구조화") }
                                 TextButton(enabled = !model.busy, onClick = { onExportSource(source) }) { Text("원본 파일 내보내기") }
+                                if (source.mediaType in listOf("image/jpeg", "image/png", "image/webp") && source.size <= 25L * 1024 * 1024 && onHealthSource != null) {
+                                    OutlinedButton(enabled = !model.busy, onClick = { onHealthSource(source) }, modifier = Modifier.fillMaxWidth().testTag("health_prescription_photo")) { Text("HealthTrace에서 처방 사진 확인") }
+                                }
                             }
                         }
                     }
@@ -123,6 +128,9 @@ fun InformationArchiveScreen(
                                         OutlinedButton(enabled = !model.busy && confirmed, onClick = { model.review(entry.record.id) }, modifier = Modifier.fillMaxWidth()) { Text("검토 완료") }
                                     }
                                     Button(enabled = !model.busy && entry.reviewed, onClick = { onExportRecord(entry.record.id) }, modifier = Modifier.fillMaxWidth().testTag("information_export_record")) { Text("${entry.record.owner.label}로 가져갈 JSON 내보내기") }
+                                    if (entry.record.payload["record_type"]?.jsonPrimitive?.content == "healthtrace.prescription" && onHealthPrescription != null) {
+                                        OutlinedButton(enabled = !model.busy && entry.reviewed, onClick = { onHealthPrescription(entry.record.id) }, modifier = Modifier.fillMaxWidth().testTag("health_prescription_json")) { Text("HealthTrace에서 처방전 등록") }
+                                    }
                                     OutlinedButton(enabled = !model.busy && entry.reviewed, onClick = { model.openDelivery(entry.record.id) }, modifier = Modifier.fillMaxWidth().testTag("information_open_delivery")) { Text("${entry.record.owner.label}로 직접 전송") }
                                     if (model.deliveryRecordId == entry.record.id) InformationDeliveryPanel(model)
                                 }
