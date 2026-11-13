@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="health_prescription_share" path="health-prescription-share/" />
     <files-path name="receipt_exports" path="receipt-scanner/" />
     <cache-path name="publication_assets" path="receipt-scanner/publication-assets/" />
 </paths>

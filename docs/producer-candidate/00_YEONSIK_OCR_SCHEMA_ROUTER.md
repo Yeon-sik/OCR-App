@@ -4,6 +4,7 @@ Status: INACTIVE_RUNTIME_CANDIDATE. 기존 Project 원본은 제공되지 않았
 
 | 근거/작업 | schema |
 | --- | --- |
+| 처방전·약 봉투·약 안내문 | information-record.v1 / healthtrace.prescription — [건강 추가 지침](09_HEALTH_PRESCRIPTION_PROJECT_INSTRUCTIONS.md) |
 | 비영수증 식당 주문·결제 근거와 실제 음식 사진의 영양이 함께 있음 | yeonsik-ocr.v5 / restaurant_purchase |
 | 주문·결제/구매 사실만 있음, food-photo nutrition 없음 | 기존 yeonsik-ocr.v4 |
 | 식당 영수증 및 음식 사진 | 기존 yeonsik-ocr.v2 |

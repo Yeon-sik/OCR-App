@@ -21,6 +21,36 @@ import java.util.UUID
 class InformationArchiveUiTest {
     @get:Rule val compose = createComposeRule()
 
+    @Test fun prescriptionHandoffRequiresReviewAndKeepsOriginalPhoto() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val model = InformationArchiveViewModel(context.applicationContext as Application, File(context.cacheDir, "prescription-ui-${UUID.randomUUID()}"))
+        compose.waitUntil(10_000) { !model.busy }
+        val bytes = ByteArrayOutputStream().also { Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+        val source = model.store.capture(bytes.inputStream(), "synthetic-prescription.png", "image/png")
+        val id = UUID.randomUUID().toString()
+        val record = InformationRecordCodec.decode("""{"schema_version":"information-record.v1","record_id":"$id","owner_app":"healthtrace","record_type":"healthtrace.prescription","title":"Synthetic prescription QA","captured_at":"2026-11-14T10:00:00+09:00","sources":[{"source_id":"text","kind":"text","text":"synthetic"}],"fields":[{"key":"prescription","value_type":"json","source_ids":["text"],"value":{"schema_version":"healthtrace.prescription.v1","prescribed_on":null,"medicines":[{"name":"코데날정"}]}}],"references":[]}""")
+        model.store.save(record)
+        var photoId: String? = null
+        var prescriptionId: String? = null
+        compose.setContent { ReceiptOcrTheme {
+            InformationArchiveScreen(model, {}, {}, {}, {}, {},
+                onHealthSource = { photoId = it.id }, onHealthPrescription = { prescriptionId = it })
+        } }
+        compose.runOnIdle { model.refresh() }
+        compose.waitUntil(10_000) { !model.busy && model.snapshot.sources.size == 1 }
+        scroll("health_prescription_photo"); compose.onNodeWithTag("health_prescription_photo").performClick()
+        compose.runOnIdle { assertEquals(source.id, photoId); model.pane = 2; model.selectedRecordId = id }
+        scroll("health_prescription_json"); compose.onNodeWithTag("health_prescription_json").assertIsNotEnabled()
+        compose.runOnIdle { model.review(id) }
+        compose.waitUntil(10_000) { !model.busy && model.snapshot.records.single().reviewed }
+        scroll("health_prescription_json"); compose.onNodeWithTag("health_prescription_json").performClick()
+        compose.runOnIdle {
+            assertEquals(id, prescriptionId)
+            val output = ByteArrayOutputStream(); model.store.exportSource(source.id, output)
+            assertArrayEquals(bytes, output.toByteArray())
+        }
+    }
+
     @Test fun sourceToHealthRecordReviewAndExportWorksOnAndroid() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val model = InformationArchiveViewModel(context.applicationContext as Application, File(context.cacheDir, "information-ui-${UUID.randomUUID()}"))

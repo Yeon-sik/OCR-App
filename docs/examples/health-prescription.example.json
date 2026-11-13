@@ -1,0 +1,29 @@
+{
+  "schema_version": "information-record.v1",
+  "record_id": "1fd31b80-962e-4aa3-a7fe-0a641c69d280",
+  "owner_app": "healthtrace",
+  "record_type": "healthtrace.prescription",
+  "title": "형식 설명용 가상 처방전",
+  "captured_at": "2026-11-14T10:00:00+09:00",
+  "sources": [
+    {"source_id":"leaflet-text","kind":"text","text":"형식 설명용 예시. 코데날정 / 삼아제약. 이 발췌에는 개인 복용량·횟수·증상·처방 병원이 없음."}
+  ],
+  "fields": [
+    {
+      "key":"prescription",
+      "value_type":"json",
+      "source_ids":["leaflet-text"],
+      "value":{
+        "schema_version":"healthtrace.prescription.v1",
+        "prescribed_on":null,
+        "hospital":null,
+        "pharmacy":null,
+        "symptoms":[],
+        "medicines":[
+          {"name":"코데날정","manufacturer":"삼아제약","dose_quantity":null,"dose_unit":null,"instructions":null}
+        ]
+      }
+    }
+  ],
+  "references":[]
+}
