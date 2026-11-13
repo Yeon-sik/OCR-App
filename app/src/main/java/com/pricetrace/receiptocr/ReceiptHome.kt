@@ -38,6 +38,7 @@ internal fun SessionListScreen(
     onWorkflowSelected: (OcrWorkflowType) -> Unit, onSelectSession: (String) -> Unit,
     onDeleteSession: (String) -> Unit, onShowApiSettings: () -> Unit,
     onOpenInformationArchive: () -> Unit = {},
+    onOpenCarePlaces: () -> Unit = {},
 ) {
     var newWork by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = newWork) { newWork = false }
@@ -112,6 +113,7 @@ internal fun SessionListScreen(
                     modifier = Modifier.semantics { heading() })
             }
             item { OutlinedButton(onClick = onOpenInformationArchive, enabled = !isBusy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("information_archive_button")) { Text("모든 원문 · 정보 보관함") } }
+            item { OutlinedButton(onClick = onOpenCarePlaces, enabled = !isBusy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("병원·약국 등록 · 결제 연결") } }
             item { Text("진행 중 · 최근 작업", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() }) }
             if (sessions.isEmpty()) item { Text("아직 작업이 없습니다. 촬영하거나 검수 자료를 가져오세요.") }
             items(sessions.sortedBy { it.lastError == null }, key = { it.documentId }) { session ->

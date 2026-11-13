@@ -121,6 +121,14 @@ fun ReceiptOcrApp(
         onDeleteSession = viewModel::deleteSession,
         onShowApiSettings = viewModel::showApiSettings,
         onOpenInformationArchive = { context.startActivity(Intent(context, InformationArchiveActivity::class.java)) },
+        onOpenCarePlaces = {
+            val merchant = uiState.receipt?.merchant
+            context.startActivity(Intent(context, CarePlaceActivity::class.java).apply {
+                putExtra("care_name", listOfNotNull(merchant?.name, merchant?.branchName).filter { it.isNotBlank() }.joinToString(" "))
+                putExtra("care_address", merchant?.address)
+                putExtra("care_phone", merchant?.phone)
+            })
+        },
         onStartOcr = viewModel::startOcr,
         onNutritionProductNameChanged = viewModel::updateNutritionProductName,
         onNutritionBrandChanged = viewModel::updateNutritionBrand,

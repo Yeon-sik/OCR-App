@@ -37,6 +37,21 @@ class InformationDeliveryGateway(
     }
     fun signOut(owner: InformationOwner) = connections.clearSession(owner)
 
+    // Narrow RPC bridge: credentials stay in the existing encrypted owner stores.
+    internal suspend fun careRpc(owner: InformationOwner, rpc: String, body: JsonObject, publicRead: Boolean = false): JsonElement {
+        val allowed = when (owner) {
+            InformationOwner.PRICETRACE -> setOf("search_care_places_v1", "register_care_place_v1")
+            InformationOwner.CASHOS -> setOf("finance_care_expenses_v1", "finance_link_care_place_v1")
+            else -> emptySet()
+        }
+        require(rpc in allowed && (!publicRead || rpc == "search_care_places_v1"))
+        val config = if (publicRead) checkedConnection(owner) else authenticate(owner).first
+        val response = request(config, "POST", "/rest/v1/rpc/$rpc", body.toString(), authenticated = !publicRead)
+        checkStatus(response, "병원·약국 연결")
+        checkUnchanged(owner, config)
+        return InformationRecordCodec.parseValue(response.body, 512 * 1024)
+    }
+
     suspend fun signIn(owner: InformationOwner, email: String, password: String) {
         val config = checkedConnection(owner)
         require(email.isNotBlank() && password.isNotBlank()) { "이메일과 비밀번호를 입력하세요." }
