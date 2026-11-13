@@ -224,6 +224,7 @@ fun ReceiptOcrContent(
     onDeleteSession: (String) -> Unit = {},
     onShowApiSettings: () -> Unit = {},
     onOpenInformationArchive: () -> Unit = {},
+    onOpenCarePlaces: () -> Unit = {},
     onStartOcr: () -> Unit = {},
     onNutritionProductNameChanged: (String) -> Unit = {},
     onNutritionBrandChanged: (String) -> Unit = {},
@@ -443,6 +444,9 @@ fun ReceiptOcrContent(
                 )
             }
             CompositionLocalProvider(LocalReviewSource provides { selection, open -> reviewSource = selection; if (open) sourceOpen = true }) {
+            if (uiState.receipt != null && uiState.screen in setOf(AppScreen.FIELD_REVIEW, AppScreen.JSON_PREVIEW, AppScreen.RECONCILIATION)) {
+                OutlinedButton(onClick = onOpenCarePlaces, modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp)) { Text("이 영수증의 병원·약국 등록") }
+            }
             Box(Modifier.weight(1f).fillMaxWidth()) {
             when (uiState.screen) {
                 AppScreen.SESSION_LIST -> SessionListScreen(
@@ -458,6 +462,7 @@ fun ReceiptOcrContent(
                     onDeleteSession = onDeleteSession,
                     onShowApiSettings = onShowApiSettings,
                     onOpenInformationArchive = onOpenInformationArchive,
+                    onOpenCarePlaces = onOpenCarePlaces,
                 )
                 AppScreen.IMPORT_PREVIEW -> uiState.importPreview?.let { preview ->
                     ImportPreviewScreen(
